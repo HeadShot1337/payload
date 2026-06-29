@@ -22,7 +22,7 @@
 #include <bcrypt.h>
 #include <cstdlib>
 #include "bootstrapper.h"
-#include "../../include/json.hpp"
+#include "json.hpp"
 #include "sqlite3.h"
 
 #pragma comment(lib, "ws2_32.lib")
