@@ -1,6 +1,0 @@
-src/main.cpp:840:7: error: expected unqualified-id before 'catch'
-  840 |     } catch (...) {}
-      |       ^~~~~
-src/main.cpp:841:1: error: expected declaration before '}' token
-  841 | }
-      | ^
