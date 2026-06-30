@@ -961,18 +961,63 @@ begin
 end;
 
 procedure TForm1.UninstallClient1Click(Sender: TObject);
+var
+  SelectedLine: TncLine;
+  JSONObj: TJSONObject;
 begin
-//
+  if ListView1.Selected = nil then Exit;
+
+  SelectedLine := TncLine(ListView1.Selected.Data);
+  if SelectedLine = nil then Exit;
+
+  if MessageBox(Handle, 'Seçili client silinsin mi?', 'Uninstall', MB_YESNO or MB_ICONQUESTION) = IDYES then
+  begin
+    JSONObj := TJSONObject.Create;
+    try
+      JSONObj.AddPair('action', 'uninstall');
+      FServerManager.SendJSON(SelectedLine, JSONObj);
+    finally
+      JSONObj.Free;
+    end;
+  end;
 end;
 
 procedure TForm1.CloseClient1Click(Sender: TObject);
+var
+  SelectedLine: TncLine;
+  JSONObj: TJSONObject;
 begin
-//
+  if ListView1.Selected = nil then Exit;
+
+  SelectedLine := TncLine(ListView1.Selected.Data);
+  if SelectedLine = nil then Exit;
+
+  JSONObj := TJSONObject.Create;
+  try
+    JSONObj.AddPair('action', 'close');
+    FServerManager.SendJSON(SelectedLine, JSONObj);
+  finally
+    JSONObj.Free;
+  end;
 end;
 
 procedure TForm1.ReconnectClient1Click(Sender: TObject);
+var
+  SelectedLine: TncLine;
+  JSONObj: TJSONObject;
 begin
-//
+  if ListView1.Selected = nil then Exit;
+
+  SelectedLine := TncLine(ListView1.Selected.Data);
+  if SelectedLine = nil then Exit;
+
+  JSONObj := TJSONObject.Create;
+  try
+    JSONObj.AddPair('action', 'reconnect');
+    FServerManager.SendJSON(SelectedLine, JSONObj);
+  finally
+    JSONObj.Free;
+  end;
 end;
 
 procedure TForm1.UpdateStatusBar;
