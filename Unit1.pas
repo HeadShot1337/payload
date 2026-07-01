@@ -3,7 +3,7 @@
 interface
 
 uses
-  Winapi.Windows, Winapi.Messages, Winapi.Winsock2,
+  Winapi.Windows, Winapi.Messages, Winapi.CommCtrl, Winapi.Winsock2,
   System.SysUtils, System.Variants, System.Classes,
   System.JSON,
   Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs,
@@ -100,6 +100,7 @@ type
     FCurrentPort  : Integer;
     FStartTime    : TDateTime;
     FTimerUI      : TTimer;
+    ImageList3    : TImageList;
     FLastIdleTime : Int64;
     FLastKernelTime: Int64;
     FLastUserTime : Int64;
@@ -129,6 +130,8 @@ type
     procedure OnTimerUI(Sender: TObject);
     function GetLocalIP: string;
     function GetCPUUsage: Double;
+    function GetCountryIndex(const ACode: string): Integer;
+    procedure ListView3AdvancedCustomDrawSubItem(Sender: TCustomListView; Item: TListItem; SubItem: Integer; State: TCustomDrawState; Stage: TCustomDrawStage; var DefaultDraw: Boolean);
 
   public
     procedure AfterConstruction; override;
@@ -189,6 +192,13 @@ begin
   ListView3.Columns[0].Width := 50;
   ListView3.Columns[1].Width := 150;
   ListView3.Columns[2].Width := 150;
+  ListView3.OnAdvancedCustomDrawSubItem := ListView3AdvancedCustomDrawSubItem;
+
+  ImageList3 := TImageList.Create(Self);
+  ImageList3.Width := 24;
+  ImageList3.Height := 24;
+  ListView3.SmallImages := ImageList3;
+  SendMessage(ListView3.Handle, LVM_SETITEMSPACING, 0, MakeLParam(0, 32));
 
   FTimerUI := TTimer.Create(Self);
   FTimerUI.Interval := 1000;
@@ -823,8 +833,9 @@ begin
         ListView3.Items.BeginUpdate;
         try
           Item := ListView3.Items.Insert(0);
-          Item.Caption := Info.Country;
-          Item.SubItems.Add(Info.ID);
+          Item.Caption := '';
+          Item.ImageIndex := GetCountryIndex(Info.Country);
+          Item.SubItems.Add(Info.ID + '|' + Info.IPAddress);
           Item.SubItems.Add(FormatDateTime('yyyy-mm-dd hh:nn:ss', Now));
         finally
           ListView3.Items.EndUpdate;
@@ -1155,5 +1166,78 @@ begin
   end;
 end;
 
+
+function TForm1.GetCountryIndex(const ACode: string): Integer;
+const
+  Codes: array[0..254] of string = ('AD', 'AE', 'AF', 'AG', 'AI', 'AL', 'AM', 'AO', 'AR', 'AS', 'AT', 'AU', 'AW', 'AX', 'AZ', 'BA', 'BB', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ', 'BL', 'BM', 'BN', 'BO', 'BR', 'BS', 'BT', 'BV', 'BW', 'BY', 'BZ', 'CA', 'CC', 'CD', 'CF', 'CG', 'CH', 'CI', 'CK', 'CL', 'CM', 'CN', 'CO', 'CR', 'CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DE', 'DJ', 'DK', 'DM', 'DO', 'DZ', 'EC', 'EE', 'EG', 'ER', 'ES', 'ET', 'EU', 'FI', 'FJ', 'FK', 'FM', 'FO', 'FR', 'GA', 'GB-ENG', 'GB-NIR', 'GB-SCT', 'GB-WLS', 'GB-ZET', 'GB', 'GD', 'GE', 'GF', 'GG', 'GH', 'GI', 'GL', 'GM', 'GN', 'GP', 'GQ', 'GR', 'GS', 'GT', 'GU', 'GW', 'GY', 'HK', 'HM', 'HN', 'HR', 'HT', 'HU', 'ID', 'IE', 'IL', 'IM', 'IN', 'IO', 'IQ', 'IR', 'IS', 'IT', 'JE', 'JM', 'JO', 'JP', 'KE', 'KG', 'KH', 'KI', 'KM', 'KN', 'KP', 'KR', 'KW', 'KY', 'KZ', 'LA', 'LB', 'LC', 'LGBT', 'LI', 'LK', 'LR', 'LS', 'LT', 'LU', 'LV', 'LY', 'MA', 'MC', 'MD', 'ME', 'MF', 'MG', 'MH', 'MK', 'ML', 'MM', 'MN', 'MO', 'MP', 'MQ', 'MR', 'MS', 'MT', 'MU', 'MV', 'MW', 'MX', 'MY', 'MZ', 'NA', 'NC', 'NE', 'NF', 'NG', 'NI', 'NL', 'NO', 'NP', 'NR', 'NU', 'NZ', 'OM', 'PA', 'PE', 'PF', 'PG', 'PH', 'PK', 'PL', 'PM', 'PN', 'PR', 'PS', 'PT', 'PW', 'PY', 'QA', 'RE', 'RO', 'RS', 'RU', 'RW', 'SA', 'SB', 'SC', 'SD', 'SE', 'SG', 'SH', 'SI', 'SJ', 'SK', 'SL', 'SM', 'SN', 'SO', 'SR', 'SS', 'ST', 'SV', 'SX', 'SY', 'SZ', 'TC', 'TD', 'TF', 'TG', 'TH', 'TJ', 'TK', 'TL', 'TM', 'TN', 'TO', 'TR', 'TT', 'TV', 'TW', 'TZ', 'UA', 'UG', 'UM', 'US-CA', 'US', 'UY', 'UZ', 'VA', 'VC', 'VE', 'VG', 'VI', 'VN', 'VU', 'WF', 'WS', 'XK', 'YE', 'YT', 'ZA', 'ZM', 'ZW');
+var
+  i: Integer;
+begin
+  Result := -1;
+  for i := Low(Codes) to High(Codes) do
+    if SameText(Codes[i], ACode) then
+    begin
+      Result := i;
+      Break;
+    end;
+end;
+
+procedure TForm1.ListView3AdvancedCustomDrawSubItem(Sender: TCustomListView;
+  Item: TListItem; SubItem: Integer; State: TCustomDrawState;
+  Stage: TCustomDrawStage; var DefaultDraw: Boolean);
+var
+  R: TRect;
+  S, Name, IP: string;
+  P: Integer;
+begin
+  if SubItem = 1 then
+  begin
+    DefaultDraw := False;
+
+    // Get subitem rectangle
+    R := Item.DisplayRect(drBounds);
+    ListView_GetSubItemRect(Sender.Handle, Item.Index, SubItem, LVIR_BOUNDS, @R);
+
+    S := Item.SubItems[0];
+    P := Pos('|', S);
+    if P > 0 then
+    begin
+      Name := Copy(S, 1, P - 1);
+      IP := Copy(S, P + 1, MaxInt);
+    end
+    else
+    begin
+      Name := S;
+      IP := '';
+    end;
+
+    if Item.Selected then
+    begin
+      Sender.Canvas.Brush.Color := clHighlight;
+      Sender.Canvas.Font.Color := clHighlightText;
+    end
+    else
+    begin
+      Sender.Canvas.Brush.Color := Sender.Color;
+      Sender.Canvas.Font.Color := Sender.Font.Color;
+    end;
+
+    Sender.Canvas.FillRect(R);
+
+    // Draw Name
+    Sender.Canvas.Font.Style := [fsBold];
+    Sender.Canvas.TextOut(R.Left + 5, R.Top + 2, Name);
+
+    // Draw IP below
+    Sender.Canvas.Font.Style := [];
+    Sender.Canvas.Font.Size := Sender.Canvas.Font.Size - 1;
+    if not Item.Selected then
+      Sender.Canvas.Font.Color := clGray;
+    Sender.Canvas.TextOut(R.Left + 5, R.Top + 16, IP);
+
+    // Reset Font size for next draw
+    Sender.Canvas.Font.Size := Sender.Canvas.Font.Size + 1;
+  end;
+end;
 end.
 
