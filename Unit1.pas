@@ -1113,7 +1113,7 @@ var
   Name: AnsiString;
 begin
   Result := '127.0.0.1';
-  if WSAStartup(-bash202, WSAData) = 0 then
+  if WSAStartup($0202, WSAData) = 0 then
   try
     SetLength(Name, 255);
     GetHostName(PAnsiChar(Name), 255);
