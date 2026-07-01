@@ -3,27 +3,19 @@
 To properly display the flag icons in the application, follow these steps:
 
 1. **Prepare Resources**:
-   - The application is currently set up to use a `TImageList` (ImageList3) linked to `ListView3`.
-   - Since the icons you provided are in `.svg` format, you have two options in Delphi:
+   - The application is set up to use **ImageList1** (added from the Delphi designer) linked to `ListView3`.
+   - Since the icons you provided are in `.svg` format, you have two options:
 
-     **Option A: Using SVG to Bitmap conversion (Recommended for simplicity)**
+     **Option A: Using SVG to Bitmap conversion (Recommended)**
      - Convert your `.svg` files to `.png` or `.bmp` (24x24 or 32x32 pixels recommended).
-     - Add these icons to the `ImageList3` component in the Delphi Form Designer.
-     - **CRITICAL**: The order of the icons in `ImageList3` MUST match exactly the order in the `GetCountryIndex` function in `Unit1.pas`:
-       (AD, AE, AF, AG, AI, AL, AM, AO, AR, AS, AT, AU, AW, AX, AZ, BA, BB, BD, BE, BF, BG, BH, BI, BJ, BL, BM, BN, BO, BR, BS, BT, BV, BW, BY, BZ, CA, CC, CD, CF, CG, CH, CI, CK, CL, CM, CN, CO, CR, CU, CV, CW, CX, CY, CZ, DE, DJ, DK, DM, DO, DZ, EC, EE, EG, ER, ES, ET, EU, FI, FJ, FK, FM, FO, FR, GA, GB-ENG, GB-NIR, GB-SCT, GB-WLS, GB-ZET, GB, GD, GE, GF, GG, GH, GI, GL, GM, GN, GP, GQ, GR, GS, GT, GU, GW, GY, HK, HM, HN, HR, HT, HU, ID, IE, IL, IM, IN, IO, IQ, IR, IS, IT, JE, JM, JO, JP, KE, KG, KH, KI, KM, KN, KP, KR, KW, KY, KZ, LA, LB, LC, LGBT, LI, LK, LR, LS, LT, LU, LV, LY, MA, MC, MD, ME, MF, MG, MH, MH, MK, ML, MM, MN, MO, MP, MQ, MR, MS, MT, MU, MV, MW, MX, MY, MZ, NA, NC, NE, NF, NG, NI, NL, NO, NP, NR, NU, NZ, OM, PA, PE, PF, PG, PH, PK, PL, PM, PN, PR, PS, PT, PW, PY, QA, RE, RO, RS, RU, RW, SA, SB, SC, SD, SE, SG, SH, SI, SJ, SK, SL, SM, SN, SO, SR, SS, ST, SV, SX, SY, SZ, TC, TD, TF, TG, TH, TJ, TK, TL, TM, TN, TO, TR, TT, TV, TW, TZ, UA, UG, UM, US-CA, US, UY, UZ, VA, VC, VE, VG, VI, VN, VU, WF, WS, XK, YE, YT, ZA, ZM, ZW)
+     - Add these icons to the **ImageList1** component in the Delphi Form Designer.
+     - **CRITICAL**: The order of the icons in `ImageList1` MUST match exactly the order in the `GetCountryIndex` function in `Unit1.pas`:
+       (AD, AE, AF, AG, AI, AL, AM, AO, AR, AS, AT, AU, AW, AX, AZ, BA, BB, BD, BE, BF, BG, BH, BI, BJ, BL, BM, BN, BO, BR, BS, BT, BV, BW, BY, BZ, CA, CC, CD, CF, CG, CH, CI, CK, CL, CM, CN, CO, CR, CU, CV, CW, CX, CY, CZ, DE, DJ, DK, DM, DO, DZ, EC, EE, EG, ER, ES, ET, EU, FI, FJ, FK, FM, FO, FR, GA, GB-ENG, GB-NIR, GB-SCT, GB-WLS, GB-ZET, GB, GD, GE, GF, GG, GH, GI, GL, GM, GN, GP, GQ, GR, GS, GT, GU, GW, GY, HK, HM, HN, HR, HT, HU, ID, IE, IL, IM, IN, IO, IQ, IR, IS, IT, JE, JM, JO, JP, KE, KG, KH, KI, KM, KN, KP, KR, KW, KY, KZ, LA, LB, LC, LGBT, LI, LK, LR, LS, LT, LU, LV, LY, MA, MC, MD, ME, MF, MG, MH, MK, ML, MM, MN, MO, MP, MQ, MR, MS, MT, MU, MV, MW, MX, MY, MZ, NA, NC, NE, NF, NG, NI, NL, NO, NP, NR, NU, NZ, OM, PA, PE, PF, PG, PH, PK, PL, PM, PN, PR, PS, PT, PW, PY, QA, RE, RO, RS, RU, RW, SA, SB, SC, SD, SE, SG, SH, SI, SJ, SK, SL, SM, SN, SO, SR, SS, ST, SV, SX, SY, SZ, TC, TD, TF, TG, TH, TJ, TK, TL, TM, TN, TO, TR, TT, TV, TW, TZ, UA, UG, UM, US-CA, US, UY, UZ, VA, VC, VE, VG, VI, VN, VU, WF, WS, XK, YE, YT, ZA, ZM, ZW)
 
      **Option B: Using a native SVG library (e.g., Skia4Delphi)**
-     - If you are using a modern Delphi version (11+), Skia4Delphi is included.
-     - You can use `TSVGImageList` instead of `TImageList`.
-     - Load all `.svg` files directly into the `TSVGImageList`.
-     - Ensure the "Name" or "Index" of each SVG matches the expected order.
+     - If you are using a modern Delphi version (11+), use `TSVGImageList` and rename it to `ImageList1` or update the code to match.
 
-2. **Code Integration**:
-   - The code already includes `GetCountryIndex` which returns the correct index for `ImageList3`.
-   - If you decide to load SVG files from a directory at runtime, you can modify `AfterConstruction` in `Unit1.pas` to iterate through the files and add them to the ImageList.
-
-3. **SVG File Names**:
-   - Ensure the country codes received from the client match the filenames (e.g., if client says 'TR', the system looks for index of 'TR' and expects the Turkish flag icon at that index).
-
-4. **UI Layout**:
-   - The `ListView3` row height has been set to 32 pixels via code (`LVM_SETITEMSPACING`) to comfortably accommodate the two lines (Name and IP) and the 24x24 icons.
+2. **UI Layout**:
+   - The Name column in `ListView3` now displays the Client ID and IP on two separate lines.
+   - The flag icons will appear in the first column.
+   - The height of the rows is determined by the `Height` property of **ImageList1** (ensure it's set to at least 24 or 32 for best visibility).
