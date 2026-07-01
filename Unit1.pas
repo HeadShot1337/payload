@@ -72,6 +72,7 @@ type
     Panel1: TPanel;
     Panel2: TPanel;
     ListView3: TListView;
+    ImageList1: TImageList;
 
     procedure Button1Click(Sender: TObject);
     procedure SendMessage1Click(Sender: TObject);
@@ -1254,8 +1255,8 @@ begin
     end
     else
     begin
-      Sender.Canvas.Brush.Color := Sender.Color;
-      Sender.Canvas.Font.Color := Sender.Font.Color;
+      Sender.Canvas.Brush.Color := TListView(Sender).Color;
+      Sender.Canvas.Font.Color := TListView(Sender).Font.Color;
     end;
 
     Sender.Canvas.FillRect(R);
