@@ -3,7 +3,7 @@
 interface
 
 uses
-  Winapi.Windows, Winapi.Messages,
+  Winapi.Windows, Winapi.Messages, Winapi.Winsock2,
   System.SysUtils, System.Variants, System.Classes,
   System.JSON,
   Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs,
@@ -98,6 +98,11 @@ type
   private
     FServerManager: TServerManager;
     FCurrentPort  : Integer;
+    FStartTime    : TDateTime;
+    FTimerUI      : TTimer;
+    FLastIdleTime : Int64;
+    FLastKernelTime: Int64;
+    FLastUserTime : Int64;
 
     procedure OnClientConnected   (const Info: TClientInfo);
     procedure OnClientUpdated     (const Info: TClientInfo);
@@ -121,6 +126,9 @@ type
     procedure AddOrUpdateListView(const Info: TClientInfo);
     procedure RemoveFromListView(aLine: TncLine);
     procedure UpdateStatusBar;
+    procedure OnTimerUI(Sender: TObject);
+    function GetLocalIP: string;
+    function GetCPUUsage: Double;
 
   public
     procedure AfterConstruction; override;
@@ -169,6 +177,23 @@ begin
   EnsureOpenURLMenuItem;
 
   ListView1.OnMouseDown := ListView1MouseDown;
+
+  FStartTime := Now;
+
+  ListView3.ViewStyle := vsReport;
+  ListView3.GridLines := True;
+  ListView3.Columns.Clear;
+  ListView3.Columns.Add.Caption := 'Flag';
+  ListView3.Columns.Add.Caption := 'Name';
+  ListView3.Columns.Add.Caption := 'Connected at';
+  ListView3.Columns[0].Width := 50;
+  ListView3.Columns[1].Width := 150;
+  ListView3.Columns[2].Width := 150;
+
+  FTimerUI := TTimer.Create(Self);
+  FTimerUI.Interval := 1000;
+  FTimerUI.OnTimer := OnTimerUI;
+  FTimerUI.Enabled := True;
 end;
 
 procedure TForm1.BeforeDestruction;
@@ -789,8 +814,22 @@ begin
 
   TThread.Queue(nil, TThreadProcedure(
     procedure
+    var
+      Item: TListItem;
     begin
-      if Assigned(FServerManager) then UpdateStatusBar;
+      if Assigned(FServerManager) then
+      begin
+        UpdateStatusBar;
+        ListView3.Items.BeginUpdate;
+        try
+          Item := ListView3.Items.Insert(0);
+          Item.Caption := Info.Country;
+          Item.SubItems.Add(Info.ID);
+          Item.SubItems.Add(FormatDateTime('yyyy-mm-dd hh:nn:ss', Now));
+        finally
+          ListView3.Items.EndUpdate;
+        end;
+      end;
     end));
 end;
 
@@ -1029,6 +1068,91 @@ procedure TForm1.UpdateStatusBar;
 begin
   StatusBar3.Panels[0].Text :=
     'Clients Online [' + IntToStr(FServerManager.ClientCount) + ']';
+end;
+
+
+procedure TForm1.OnTimerUI(Sender: TObject);
+var
+  MemStatus: TMemoryStatusEx;
+  Uptime: TDateTime;
+  Days, Hours, Mins, Secs: Word;
+  Usage: Double;
+begin
+  if not Assigned(FServerManager) then Exit;
+
+  Label1.Caption := 'Server IP: ' + GetLocalIP;
+  Label2.Caption := 'Listening: ' + IntToStr(FCurrentPort);
+  Label3.Caption := 'Received Data: ' + FormatFloat('0.##', FServerManager.TotalReceivedBytes / 1048576) + ' MB';
+  Label4.Caption := 'Sent Data: ' + FormatFloat('0.##', FServerManager.TotalSentBytes / 1048576) + ' MB';
+  Label5.Caption := 'Online: ' + IntToStr(FServerManager.ClientCount);
+
+  Usage := GetCPUUsage;
+  Label6.Caption := 'CPU Usage: ' + FormatFloat('0', Usage) + '%';
+  Label8.Caption := 'Overload: ' + FormatFloat('0', Usage) + '%';
+
+  MemStatus.dwLength := SizeOf(MemStatus);
+  if GlobalMemoryStatusEx(MemStatus) then
+  begin
+    Label7.Caption := 'Memory Usage: ' +
+      IntToStr((MemStatus.ullTotalPhys - MemStatus.ullAvailPhys) div 1048576) + ' MB / ' +
+      IntToStr(MemStatus.ullTotalPhys div 1048576) + ' MB';
+  end;
+
+  Uptime := Now - FStartTime;
+  Secs := Trunc(Uptime * 86400) mod 60;
+  Mins := Trunc(Uptime * 1440) mod 60;
+  Hours := Trunc(Uptime * 24) mod 24;
+  Days := Trunc(Uptime);
+  Label9.Caption := 'Uptime: ' + IntToStr(Days) + 'd ' + IntToStr(Hours) + 'h ' + IntToStr(Mins) + 'm ' + IntToStr(Secs) + 's';
+end;
+
+function TForm1.GetLocalIP: string;
+var
+  WSAData: TWSAData;
+  HostEnt: PHostEnt;
+  Name: AnsiString;
+begin
+  Result := '127.0.0.1';
+  if WSAStartup(-bash202, WSAData) = 0 then
+  try
+    SetLength(Name, 255);
+    GetHostName(PAnsiChar(Name), 255);
+    HostEnt := GetHostByName(PAnsiChar(Name));
+    if Assigned(HostEnt) and Assigned(HostEnt^.h_addr_list) and Assigned(HostEnt^.h_addr_list^) then
+      Result := string(inet_ntoa(PInAddr(HostEnt^.h_addr_list^)^));
+  finally
+    WSACleanup;
+  end;
+end;
+
+function TForm1.GetCPUUsage: Double;
+var
+  IdleTime, KernelTime, UserTime: TFileTime;
+  CurrentIdle, CurrentKernel, CurrentUser: Int64;
+  IdleDiff, KernelDiff, UserDiff, TotalDiff: Int64;
+begin
+  Result := 0;
+  if GetSystemTimes(IdleTime, KernelTime, UserTime) then
+  begin
+    CurrentIdle := Int64(IdleTime.dwLowDateTime) or (Int64(IdleTime.dwHighDateTime) shl 32);
+    CurrentKernel := Int64(KernelTime.dwLowDateTime) or (Int64(KernelTime.dwHighDateTime) shl 32);
+    CurrentUser := Int64(UserTime.dwLowDateTime) or (Int64(UserTime.dwHighDateTime) shl 32);
+
+    if FLastIdleTime <> 0 then
+    begin
+      IdleDiff := CurrentIdle - FLastIdleTime;
+      KernelDiff := CurrentKernel - FLastKernelTime;
+      UserDiff := CurrentUser - FLastUserTime;
+      TotalDiff := KernelDiff + UserDiff;
+
+      if TotalDiff > 0 then
+        Result := (TotalDiff - IdleDiff) * 100 / TotalDiff;
+    end;
+
+    FLastIdleTime := CurrentIdle;
+    FLastKernelTime := CurrentKernel;
+    FLastUserTime := CurrentUser;
+  end;
 end;
 
 end.

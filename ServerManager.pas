@@ -123,6 +123,8 @@ type
     FReadBuffers      : TDictionary<TncLine, TBytes>;
     FHeartbeatTimer   : TTimer;
     FIsStopping       : Boolean;
+    FTotalReceivedBytes: Int64;
+    FTotalSentBytes: Int64;
 
     FOnClientConnected    : TClientEvent;
     FOnClientUpdated      : TClientEvent;
@@ -217,6 +219,9 @@ type
     procedure UnregisterHiddenVNCForm(aLine: TncLine);
     function  GetHiddenVNCForm       (aLine: TncLine): TForm10;
 
+    property TotalReceivedBytes: Int64 read FTotalReceivedBytes;
+    property TotalSentBytes: Int64 read FTotalSentBytes;
+
     property OnClientConnected    : TClientEvent              read FOnClientConnected     write FOnClientConnected;
     property OnClientUpdated      : TClientEvent              read FOnClientUpdated       write FOnClientUpdated;
     property OnClientDisconnected : TClientRemoveEvent        read FOnClientDisconnected  write FOnClientDisconnected;
@@ -271,6 +276,8 @@ constructor TServerManager.Create(aServer: TncTCPServer);
 begin
   inherited Create;
   FIsStopping       := False;
+  FTotalReceivedBytes := 0;
+  FTotalSentBytes     := 0;
   FServer           := aServer;
   FLock             := TCriticalSection.Create;
   FClients          := TDictionary<TncLine, TClientInfo>.Create;
@@ -842,6 +849,8 @@ begin
   if DataLen > 0 then
     Move(Data[0], SendBuf[SizeOf(TPacketHeader)], DataLen);
 
+  FTotalSentBytes := FTotalSentBytes + Length(SendBuf);
+
   IP := '';
   if TryGetClientInfo(aLine, Info) then
     IP := Info.IPAddress;
@@ -872,6 +881,8 @@ begin
 
   DataStr   := JSONObj.ToJSON + #13#10;
   DataBytes := TEncoding.UTF8.GetBytes(DataStr);
+
+  FTotalSentBytes := FTotalSentBytes + Length(DataBytes);
 
   Action := '';
   if Assigned(JSONObj.Values['action']) then
@@ -1119,6 +1130,8 @@ var
   BP           : TBinaryPacket;
 begin
   if aBufCount <= 0 then Exit;
+
+  FTotalReceivedBytes := FTotalReceivedBytes + aBufCount;
 
   Messages      := TList<string>.Create;
   BinaryPackets := TList<TBinaryPacket>.Create;
