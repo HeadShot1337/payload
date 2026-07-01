@@ -826,6 +826,7 @@ begin
         ListView3.Items.BeginUpdate;
         try
           Item := ListView3.Items.Insert(0);
+          Item.Data := Info.LineHandle;
           Item.Caption := '';
           Item.ImageIndex := GetCountryIndex(Info.Country);
           Item.SubItems.Add(Info.IPAddress);
@@ -852,6 +853,7 @@ procedure TForm1.OnClientDisconnected(aLine: TncLine);
 begin
   if not Assigned(FServerManager) then Exit;
   RemoveFromListView(aLine);
+  // No specific ListView3 remove requested, but keeping main list sync
 
   TThread.Queue(nil, TThreadProcedure(
     procedure
@@ -982,12 +984,23 @@ begin
 
       Item.Caption     := PreferClientValue(Info.IPAddress,   Item.Caption);
       Item.SubItems[0] := PreferClientValue(Info.Country,     Item.SubItems[0]);
+      Item.ImageIndex := GetCountryIndex(Info.Country);
       Item.SubItems[1] := PreferClientValue(Info.ID,          Item.SubItems[1]);
       Item.SubItems[2] := PreferClientValue(Info.DesktopName, Item.SubItems[2]);
       Item.SubItems[3] := PreferClientValue(Info.OS,          Item.SubItems[3]);
       Item.SubItems[4] := PreferClientValue(Info.Date,        Item.SubItems[4]);
       Item.SubItems[5] := PreferClientValue(Info.UAC,         Item.SubItems[5]);
-      Item.SubItems[6] := PreferClientValue(Info.AntiVirus,   Item.SubItems[6]);
+      
+
+      // Update flags and IP in ListView3 (history)
+      for i := 0 to ListView3.Items.Count - 1 do
+      begin
+        if ListView3.Items[i].Data = Info.LineHandle then
+        begin
+          ListView3.Items[i].ImageIndex := GetCountryIndex(Info.Country);
+          ListView3.Items[i].SubItems[0] := Info.IPAddress;
+        end;
+      end;
     end));
 end;
 
