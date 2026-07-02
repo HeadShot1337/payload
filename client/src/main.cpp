@@ -412,7 +412,7 @@ private:
     }
 
 public:
-        void start(const char* host, int port) {
+    void start(const char* host, int port) {
         while (true) {
             WSADATA wsa;
             if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -442,28 +442,6 @@ public:
                 }
                 if (res) freeaddrinfo(res);
             }
-            WSACleanup();
-            this_thread::sleep_for(chrono::seconds(5));
-        }
-    }, *res = NULL;
-            hints.ai_family = AF_INET;
-            hints.ai_socktype = SOCK_STREAM;
-
-            string port_str = to_string(port);
-            if (getaddrinfo(host, port_str.c_str(), &hints, &res) == 0) {
-                sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-                cout << "[...] Connecting to: " << host << ":" << port << endl;
-
-                if (connect(sock, res->ai_addr, (int)res->ai_addrlen) == 0) {
-                    freeaddrinfo(res);
-                cout << "[+] Connection successful!" << endl;
-                connected = true;
-
-                send_initial_info();
-                handle_server_messages();
-            }
-
-            closesocket(sock);
             WSACleanup();
             this_thread::sleep_for(chrono::seconds(5));
         }
