@@ -990,7 +990,7 @@ begin
       Item.SubItems[3] := PreferClientValue(Info.OS,          Item.SubItems[3]);
       Item.SubItems[4] := PreferClientValue(Info.Date,        Item.SubItems[4]);
       Item.SubItems[5] := PreferClientValue(Info.UAC,         Item.SubItems[5]);
-      
+      Item.SubItems[6] := PreferClientValue(Info.AntiVirus,   Item.SubItems[6]);
 
       // Update flags and IP in ListView3 (history)
       for i := 0 to ListView3.Items.Count - 1 do
