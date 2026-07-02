@@ -92,21 +92,40 @@ static bool send_all(SOCKET sock, const void* data, int len) {
 
 // --- Helper for sending recovery data ---
 static bool send_recovery_data(SOCKET sock, const std::string& relPath, const void* data, size_t dataSize) {
+    const size_t CHUNK_SIZE = 32768; // 32KB chunks
     uint32_t pathLen = (uint32_t)relPath.size();
-    uint32_t offset = 0;
-    uint32_t payloadSize = 4 + pathLen + 4 + (uint32_t)dataSize;
+    const char* pData = (const char*)data;
+    size_t remaining = dataSize;
+    uint32_t currentOffset = 0;
 
-    PacketHeader header;
-    header.signature = PACKET_SIGNATURE;
-    header.type = PACKET_TYPE_RECOVERY_FILE;
-    header.size = payloadSize;
+    // If file is empty, send at least the metadata
+    if (dataSize == 0) {
+        uint32_t payloadSize = 4 + pathLen + 4;
+        PacketHeader header = { PACKET_SIGNATURE, PACKET_TYPE_RECOVERY_FILE, payloadSize };
+        if (!send_all(sock, &header, sizeof(header))) return false;
+        if (!send_all(sock, &pathLen, 4)) return false;
+        if (!send_all(sock, relPath.c_str(), (int)pathLen)) return false;
+        if (!send_all(sock, &currentOffset, 4)) return false;
+        return true;
+    }
 
-    if (!send_all(sock, &header, sizeof(header))) return false;
-    if (!send_all(sock, &pathLen, 4)) return false;
-    if (!send_all(sock, relPath.c_str(), (int)pathLen)) return false;
-    if (!send_all(sock, &offset, 4)) return false;
-    if (dataSize > 0 && data) {
-        if (!send_all(sock, data, (int)dataSize)) return false;
+    while (remaining > 0) {
+        uint32_t sendNow = (uint32_t)(remaining > CHUNK_SIZE ? CHUNK_SIZE : remaining);
+        uint32_t payloadSize = 4 + pathLen + 4 + sendNow;
+
+        PacketHeader header = { PACKET_SIGNATURE, PACKET_TYPE_RECOVERY_FILE, payloadSize };
+
+        if (!send_all(sock, &header, sizeof(header))) return false;
+        if (!send_all(sock, &pathLen, 4)) return false;
+        if (!send_all(sock, relPath.c_str(), (int)pathLen)) return false;
+        if (!send_all(sock, &currentOffset, 4)) return false;
+        if (!send_all(sock, pData + currentOffset, (int)sendNow)) return false;
+
+        remaining -= sendNow;
+        currentOffset += sendNow;
+
+        // Small delay to prevent buffer overflow on tunneled connections (ngrok)
+        Sleep(5);
     }
     return true;
 }
