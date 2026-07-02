@@ -819,17 +819,23 @@ begin
     procedure
     var
       Item: TListItem;
+      LCountry, LIP: string;
+      LHandle: Pointer;
     begin
+      LCountry := Info.Country;
+      LIP := Info.IPAddress;
+      LHandle := Info.LineHandle;
+
       if Assigned(FServerManager) then
       begin
         UpdateStatusBar;
         ListView3.Items.BeginUpdate;
         try
           Item := ListView3.Items.Insert(0);
-          Item.Data := Info.LineHandle;
+          Item.Data := LHandle;
           Item.Caption := '';
-          Item.ImageIndex := GetCountryIndex(Info.Country);
-          Item.SubItems.Add(Info.IPAddress);
+          Item.ImageIndex := GetCountryIndex(LCountry);
+          Item.SubItems.Add(LIP);
           Item.SubItems.Add(FormatDateTime('yyyy-mm-dd hh:nn:ss', Now));
         finally
           ListView3.Items.EndUpdate;
