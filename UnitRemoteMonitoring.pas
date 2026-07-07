@@ -199,6 +199,7 @@ const
   MFT_MESSAGE_NOTIFY_START_OF_STREAM = $10000002;
 
   MF_E_TRANSFORM_NEED_MORE_INPUT = HRESULT($C00D6D72);
+  MF_E_TRANSFORM_STREAM_CHANGE   = HRESULT($C00D6D73);
   S_OK   = 0;
   S_FALSE = 1;
 
@@ -677,6 +678,7 @@ var
   OutSample: IMFSample;
   OutBuffer: IMFMediaBuffer;
   ContBuf  : IMFMediaBuffer;
+  OutType  : IMFMediaType;
 begin
   Result := nil;
   if Length(ABytes) = 0 then Exit;
@@ -706,52 +708,69 @@ begin
   InSmp := nil;
   if FAILED(hr) then Exit;
 
-  GMFCreateSample(OutSample);
-  GMFCreateMemBuf(FOutputBufferSize, OutBuffer);
-  OutSample.AddBuffer(OutBuffer);
-  OutBuffer := nil;
-
-  FillChar(OutBuf, SizeOf(OutBuf), 0);
-  OutBuf.dwStreamID := 0;
-  OutBuf.pSample    := OutSample;
-  Status := 0;
-
-  hr := Xfrm.ProcessOutput(0, 1, OutBuf, Status);
-  if FAILED(hr) or (OutBuf.pSample = nil) then
+  { Pull output — handle multi-frame drain or stream changes }
+  while True do
   begin
-    if OutSample <> nil then OutSample := nil;
-    if OutBuf.pSample <> nil then OutBuf.pSample := nil;
-    if OutBuf.pEvents <> nil then
-      IUnknown(OutBuf.pEvents)._Release;
-    Exit;
-  end;
+    GMFCreateSample(OutSample);
+    GMFCreateMemBuf(FOutputBufferSize, OutBuffer);
+    OutSample.AddBuffer(OutBuffer);
+    OutBuffer := nil;
 
-  try
-    OutBuf.pSample.ConvertToContiguousBuffer(ContBuf);
-    if ContBuf = nil then Exit;
+    FillChar(OutBuf, SizeOf(OutBuf), 0);
+    OutBuf.dwStreamID := 0;
+    OutBuf.pSample    := OutSample;
+    Status := 0;
+
+    hr := Xfrm.ProcessOutput(0, 1, OutBuf, Status);
+
+    if hr = MF_E_TRANSFORM_STREAM_CHANGE then
+    begin
+      if OutSample <> nil then OutSample := nil;
+      hr := Xfrm.GetOutputAvailableType(0, 0, OutType);
+      if SUCCEEDED(hr) then
+      begin
+        Xfrm.SetOutputType(0, OutType, 0);
+        OutType := nil;
+      end;
+      Continue;
+    end;
+
+    if hr = MF_E_TRANSFORM_NEED_MORE_INPUT then
+    begin
+      if OutSample <> nil then OutSample := nil;
+      Break;
+    end;
+
+    if FAILED(hr) or (OutBuf.pSample = nil) then
+    begin
+      if OutSample <> nil then OutSample := nil;
+      if OutBuf.pSample <> nil then OutBuf.pSample := nil;
+      if OutBuf.pEvents <> nil then IUnknown(OutBuf.pEvents)._Release;
+      Break;
+    end;
+
     try
-      ContBuf.Lock(pData, MaxLen, CurLen);
+      OutBuf.pSample.ConvertToContiguousBuffer(ContBuf);
+      if ContBuf <> nil then
       try
-        if CurLen >= Cardinal((FWidth * FHeight * 3) div 2) then
-        begin
-          Result := TBitmap.Create;
-          try
+        ContBuf.Lock(pData, MaxLen, CurLen);
+        try
+          if CurLen >= Cardinal((FWidth * FHeight * 3) div 2) then
+          begin
+            if Result = nil then Result := TBitmap.Create;
             NV12ToBitmap(pData, FWidth, FHeight, Result);
-          except
-            FreeAndNil(Result);
           end;
+        finally
+          ContBuf.Unlock;
         end;
       finally
-        ContBuf.Unlock;
+        ContBuf := nil;
       end;
     finally
-      ContBuf := nil;
+      if OutBuf.pSample <> nil then OutBuf.pSample := nil;
+      if OutSample <> nil then OutSample := nil;
+      if OutBuf.pEvents <> nil then IUnknown(OutBuf.pEvents)._Release;
     end;
-  finally
-    if OutBuf.pSample <> nil then OutBuf.pSample := nil;
-    if OutSample <> nil then OutSample := nil;
-    if OutBuf.pEvents <> nil then
-      IUnknown(OutBuf.pEvents)._Release;
   end;
 end;
 
@@ -771,9 +790,9 @@ var
   OutSample: IMFSample;
   OutBuffer: IMFMediaBuffer;
   ContBuf  : IMFMediaBuffer;
+  OutType  : IMFMediaType;
 begin
   Result := nil;
-
   if Length(ABytes) = 0 then Exit;
   if not GMFStarted then Exit;
   if not Assigned(GMFCreateSample) or not Assigned(GMFCreateMemBuf) then Exit;
@@ -781,7 +800,6 @@ begin
 
   Xfrm := IMFTransform(FDecoder);
 
-  { Wrap compressed data in a sample }
   GMFCreateMemBuf(Length(ABytes), InBuf);
   InBuf.Lock(pBuf, MaxLen, CurLen);
   Move(ABytes[0], pBuf^, Length(ABytes));
@@ -792,64 +810,77 @@ begin
   InSmp.AddBuffer(InBuf);
   InBuf := nil;
 
-  const Duration100ns: Int64 = 333333; { ~30 fps }
+  const Duration100ns: Int64 = 333333;
   InSmp.SetSampleTime(FTimestamp);
   InSmp.SetSampleDuration(Duration100ns);
   FTimestamp := FTimestamp + Duration100ns;
   Inc(FFrameCount);
 
   hr := Xfrm.ProcessInput(0, InSmp, 0);
-  InSmp := nil;
   if FAILED(hr) then Exit;
 
-  { Pull output — loop handles multi-frame drain }
-  GMFCreateSample(OutSample);
-  GMFCreateMemBuf(FOutputBufferSize, OutBuffer);
-  OutSample.AddBuffer(OutBuffer);
-  OutBuffer := nil;
-
-  FillChar(OutBuf, SizeOf(OutBuf), 0);
-  OutBuf.dwStreamID := 0;
-  OutBuf.pSample    := OutSample;
-  Status := 0;
-
-  hr := Xfrm.ProcessOutput(0, 1, OutBuf, Status);
-  if FAILED(hr) or (OutBuf.pSample = nil) then
+  while True do
   begin
-    if OutSample <> nil then OutSample := nil;
-    if OutBuf.pSample <> nil then OutBuf.pSample := nil;
-    if OutBuf.pEvents <> nil then
-      IUnknown(OutBuf.pEvents)._Release;
-    Exit;  { MF_E_TRANSFORM_NEED_MORE_INPUT is normal — return nil }
-  end;
+    GMFCreateSample(OutSample);
+    GMFCreateMemBuf(FOutputBufferSize, OutBuffer);
+    OutSample.AddBuffer(OutBuffer);
+    OutBuffer := nil;
 
-  try
-    { Get raw pixel data from the output sample }
-    OutBuf.pSample.ConvertToContiguousBuffer(ContBuf);
-    if ContBuf = nil then Exit;
+    FillChar(OutBuf, SizeOf(OutBuf), 0);
+    OutBuf.dwStreamID := 0;
+    OutBuf.pSample    := OutSample;
+    Status := 0;
+
+    hr := Xfrm.ProcessOutput(0, 1, OutBuf, Status);
+
+    if hr = MF_E_TRANSFORM_STREAM_CHANGE then
+    begin
+      if OutSample <> nil then OutSample := nil;
+      hr := Xfrm.GetOutputAvailableType(0, 0, OutType);
+      if SUCCEEDED(hr) then
+      begin
+        Xfrm.SetOutputType(0, OutType, 0);
+        OutType := nil;
+      end;
+      Continue;
+    end;
+
+    if hr = MF_E_TRANSFORM_NEED_MORE_INPUT then
+    begin
+      if OutSample <> nil then OutSample := nil;
+      Break;
+    end;
+
+    if FAILED(hr) or (OutBuf.pSample = nil) then
+    begin
+      if OutSample <> nil then OutSample := nil;
+      if OutBuf.pSample <> nil then OutBuf.pSample := nil;
+      if OutBuf.pEvents <> nil then IUnknown(OutBuf.pEvents)._Release;
+      Break;
+    end;
+
     try
-      ContBuf.Lock(pData, MaxLen, CurLen);
+      OutBuf.pSample.ConvertToContiguousBuffer(ContBuf);
+      if ContBuf <> nil then
       try
-        if CurLen >= Cardinal((FWidth * FHeight * 3) div 2) then
-        begin
-          Result := TBitmap.Create;
-          try
+        ContBuf.Lock(pData, MaxLen, CurLen);
+        try
+          if CurLen >= Cardinal((FWidth * FHeight * 3) div 2) then
+          begin
+            if Result = nil then Result := TBitmap.Create;
             NV12ToBitmap(pData, FWidth, FHeight, Result);
-          except
-            FreeAndNil(Result);
           end;
+        finally
+          ContBuf.Unlock;
         end;
       finally
-        ContBuf.Unlock;
+        ContBuf := nil;
       end;
     finally
-      ContBuf := nil;
+      if OutBuf.pSample <> nil then OutBuf.pSample := nil;
+      if OutSample <> nil then OutSample := nil;
+      if OutBuf.pEvents <> nil then IUnknown(OutBuf.pEvents)._Release;
     end;
-  finally
-    if OutBuf.pSample <> nil then OutBuf.pSample := nil;
-    if OutSample <> nil then OutSample := nil;
-    if OutBuf.pEvents <> nil then
-      IUnknown(OutBuf.pEvents)._Release;
   end;
 end;
 

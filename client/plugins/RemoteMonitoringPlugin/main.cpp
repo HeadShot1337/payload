@@ -31,8 +31,7 @@
 using json = nlohmann::json;
 using namespace std;
 
-// GUIDs
-// MFVideoFormat_HEVC: {35363248-0000-0010-8000-00AA00389B71}
+// HEVC Encoder CLSID and Video Format GUID
 static const GUID CLSID_CMSH265EncoderMFT = { 0x2c417f4d, 0x194d, 0x47e1, { 0xb2, 0x01, 0x3d, 0xb8, 0x48, 0x3a, 0x7c, 0x98 } };
 static const GUID MyMFVideoFormat_HEVC = { 0x35363248, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 
@@ -78,13 +77,13 @@ static bool g_hasCaptureRect = false;
 
 class H265Encoder {
     IMFTransform* m_pTransform = nullptr;
-    IMFMediaType* m_pInputType = nullptr;
-    IMFMediaType* m_pOutputType = nullptr;
     DWORD m_inputStreamID = 0;
     DWORD m_outputStreamID = 0;
     int m_width = 0;
     int m_height = 0;
     bool m_initialized = false;
+    UINT64 m_frameCount = 0;
+    DWORD m_outputBufferSize = 0;
 
 public:
     H265Encoder() {}
@@ -94,32 +93,43 @@ public:
         Shutdown();
         m_width = (width + 1) & ~1;
         m_height = (height + 1) & ~1;
+        m_frameCount = 0;
 
         HRESULT hr = CoCreateInstance(CLSID_CMSH265EncoderMFT, NULL, CLSCTX_INPROC_SERVER, IID_IMFTransform, (void**)&m_pTransform);
         if (FAILED(hr)) return false;
 
-        hr = MFCreateMediaType(&m_pOutputType);
+        IMFMediaType* pOutputType = nullptr;
+        hr = MFCreateMediaType(&pOutputType);
         if (FAILED(hr)) return false;
-        m_pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        m_pOutputType->SetGUID(MF_MT_SUBTYPE, MyMFVideoFormat_HEVC);
-        m_pOutputType->SetUINT32(MF_MT_AVG_BITRATE, 1000000); // 1 Mbps fallback
-        MFSetAttributeSize(m_pOutputType, MF_MT_FRAME_SIZE, m_width, m_height);
-        MFSetAttributeRatio(m_pOutputType, MF_MT_FRAME_RATE, fps, 1);
-        m_pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        pOutputType->SetGUID(MF_MT_SUBTYPE, MyMFVideoFormat_HEVC);
+        pOutputType->SetUINT32(MF_MT_AVG_BITRATE, 2000000); // 2 Mbps
+        MFSetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, m_width, m_height);
+        MFSetAttributeRatio(pOutputType, MF_MT_FRAME_RATE, fps, 1);
+        pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        pOutputType->SetUINT32(MF_MT_MPEG2_PROFILE, 1); // Main Profile
 
-        hr = m_pTransform->SetOutputType(m_outputStreamID, m_pOutputType, 0);
+        hr = m_pTransform->SetOutputType(m_outputStreamID, pOutputType, 0);
+        pOutputType->Release();
         if (FAILED(hr)) return false;
 
-        hr = MFCreateMediaType(&m_pInputType);
+        IMFMediaType* pInputType = nullptr;
+        hr = MFCreateMediaType(&pInputType);
         if (FAILED(hr)) return false;
-        m_pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        m_pInputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-        MFSetAttributeSize(m_pInputType, MF_MT_FRAME_SIZE, m_width, m_height);
-        MFSetAttributeRatio(m_pInputType, MF_MT_FRAME_RATE, fps, 1);
-        m_pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        pInputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+        MFSetAttributeSize(pInputType, MF_MT_FRAME_SIZE, m_width, m_height);
+        MFSetAttributeRatio(pInputType, MF_MT_FRAME_RATE, fps, 1);
+        pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 
-        hr = m_pTransform->SetInputType(m_inputStreamID, m_pInputType, 0);
+        hr = m_pTransform->SetInputType(m_inputStreamID, pInputType, 0);
+        pInputType->Release();
         if (FAILED(hr)) return false;
+
+        MFT_OUTPUT_STREAM_INFO osi = { 0 };
+        hr = m_pTransform->GetOutputStreamInfo(m_outputStreamID, &osi);
+        if (SUCCEEDED(hr)) m_outputBufferSize = osi.cbSize;
+        else m_outputBufferSize = m_width * m_height * 3 / 2;
 
         hr = m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
         hr = m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
@@ -134,60 +144,94 @@ public:
             m_pTransform->Release();
             m_pTransform = nullptr;
         }
-        if (m_pInputType) { m_pInputType->Release(); m_pInputType = nullptr; }
-        if (m_pOutputType) { m_pOutputType->Release(); m_pOutputType = nullptr; }
         m_initialized = false;
     }
 
     bool Encode(const vector<uint8_t>& nv12Data, vector<uint8_t>& output) {
         if (!m_initialized) return false;
+        output.clear();
 
-        IMFSample* pSample = nullptr;
-        IMFMediaBuffer* pBuffer = nullptr;
-        HRESULT hr = MFCreateSample(&pSample);
+        IMFSample* pInputSample = nullptr;
+        IMFMediaBuffer* pInputBuffer = nullptr;
+        HRESULT hr = MFCreateSample(&pInputSample);
         if (FAILED(hr)) return false;
 
-        hr = MFCreateMemoryBuffer((DWORD)nv12Data.size(), &pBuffer);
-        if (FAILED(hr)) { pSample->Release(); return false; }
+        hr = MFCreateMemoryBuffer((DWORD)nv12Data.size(), &pInputBuffer);
+        if (FAILED(hr)) { pInputSample->Release(); return false; }
 
         BYTE* pData = nullptr;
-        hr = pBuffer->Lock(&pData, NULL, NULL);
+        hr = pInputBuffer->Lock(&pData, NULL, NULL);
         if (SUCCEEDED(hr)) {
             memcpy(pData, nv12Data.data(), nv12Data.size());
-            pBuffer->Unlock();
-            pBuffer->SetCurrentLength((DWORD)nv12Data.size());
+            pInputBuffer->Unlock();
+            pInputBuffer->SetCurrentLength((DWORD)nv12Data.size());
         }
-        pSample->AddBuffer(pBuffer);
-        pBuffer->Release();
+        pInputSample->AddBuffer(pInputBuffer);
+        pInputBuffer->Release();
 
-        hr = m_pTransform->ProcessInput(m_inputStreamID, pSample, 0);
-        pSample->Release();
+        // Timestamps are essential for many encoders
+        LONGLONG duration = 0;
+        MFFrameRateToAverageTimePerFrame(g_targetFps, 1, &duration);
+        pInputSample->SetSampleTime(m_frameCount * duration);
+        pInputSample->SetSampleDuration(duration);
+        m_frameCount++;
+
+        hr = m_pTransform->ProcessInput(m_inputStreamID, pInputSample, 0);
+        pInputSample->Release();
         if (FAILED(hr)) return false;
 
-        MFT_OUTPUT_DATA_BUFFER outputDataBuffer = { 0 };
-        outputDataBuffer.dwStreamID = m_outputStreamID;
+        // Drain loop to get frames (and potentially buffered frames)
+        while (true) {
+            MFT_OUTPUT_DATA_BUFFER outputDataBuffer = { 0 };
+            outputDataBuffer.dwStreamID = m_outputStreamID;
 
-        DWORD status = 0;
-        hr = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
-        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return false;
-        if (FAILED(hr)) return false;
-
-        if (outputDataBuffer.pSample) {
-            IMFMediaBuffer* pOutBuffer = nullptr;
-            hr = outputDataBuffer.pSample->ConvertToContiguousBuffer(&pOutBuffer);
+            // Many encoders require us to provide the sample/buffer
+            IMFSample* pOutputSample = nullptr;
+            IMFMediaBuffer* pOutputBuffer = nullptr;
+            hr = MFCreateSample(&pOutputSample);
             if (SUCCEEDED(hr)) {
-                BYTE* pOutData = nullptr;
-                DWORD outLen = 0;
-                hr = pOutBuffer->Lock(&pOutData, NULL, &outLen);
+                hr = MFCreateMemoryBuffer(m_outputBufferSize, &pOutputBuffer);
                 if (SUCCEEDED(hr)) {
-                    output.assign(pOutData, pOutData + outLen);
-                    pOutBuffer->Unlock();
+                    pOutputSample->AddBuffer(pOutputBuffer);
+                    pOutputBuffer->Release();
                 }
-                pOutBuffer->Release();
             }
-            outputDataBuffer.pSample->Release();
+            outputDataBuffer.pSample = pOutputSample;
+
+            DWORD status = 0;
+            hr = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+
+            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+                if (outputDataBuffer.pSample) outputDataBuffer.pSample->Release();
+                if (outputDataBuffer.pEvents) outputDataBuffer.pEvents->Release();
+                break;
+            }
+
+            if (FAILED(hr)) {
+                if (outputDataBuffer.pSample) outputDataBuffer.pSample->Release();
+                if (outputDataBuffer.pEvents) outputDataBuffer.pEvents->Release();
+                return false;
+            }
+
+            if (outputDataBuffer.pSample) {
+                IMFMediaBuffer* pContBuffer = nullptr;
+                hr = outputDataBuffer.pSample->ConvertToContiguousBuffer(&pContBuffer);
+                if (SUCCEEDED(hr)) {
+                    BYTE* pOutData = nullptr;
+                    DWORD outLen = 0;
+                    hr = pContBuffer->Lock(&pOutData, NULL, &outLen);
+                    if (SUCCEEDED(hr)) {
+                        size_t oldSize = output.size();
+                        output.resize(oldSize + outLen);
+                        memcpy(output.data() + oldSize, pOutData, outLen);
+                        pContBuffer->Unlock();
+                    }
+                    pContBuffer->Release();
+                }
+                outputDataBuffer.pSample->Release();
+            }
+            if (outputDataBuffer.pEvents) outputDataBuffer.pEvents->Release();
         }
-        if (outputDataBuffer.pEvents) outputDataBuffer.pEvents->Release();
 
         return !output.empty();
     }
@@ -208,7 +252,8 @@ static void BGRXToNV12(int width, int height, const uint8_t* bgrx, uint8_t* nv12
             y_plane[y * width + x] = (uint8_t)(((66 * R + 129 * G + 25 * B + 128) >> 8) + 16);
 
             if (y % 2 == 0 && x % 2 == 0) {
-                int uv_idx = (y / 2) * width + x;
+                int uv_idx = (y / 2) * width + (x / 2) * 2;
+                // Correct NV12 (UV interleaved) indexing
                 uv_plane[uv_idx] = (uint8_t)(((112 * R - 94 * G - 18 * B + 128) >> 8) + 128);   // U
                 uv_plane[uv_idx + 1] = (uint8_t)(((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128); // V
             }
@@ -244,15 +289,18 @@ static bool safe_send_monitor_frame(SOCKET sock, int monitor, int scale, int fps
     frameHeader.height = (uint32_t)max(0, height);
     frameHeader.format = MONITOR_FRAME_FORMAT_H265;
     frameHeader.dataSize = (uint32_t)data.size();
+
     PacketHeader packetHeader{};
     packetHeader.signature = PACKET_SIGNATURE;
     packetHeader.type = PACKET_TYPE_MONITOR_FRAME;
     packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + data.size());
+
     string packet;
     packet.resize(sizeof(PacketHeader) + packetHeader.size);
     memcpy(&packet[0], &packetHeader, sizeof(PacketHeader));
     memcpy(&packet[sizeof(PacketHeader)], &frameHeader, sizeof(MonitorFrameHeader));
     memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], data.data(), data.size());
+
     lock_guard<mutex> lock(g_sendMutex);
     return safe_send_raw(sock, packet);
 }
