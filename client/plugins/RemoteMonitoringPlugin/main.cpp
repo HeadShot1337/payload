@@ -457,6 +457,18 @@ static void stop_capture_thread() {
     g_hasCaptureRect = false;
 }
 
+static atomic_bool g_mfStarted(false);
+
+static bool ensure_mf() {
+    if (g_mfStarted.load()) return true;
+    HRESULT hr = MFStartup(0x00020070);
+    if (SUCCEEDED(hr)) {
+        g_mfStarted.store(true);
+        return true;
+    }
+    return false;
+}
+
 static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
     if (!ensure_mf()) {
         send_monitor_error(sock, "Media Foundation could not be started");
@@ -527,18 +539,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* jso
         } else if (act == "mouseevent") simulate_mouse(cmd.value("event", ""), cmd.value("button", 0), cmd.value("x", 0), cmd.value("y", 0));
         else if (act == "keyevent") simulate_key(cmd.value("event", ""), cmd.value("key", 0));
     } catch (...) {}
-}
-
-static atomic_bool g_mfStarted(false);
-
-static bool ensure_mf() {
-    if (g_mfStarted.load()) return true;
-    HRESULT hr = MFStartup(0x00020070);
-    if (SUCCEEDED(hr)) {
-        g_mfStarted.store(true);
-        return true;
-    }
-    return false;
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {

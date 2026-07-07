@@ -542,7 +542,7 @@ begin
 
   { Stash a raw reference — addref is already done by the interface assignment }
   FDecoder     := Pointer(Xfrm);
-    { keep alive after Xfrm goes out of scope }
+  IUnknown(FDecoder)._AddRef;
   Xfrm := nil;
 
   FWidth       := AWidth;
@@ -655,7 +655,7 @@ begin
     FOutputBufferSize := (AWidth * AHeight * 3) div 2;
 
   FDecoder     := Pointer(Xfrm);
-
+  IUnknown(FDecoder)._AddRef;
   Xfrm := nil;
 
   FWidth       := AWidth;
