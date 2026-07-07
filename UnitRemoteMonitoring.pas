@@ -16,6 +16,7 @@ uses
 const
   MONITOR_FRAME_FORMAT_JPEG = 1;
   MONITOR_FRAME_FORMAT_H264 = 2;
+  MONITOR_FRAME_FORMAT_H265 = 3;
 
 type
   TMonitoringSendJSONEvent   = procedure(aLine: TncLine; JSONObj: TJSONObject) of object;
@@ -57,6 +58,23 @@ type
     procedure Reset;
   end;
 
+  TH265Decoder = class
+  private
+    FDecoder      : Pointer;
+    FWidth        : Integer;
+    FHeight       : Integer;
+    FInitialized  : Boolean;
+    FTimestamp    : Int64;
+    FFrameCount   : Integer;
+    FOutputBufferSize: DWORD;
+    function TryInit(AWidth, AHeight: Integer): Boolean;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    function DecodeFrame(const ABytes: TBytes; AWidth, AHeight: Integer): TBitmap;
+    procedure Reset;
+  end;
+
 type
   TForm6 = class(TForm)
     StatusBar1: TStatusBar;
@@ -94,7 +112,8 @@ type
     FPaintBox         : TNoFlickerPaintBox; // Gerçek görüntü alanı
     FLastMouseMoveTick: UInt64;
     FH264Decoder      : TH264Decoder;     // H.264 decoder context (reused)
-    FCurrentCodec     : string;            // 'h264' or 'jpeg' — shown in statusbar
+    FH265Decoder      : TH265Decoder;     // H.265 decoder context (reused)
+    FCurrentCodec     : string;            // 'h264', 'h265' or 'jpeg' — shown in statusbar
 
     procedure FillDefaultOptions;
     procedure SendMonitoringCommand(const AAction: string);
@@ -161,9 +180,11 @@ implementation
 const
   MFMediaType_Video_GUID : TGUID = '{73646976-0000-0010-8000-00AA00389B71}';
   MFVideoFormat_H264_GUID: TGUID = '{34363248-0000-0010-8000-00AA00389B71}'; { 'H264' }
+  MFVideoFormat_HEVC_GUID: TGUID = '{35363248-0000-0010-8000-00AA00389B71}'; { 'HEVC' }
   MFVideoFormat_RGB32_GUID: TGUID = '{E436EB7E-524F-11CE-9F53-0020AF0BA770}';
   MFVideoFormat_NV12_GUID : TGUID = '{3231564E-0000-0010-8000-00AA00389B71}'; { 'NV12' }
   CLSID_CMSH264DecoderMFT : TGUID = '{62CE7E72-4C71-4D20-B15D-452831A87D9D}';
+  CLSID_CMSH265DecoderMFT : TGUID = '{42453111-18EE-4304-8319-1AA4D0A5647C}';
 
   MF_MT_MAJOR_TYPE    : TGUID = '{48eba18e-f8c9-4687-bf11-0a74c9f96a8f}';
   MF_MT_SUBTYPE       : TGUID = '{f7e34c9a-42e8-4714-b74b-cb29d72c35e5}';
@@ -528,6 +549,212 @@ begin
   Result       := True;
 end;
 
+{ =========================================================================
+  TH265Decoder
+  ========================================================================= }
+
+constructor TH265Decoder.Create;
+begin
+  inherited;
+  FDecoder          := nil;
+  FInitialized      := False;
+  FTimestamp        := 0;
+  FFrameCount       := 0;
+  FOutputBufferSize := 0;
+end;
+
+destructor TH265Decoder.Destroy;
+begin
+  Reset;
+  inherited;
+end;
+
+procedure TH265Decoder.Reset;
+var
+  Xfrm: IMFTransform;
+begin
+  if FDecoder <> nil then
+  begin
+    Xfrm := IMFTransform(FDecoder);
+    Xfrm.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+    Xfrm := nil;
+    FDecoder     := nil;
+  end;
+  FWidth            := 0;
+  FHeight           := 0;
+  FInitialized      := False;
+  FTimestamp        := 0;
+  FFrameCount       := 0;
+  FOutputBufferSize := 0;
+end;
+
+function TH265Decoder.TryInit(AWidth, AHeight: Integer): Boolean;
+var
+  Xfrm      : IMFTransform;
+  InType    : IMFMediaType;
+  OutType   : IMFMediaType;
+  hr        : HRESULT;
+  StreamInfo: TMFTOutputStreamInfo;
+begin
+  Result := False;
+  AWidth  := (AWidth  + 1) and not 1;
+  AHeight := (AHeight + 1) and not 1;
+
+  if FInitialized and (FWidth = AWidth) and (FHeight = AHeight) then
+  begin
+    Result := True;
+    Exit;
+  end;
+
+  Reset;
+  if not GMFStarted then Exit;
+  if not Assigned(GMFCreateMT) then Exit;
+
+  hr := CoCreateInstance(CLSID_CMSH265DecoderMFT, nil,
+                          CLSCTX_INPROC_SERVER,
+                          IMFTransform, Xfrm);
+  if FAILED(hr) then Exit;
+
+  GMFCreateMT(InType);
+  InType.SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video_GUID);
+  InType.SetGUID(MF_MT_SUBTYPE,    MFVideoFormat_HEVC_GUID);
+  if Assigned(GMFSetSize) then
+    GMFSetSize(InType, MF_MT_FRAME_SIZE, AWidth, AHeight);
+
+  hr := Xfrm.SetInputType(0, InType, 0);
+  InType := nil;
+  if FAILED(hr) then Exit;
+
+  GMFCreateMT(OutType);
+  OutType.SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video_GUID);
+  OutType.SetGUID(MF_MT_SUBTYPE,    MFVideoFormat_NV12_GUID);
+  if Assigned(GMFSetSize) then
+    GMFSetSize(OutType, MF_MT_FRAME_SIZE, AWidth, AHeight);
+  OutType.SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
+  hr := Xfrm.SetOutputType(0, OutType, 0);
+  OutType := nil;
+  if FAILED(hr) then
+  begin
+    hr := Xfrm.GetOutputAvailableType(0, 0, OutType);
+    if SUCCEEDED(hr) then
+      hr := Xfrm.SetOutputType(0, OutType, 0);
+    OutType := nil;
+    if FAILED(hr) then Exit;
+  end;
+
+  Xfrm.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+  Xfrm.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+  if SUCCEEDED(Xfrm.GetOutputStreamInfo(0, StreamInfo)) then
+    FOutputBufferSize := StreamInfo.cbSize
+  else
+    FOutputBufferSize := (AWidth * AHeight * 3) div 2;
+
+  FDecoder     := Pointer(Xfrm);
+  IUnknown(FDecoder)._AddRef;
+  Xfrm := nil;
+
+  FWidth       := AWidth;
+  FHeight      := AHeight;
+  FInitialized := True;
+  Result       := True;
+end;
+
+function TH265Decoder.DecodeFrame(const ABytes: TBytes;
+                                   AWidth, AHeight: Integer): TBitmap;
+var
+  Xfrm     : IMFTransform;
+  InBuf    : IMFMediaBuffer;
+  InSmp    : IMFSample;
+  OutBuf   : MFT_OUTPUT_DATA_BUFFER;
+  pBuf     : PByte;
+  Status   : DWORD;
+  hr       : HRESULT;
+  pData    : PByte;
+  MaxLen   : DWORD;
+  CurLen   : DWORD;
+  OutSample: IMFSample;
+  OutBuffer: IMFMediaBuffer;
+  ContBuf  : IMFMediaBuffer;
+begin
+  Result := nil;
+  if Length(ABytes) = 0 then Exit;
+  if not GMFStarted then Exit;
+  if not Assigned(GMFCreateSample) or not Assigned(GMFCreateMemBuf) then Exit;
+  if not TryInit(AWidth, AHeight) then Exit;
+
+  Xfrm := IMFTransform(FDecoder);
+
+  GMFCreateMemBuf(Length(ABytes), InBuf);
+  InBuf.Lock(pBuf, MaxLen, CurLen);
+  Move(ABytes[0], pBuf^, Length(ABytes));
+  InBuf.Unlock;
+  InBuf.SetCurrentLength(Length(ABytes));
+
+  GMFCreateSample(InSmp);
+  InSmp.AddBuffer(InBuf);
+  InBuf := nil;
+
+  const Duration100ns: Int64 = 333333;
+  InSmp.SetSampleTime(FTimestamp);
+  InSmp.SetSampleDuration(Duration100ns);
+  FTimestamp := FTimestamp + Duration100ns;
+  Inc(FFrameCount);
+
+  hr := Xfrm.ProcessInput(0, InSmp, 0);
+  InSmp := nil;
+  if FAILED(hr) then Exit;
+
+  GMFCreateSample(OutSample);
+  GMFCreateMemBuf(FOutputBufferSize, OutBuffer);
+  OutSample.AddBuffer(OutBuffer);
+  OutBuffer := nil;
+
+  FillChar(OutBuf, SizeOf(OutBuf), 0);
+  OutBuf.dwStreamID := 0;
+  OutBuf.pSample    := OutSample;
+  Status := 0;
+
+  hr := Xfrm.ProcessOutput(0, 1, OutBuf, Status);
+  if FAILED(hr) or (OutBuf.pSample = nil) then
+  begin
+    if OutSample <> nil then OutSample := nil;
+    if OutBuf.pSample <> nil then OutBuf.pSample := nil;
+    if OutBuf.pEvents <> nil then
+      IUnknown(OutBuf.pEvents)._Release;
+    Exit;
+  end;
+
+  try
+    OutBuf.pSample.ConvertToContiguousBuffer(ContBuf);
+    if ContBuf = nil then Exit;
+    try
+      ContBuf.Lock(pData, MaxLen, CurLen);
+      try
+        if CurLen >= Cardinal((FWidth * FHeight * 3) div 2) then
+        begin
+          Result := TBitmap.Create;
+          try
+            NV12ToBitmap(pData, FWidth, FHeight, Result);
+          except
+            FreeAndNil(Result);
+          end;
+        end;
+      finally
+        ContBuf.Unlock;
+      end;
+    finally
+      ContBuf := nil;
+    end;
+  finally
+    if OutBuf.pSample <> nil then OutBuf.pSample := nil;
+    if OutSample <> nil then OutSample := nil;
+    if OutBuf.pEvents <> nil then
+      IUnknown(OutBuf.pEvents)._Release;
+  end;
+end;
+
 function TH264Decoder.DecodeFrame(const ABytes: TBytes;
                                    AWidth, AHeight: Integer): TBitmap;
 var
@@ -655,6 +882,7 @@ begin
 
   DetachCallbacks;
   FreeAndNil(FH264Decoder);
+  FreeAndNil(FH265Decoder);
   FreeAndNil(FFrameTimer);
   FreeAndNil(FDecodedBitmap);
   FreeAndNil(FDisplayBitmap);
@@ -728,6 +956,12 @@ begin
   begin
     EnsureMFLoaded;
     FH264Decoder := TH264Decoder.Create;
+  end;
+
+  if not Assigned(FH265Decoder) then
+  begin
+    EnsureMFLoaded;
+    FH265Decoder := TH265Decoder.Create;
   end;
 
   StartFrameWorker;
@@ -870,9 +1104,11 @@ begin
       FFrameLock.Leave;
     end;
   end;
-  { Reset the H.264 decoder so the next session starts clean }
+  { Reset the H.264/H.265 decoders so the next session starts clean }
   if Assigned(FH264Decoder) then
     FH264Decoder.Reset;
+  if Assigned(FH265Decoder) then
+    FH265Decoder.Reset;
   if Assigned(FFrameTimer) then
     FFrameTimer.Enabled := False;
   UpdateButtonCaption;
@@ -1090,6 +1326,21 @@ begin
     Exit;
   end;
 
+  { --- H.265 path --- }
+  if AFormat = MONITOR_FRAME_FORMAT_H265 then
+  begin
+    if not Assigned(FH265Decoder) or not FH265Decoder.FInitialized then Exit;
+    DecBmp := FH265Decoder.DecodeFrame(ABytes,
+                                        FH265Decoder.FWidth,
+                                        FH265Decoder.FHeight);
+    if Assigned(DecBmp) then
+    begin
+      ABitmap := DecBmp;
+      Result  := True;
+    end;
+    Exit;
+  end;
+
   { --- JPEG / legacy path --- }
   Stream    := TMemoryStream.Create;
   JpegImage := TJPEGImage.Create;
@@ -1205,10 +1456,14 @@ begin
     FFrameLock.Leave;
   end;
 
-  { Update the H.264 decoder hint — done outside the lock }
+  { Update the H.264/H.265 decoder hint — done outside the lock }
   if Result and (AFormat = MONITOR_FRAME_FORMAT_H264) and
      Assigned(FH264Decoder) and (W > 0) and (H > 0) then
     FH264Decoder.TryInit(W, H);
+
+  if Result and (AFormat = MONITOR_FRAME_FORMAT_H265) and
+     Assigned(FH265Decoder) and (W > 0) and (H > 0) then
+    FH265Decoder.TryInit(W, H);
 end;
 
 function TForm6.TakeDecodedFrame(out ABitmap: TBitmap; out AFrameSize: Integer): Boolean;
