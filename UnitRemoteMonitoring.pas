@@ -457,7 +457,8 @@ begin
   begin
     Xfrm := IMFTransform(FDecoder);
     Xfrm.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-    Xfrm := nil;          { releases the reference }
+    Xfrm := nil;
+    IUnknown(FDecoder)._Release;
     FDecoder     := nil;
   end;
   FWidth            := 0;
@@ -541,7 +542,7 @@ begin
 
   { Stash a raw reference — addref is already done by the interface assignment }
   FDecoder     := Pointer(Xfrm);
-  IUnknown(FDecoder)._AddRef;  { keep alive after Xfrm goes out of scope }
+    { keep alive after Xfrm goes out of scope }
   Xfrm := nil;
 
   FWidth       := AWidth;
@@ -579,6 +580,7 @@ begin
     Xfrm := IMFTransform(FDecoder);
     Xfrm.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
     Xfrm := nil;
+    IUnknown(FDecoder)._Release;
     FDecoder     := nil;
   end;
   FWidth            := 0;
@@ -653,7 +655,7 @@ begin
     FOutputBufferSize := (AWidth * AHeight * 3) div 2;
 
   FDecoder     := Pointer(Xfrm);
-  IUnknown(FDecoder)._AddRef;
+
   Xfrm := nil;
 
   FWidth       := AWidth;

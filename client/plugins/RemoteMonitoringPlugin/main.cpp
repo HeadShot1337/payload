@@ -170,9 +170,9 @@ public:
         pInputBuffer->Release();
 
         // Timestamps are essential for many encoders
-        LONGLONG duration = 0;
+        UINT64 duration = 0;
         MFFrameRateToAverageTimePerFrame(g_targetFps, 1, &duration);
-        pInputSample->SetSampleTime(m_frameCount * duration);
+        pInputSample->SetSampleTime((LONGLONG)(m_frameCount * duration));
         pInputSample->SetSampleDuration(duration);
         m_frameCount++;
 
@@ -253,9 +253,9 @@ static void BGRXToNV12(int width, int height, const uint8_t* bgrx, uint8_t* nv12
 
             if (y % 2 == 0 && x % 2 == 0) {
                 int uv_idx = (y / 2) * width + (x / 2) * 2;
-                // Correct NV12 (UV interleaved) indexing
-                uv_plane[uv_idx] = (uint8_t)(((112 * R - 94 * G - 18 * B + 128) >> 8) + 128);   // U
-                uv_plane[uv_idx + 1] = (uint8_t)(((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128); // V
+                // NV12: U then V interleaved
+                uv_plane[uv_idx] = (uint8_t)(((-38 * R - 74 * G + 112 * B + 128) >> 8) + 128);   // U
+                uv_plane[uv_idx + 1] = (uint8_t)(((112 * R - 94 * G - 18 * B + 128) >> 8) + 128); // V
             }
         }
     }
@@ -410,6 +410,7 @@ static bool capture_monitor_pixels(const RECT& rect, int scalePercent, vector<ui
 }
 
 static void capture_loop() {
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     H265Encoder encoder;
     int curW = 0, curH = 0;
@@ -443,6 +444,7 @@ static void capture_loop() {
         DWORD interval = 1000 / clamp_int(fps, 1, 60);
         if (elapsed < interval) Sleep(interval - elapsed);
     }
+    CoUninitialize();
 }
 
 static void stop_capture_thread() {
@@ -456,6 +458,10 @@ static void stop_capture_thread() {
 }
 
 static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
+    if (!ensure_mf()) {
+        send_monitor_error(sock, "Media Foundation could not be started");
+        return;
+    }
     scalePercent = clamp_int(scalePercent, 10, 100);
     int fps = requestedFps > 0 ? clamp_int(requestedFps, 1, 60) : 25;
     vector<MonitorData> monitors = enumerate_monitors();
@@ -523,8 +529,25 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* jso
     } catch (...) {}
 }
 
+static atomic_bool g_mfStarted(false);
+
+static bool ensure_mf() {
+    if (g_mfStarted.load()) return true;
+    HRESULT hr = MFStartup(0x00020070);
+    if (SUCCEEDED(hr)) {
+        g_mfStarted.store(true);
+        return true;
+    }
+    return false;
+}
+
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) { MFStartup(0x00020070); }
-    if (reason == DLL_PROCESS_DETACH) { g_captureRunning.store(false); MFShutdown(); }
+    if (reason == DLL_PROCESS_DETACH) {
+        g_captureRunning.store(false);
+        if (g_mfStarted.load()) {
+            MFShutdown();
+            g_mfStarted.store(false);
+        }
+    }
     return TRUE;
 }
