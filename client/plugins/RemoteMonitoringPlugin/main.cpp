@@ -321,17 +321,25 @@ public:
     H265Encoder() : m_mft(nullptr), m_width(0), m_height(0), m_fps(0), m_input_sample_count(0) {}
     ~H265Encoder() { Shutdown(); }
 
+    string GetLastError() const { return m_lastError; }
+
     bool Initialize(int width, int height, int fps) {
         if (m_mft && m_width == width && m_height == height) return true;
         Shutdown();
 
         HRESULT hr = MFStartup(MF_VERSION);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) {
+            m_lastError = "MFStartup failed: " + to_string(hr);
+            return false;
+        }
 
         // CLSID_CMSH265EncoderMFT: {2C417F4D-1ABD-433C-ABB5-97B1C46971E2}
         GUID clsid_h265_encoder = { 0x2c417f4d, 0x1abd, 0x433c, { 0xab, 0xb5, 0x97, 0xb1, 0xc4, 0x69, 0x71, 0xe2 } };
         hr = CoCreateInstance(clsid_h265_encoder, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&m_mft));
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) {
+            m_lastError = "CoCreateInstance(H265 Encoder MFT) failed: " + to_string(hr);
+            return false;
+        }
 
         IMFMediaType* out_type = nullptr;
         MFCreateMediaType(&out_type);
@@ -341,11 +349,15 @@ public:
         out_type->SetUINT32(GUID_MF_MT_VIDEO_PROFILE, 1); // HEVC_PROFILE_MAIN
         MFSetAttributeSize(out_type, MF_MT_FRAME_SIZE, width, height);
         MFSetAttributeRatio(out_type, MF_MT_FRAME_RATE, fps, 1);
+        MFSetAttributeRatio(out_type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 
         hr = m_mft->SetOutputType(0, out_type, 0);
         out_type->Release();
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) {
+            m_lastError = "SetOutputType failed: " + to_string(hr);
+            return false;
+        }
 
         IMFMediaType* in_type = nullptr;
         MFCreateMediaType(&in_type);
@@ -353,11 +365,15 @@ public:
         in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
         MFSetAttributeSize(in_type, MF_MT_FRAME_SIZE, width, height);
         MFSetAttributeRatio(in_type, MF_MT_FRAME_RATE, fps, 1);
+        MFSetAttributeRatio(in_type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 
         hr = m_mft->SetInputType(0, in_type, 0);
         in_type->Release();
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) {
+            m_lastError = "SetInputType failed: " + to_string(hr);
+            return false;
+        }
 
         // Attempt to set low latency if supported by the encoder
         IMFAttributes* attributes = nullptr;
@@ -479,6 +495,7 @@ private:
     int m_height;
     int m_fps;
     LONGLONG m_input_sample_count;
+    string m_lastError;
 };
 
 static int automatic_fps_for_scale(int scalePercent) {
@@ -653,7 +670,7 @@ static bool capture_monitor_frame_h265(const RECT& rect,
         DeleteObject(bitmap);
         DeleteDC(memoryDC);
         ReleaseDC(NULL, screenDC);
-        error = "H.265 encoder initialization failed";
+        error = "H.265 encoder initialization failed: " + encoder.GetLastError();
         return false;
     }
 
@@ -674,6 +691,7 @@ static bool capture_monitor_frame_h265(const RECT& rect,
 }
 
 static void capture_loop() {
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     H265Encoder encoder;
 
@@ -732,6 +750,7 @@ static void capture_loop() {
     }
 
     encoder.Shutdown();
+    CoUninitialize();
 }
 
 static void stop_capture_thread() {
