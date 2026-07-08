@@ -157,10 +157,7 @@ type
     procedure RequestCaptureStop;
     { AFormat: MONITOR_FRAME_FORMAT_JPEG or MONITOR_FRAME_FORMAT_H264.
       AWidth/AHeight: encoded frame dimensions (needed by H.264 decoder).  }
-    procedure QueueFrameBytes(const ABytes: TBytes;
-                              AFormat: Integer = MONITOR_FRAME_FORMAT_JPEG;
-                              AWidth: Integer  = 0;
-                              AHeight: Integer = 0);
+    procedure QueueFrameBytes(const ABytes: TBytes; AFormat: Integer; AWidth, AHeight: Integer);
     procedure HandleMonitoringJSON(JSONObj: TJSONObject);
   end;
 
@@ -681,6 +678,7 @@ var
   OutBuffer: IMFMediaBuffer;
   ContBuf  : IMFMediaBuffer;
   OutType  : IMFMediaType;
+  StreamInfo: TMFTOutputStreamInfo;
 begin
   Result := nil;
   if Length(ABytes) = 0 then Exit;
@@ -793,6 +791,7 @@ var
   OutBuffer: IMFMediaBuffer;
   ContBuf  : IMFMediaBuffer;
   OutType  : IMFMediaType;
+  StreamInfo: TMFTOutputStreamInfo;
 begin
   Result := nil;
   if Length(ABytes) = 0 then Exit;
@@ -1200,10 +1199,7 @@ begin
   end;
 end;
 
-procedure TForm6.QueueFrameBytes(const ABytes: TBytes;
-                                  AFormat: Integer = MONITOR_FRAME_FORMAT_JPEG;
-                                  AWidth: Integer  = 0;
-                                  AHeight: Integer = 0);
+procedure TForm6.QueueFrameBytes(const ABytes: TBytes; AFormat: Integer; AWidth, AHeight: Integer);
 begin
   if Length(ABytes) = 0 then Exit;
   if not Assigned(FFrameLock) then Exit;
