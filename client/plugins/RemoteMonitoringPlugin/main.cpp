@@ -12,18 +12,12 @@
 #include <wmcodecdsp.h>
 #include <algorithm>
 
-// Fix for older SDKs/MinGW missing MF_MT_VIDEO_PROFILE and MFVideoFormat_HEVC
-#ifndef MF_MT_VIDEO_PROFILE
-static const GUID MF_MT_VIDEO_PROFILE = { 0xcc71110b, 0x22f2, 0x4384, { 0xb6, 0x96, 0xc9, 0xdb, 0x38, 0x34, 0x92, 0x98 } };
-#endif
+// Manual GUID definitions to ensure compatibility and avoid naming conflicts with system headers
+static const GUID GUID_MF_MT_VIDEO_PROFILE = { 0xcc71110b, 0x22f2, 0x4384, { 0xb6, 0x96, 0xc9, 0xdb, 0x38, 0x34, 0x92, 0x98 } };
+static const GUID GUID_MF_MT_AVG_BITRATE   = { 0x20332624, 0xfb0d, 0x4d9e, { 0xbd, 0x0d, 0xcb, 0xf6, 0x78, 0x6c, 0x10, 0x2e } };
+static const GUID GUID_MFVideoFormat_HEVC  = { 0x43564548, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID GUID_MF_LOW_LATENCY      = { 0x9c27891a, 0xed7a, 0x4a48, { 0x88, 0x0c, 0x16, 0x0f, 0xc4, 0x44, 0x17, 0x70 } };
 
-#ifndef MFVideoFormat_HEVC
-static const GUID MFVideoFormat_HEVC = { 0x43564548, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
-#endif
-
-#ifndef MF_MT_AVG_BITRATE
-static const GUID MF_MT_AVG_BITRATE = { 0x203322a1, 0x1183, 0x4df0, { 0xac, 0x1e, 0x14, 0x38, 0x00, 0x0b, 0x94, 0x22 } };
-#endif
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -342,9 +336,9 @@ public:
         IMFMediaType* out_type = nullptr;
         MFCreateMediaType(&out_type);
         out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        out_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_HEVC); // Annex B default
-        out_type->SetUINT32(MF_MT_AVG_BITRATE, 1000000); // 1 Mbps baseline
-        out_type->SetUINT32(MF_MT_VIDEO_PROFILE, 1); // HEVC_PROFILE_MAIN
+        out_type->SetGUID(MF_MT_SUBTYPE, GUID_MFVideoFormat_HEVC); // Annex B default
+        out_type->SetUINT32(GUID_MF_MT_AVG_BITRATE, 2000000); // 2 Mbps baseline
+        out_type->SetUINT32(GUID_MF_MT_VIDEO_PROFILE, 1); // HEVC_PROFILE_MAIN
         MFSetAttributeSize(out_type, MF_MT_FRAME_SIZE, width, height);
         MFSetAttributeRatio(out_type, MF_MT_FRAME_RATE, fps, 1);
         out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
@@ -364,6 +358,13 @@ public:
         hr = m_mft->SetInputType(0, in_type, 0);
         in_type->Release();
         if (FAILED(hr)) return false;
+
+        // Attempt to set low latency if supported by the encoder
+        IMFAttributes* attributes = nullptr;
+        if (SUCCEEDED(m_mft->GetAttributes(&attributes))) {
+            attributes->SetUINT32(GUID_MF_LOW_LATENCY, 1);
+            attributes->Release();
+        }
 
         hr = m_mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
         hr = m_mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
