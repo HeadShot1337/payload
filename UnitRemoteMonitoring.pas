@@ -1318,7 +1318,10 @@ var
   Picture  : TPicture;
   Graphic  : TGraphic;
   DecBmp   : TBitmap;
+  W, H     : Integer;
 begin
+  W := FPendingFrameWidth;
+  H := FPendingFrameHeight;
   Result  := False;
   ABitmap := nil;
   if Length(ABytes) = 0 then Exit;
@@ -1326,10 +1329,8 @@ begin
   { --- H.264 path --- }
   if AFormat = MONITOR_FRAME_FORMAT_H264 then
   begin
-    if not Assigned(FH264Decoder) or not FH264Decoder.FInitialized then Exit;
-    DecBmp := FH264Decoder.DecodeFrame(ABytes,
-                                        FH264Decoder.FWidth,
-                                        FH264Decoder.FHeight);
+    if not Assigned(FH264Decoder) then Exit;
+    DecBmp := FH264Decoder.DecodeFrame(ABytes, W, H);
     if Assigned(DecBmp) then
     begin
       ABitmap := DecBmp;
@@ -1341,10 +1342,8 @@ begin
   { --- H.265 path --- }
   if AFormat = MONITOR_FRAME_FORMAT_H265 then
   begin
-    if not Assigned(FH265Decoder) or not FH265Decoder.FInitialized then Exit;
-    DecBmp := FH265Decoder.DecodeFrame(ABytes,
-                                        FH265Decoder.FWidth,
-                                        FH265Decoder.FHeight);
+    if not Assigned(FH265Decoder) then Exit;
+    DecBmp := FH265Decoder.DecodeFrame(ABytes, W, H);
     if Assigned(DecBmp) then
     begin
       ABitmap := DecBmp;

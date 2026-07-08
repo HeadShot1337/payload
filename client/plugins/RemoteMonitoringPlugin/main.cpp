@@ -11,6 +11,19 @@
 #include <mfobjects.h>
 #include <wmcodecdsp.h>
 #include <algorithm>
+
+// Fix for older SDKs/MinGW missing MF_MT_VIDEO_PROFILE and MFVideoFormat_HEVC
+#ifndef MF_MT_VIDEO_PROFILE
+static const GUID MF_MT_VIDEO_PROFILE = { 0xcc71110b, 0x22f2, 0x4384, { 0xb6, 0x96, 0xc9, 0xdb, 0x38, 0x34, 0x92, 0x98 } };
+#endif
+
+#ifndef MFVideoFormat_HEVC
+static const GUID MFVideoFormat_HEVC = { 0x43564548, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+#endif
+
+#ifndef MF_MT_AVG_BITRATE
+static const GUID MF_MT_AVG_BITRATE = { 0x203322a1, 0x1183, 0x4df0, { 0xac, 0x1e, 0x14, 0x38, 0x00, 0x0b, 0x94, 0x22 } };
+#endif
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -311,7 +324,7 @@ static void rgbx_to_nv12(const uint8_t* rgbx, uint8_t* nv12, int width, int heig
 
 class H265Encoder {
 public:
-    H265Encoder() : m_mft(nullptr), m_width(0), m_height(0), m_input_sample_count(0) {}
+    H265Encoder() : m_mft(nullptr), m_width(0), m_height(0), m_fps(0), m_input_sample_count(0) {}
     ~H265Encoder() { Shutdown(); }
 
     bool Initialize(int width, int height, int fps) {
@@ -357,6 +370,7 @@ public:
 
         m_width = width;
         m_height = height;
+        m_fps = fps;
         return true;
     }
 
@@ -392,9 +406,10 @@ public:
         sample->AddBuffer(buffer);
         buffer->Release();
 
-        LONGLONG timestamp = (m_input_sample_count++) * (10000000LL / 25LL); // dummy 25 fps
+        LONGLONG duration = 10000000LL / (m_fps > 0 ? m_fps : 25);
+        LONGLONG timestamp = (m_input_sample_count++) * duration;
         sample->SetSampleTime(timestamp);
-        sample->SetSampleDuration(10000000LL / 25LL);
+        sample->SetSampleDuration(duration);
 
         HRESULT hr = m_mft->ProcessInput(0, sample, 0);
         sample->Release();
@@ -461,6 +476,7 @@ private:
     IMFTransform* m_mft;
     int m_width;
     int m_height;
+    int m_fps;
     LONGLONG m_input_sample_count;
 };
 
