@@ -17,6 +17,7 @@ static const GUID GUID_MF_MT_VIDEO_PROFILE = { 0xcc71110b, 0x22f2, 0x4384, { 0xb
 static const GUID GUID_MF_MT_AVG_BITRATE   = { 0x20332624, 0xfb0d, 0x4d9e, { 0xbd, 0x0d, 0xcb, 0xf6, 0x78, 0x6c, 0x10, 0x2e } };
 static const GUID GUID_MFVideoFormat_HEVC  = { 0x43564548, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 static const GUID GUID_MF_LOW_LATENCY      = { 0x9c27891a, 0xed7a, 0x4a48, { 0x88, 0x0c, 0x16, 0x0f, 0xc4, 0x44, 0x17, 0x70 } };
+static const GUID GUID_MFT_CATEGORY_VIDEO_ENCODER = { 0xf79e3ac3, 0x80b1, 0x460d, { 0x83, 0x86, 0x84, 0x80, 0x39, 0x77, 0x46, 0x40 } };
 
 #include <atomic>
 #include <cstdint>
@@ -333,11 +334,36 @@ public:
             return false;
         }
 
-        // CLSID_CMSH265EncoderMFT: {2C417F4D-1ABD-433C-ABB5-97B1C46971E2}
-        GUID clsid_h265_encoder = { 0x2c417f4d, 0x1abd, 0x433c, { 0xab, 0xb5, 0x97, 0xb1, 0xc4, 0x69, 0x71, 0xe2 } };
-        hr = CoCreateInstance(clsid_h265_encoder, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&m_mft));
+        // Dynamically find an HEVC encoder instead of using a hardcoded CLSID
+        MFT_REGISTER_TYPE_INFO outputType = { MFMediaType_Video, GUID_MFVideoFormat_HEVC };
+        IMFActivate** activate = nullptr;
+        UINT32 count = 0;
+
+        hr = MFTEnumEx(
+            GUID_MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_ALL | MFT_ENUM_FLAG_SORTANDFILTER,
+            NULL,           // Input type
+            &outputType,    // Output type
+            &activate,
+            &count
+        );
+
+        if (FAILED(hr) || count == 0) {
+            m_lastError = "No H.265 Encoder MFT found: " + to_string(hr);
+            return false;
+        }
+
+        // Use the first available encoder
+        hr = activate[0]->ActivateObject(IID_PPV_ARGS(&m_mft));
+
+        // Clean up activation objects
+        for (UINT32 i = 0; i < count; i++) {
+            activate[i]->Release();
+        }
+        CoTaskMemFree(activate);
+
         if (FAILED(hr)) {
-            m_lastError = "CoCreateInstance(H265 Encoder MFT) failed: " + to_string(hr);
+            m_lastError = "Failed to activate H265 Encoder MFT: " + to_string(hr);
             return false;
         }
 
