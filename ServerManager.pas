@@ -38,6 +38,7 @@ const
   PACKET_TYPE_RECOVERY_FILE = $07;
 
   MONITOR_FRAME_FORMAT_JPEG = 1;
+  MONITOR_FRAME_FORMAT_H264 = 2;
   HVNC_FRAME_FORMAT_JPEG_FULL  = 1;
   HVNC_FRAME_FORMAT_JPEG_DIRTY = 2;
   PACKET_SIGNATURE          = $524E; { 'NR' little-endian }
@@ -1322,8 +1323,8 @@ begin
   if Length(Payload) < HeaderSize then Exit;
 
   Move(Payload[0], FrameHeader, HeaderSize);
-  if (FrameHeader.Format <> HVNC_FRAME_FORMAT_JPEG_FULL) and
-     (FrameHeader.Format <> HVNC_FRAME_FORMAT_JPEG_DIRTY) then Exit;
+  if (FrameHeader.Format <> MONITOR_FRAME_FORMAT_JPEG) and
+     (FrameHeader.Format <> MONITOR_FRAME_FORMAT_H264) then Exit;
   if (FrameHeader.DataSize = 0) or
      (Integer(FrameHeader.DataSize) <> Length(Payload) - HeaderSize) then Exit;
 
@@ -1332,7 +1333,7 @@ begin
 
   MonitoringForm := GetMonitoringForm(aLine);
   if Assigned(MonitoringForm) then
-    MonitoringForm.QueueFrameBytes(FrameBytes);
+    MonitoringForm.QueueFrameBytes(FrameBytes, FrameHeader.Format, FrameHeader.Width, FrameHeader.Height);
 end;
 
 procedure TServerManager.ProcessHVNCBinaryFrame(aLine: TncLine;
