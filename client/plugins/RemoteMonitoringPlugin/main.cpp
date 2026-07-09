@@ -12,6 +12,15 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+// Media Foundation headers
+#include <unknwn.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mftransform.h>
+#include <mferror.h>
+#include <codecapi.h>
+
 #include "../../include/json.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -51,7 +60,7 @@ struct MonitorFrameHeader {
 
 static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_MONITOR_FRAME = 0x03;
-static const uint32_t MONITOR_FRAME_FORMAT_JPEG = 1;
+static const uint32_t MONITOR_FRAME_FORMAT_H264 = 2;
 
 static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
@@ -66,6 +75,370 @@ static bool g_hasCaptureRect = false;
 
 static mutex g_gdiplusMutex;
 static ULONG_PTR g_gdiplusToken = 0;
+
+// COM GUID definitions for absolute compiler portability
+#ifndef CLSID_CMSH264EncoderMFT
+static const GUID CLSID_CMSH264EncoderMFT = { 0x6ca50380, 0x1114, 0x4159, { 0x83, 0x93, 0x44, 0x2f, 0xe3, 0xe1, 0xa3, 0xc9 } };
+#endif
+
+#ifndef IID_IMFTransform
+static const GUID IID_IMFTransform = { 0xbf94c121, 0x5b05, 0x4e6f, { 0x80, 0x00, 0xba, 0x59, 0x89, 0x61, 0x41, 0x4d } };
+#endif
+
+#ifndef MFMediaType_Video
+static const GUID MFMediaType_Video = { 0x73646976, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+#endif
+
+#ifndef MFVideoFormat_H264
+static const GUID MFVideoFormat_H264 = { 0x34363248, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+#endif
+
+#ifndef MFVideoFormat_NV12
+static const GUID MFVideoFormat_NV12 = { 0x3231564e, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+#endif
+
+#ifndef MF_MT_MAJOR_TYPE
+static const GUID MF_MT_MAJOR_TYPE = { 0x48eba18e, 0xf8c9, 0x4687, { 0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f } };
+#endif
+
+#ifndef MF_MT_SUBTYPE
+static const GUID MF_MT_SUBTYPE = { 0xf7e34c9a, 0x42e8, 0x4714, { 0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5 } };
+#endif
+
+#ifndef MF_MT_FRAME_SIZE
+static const GUID MF_MT_FRAME_SIZE = { 0x1652c33d, 0xd6b2, 0x4012, { 0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d } };
+#endif
+
+#ifndef MF_MT_FRAME_RATE
+static const GUID MF_MT_FRAME_RATE = { 0xc459a2e8, 0x3d2c, 0x4e44, { 0xb1, 0x32, 0xfe, 0xe5, 0x15, 0x6c, 0x7b, 0xb0 } };
+#endif
+
+#ifndef MF_MT_AVG_BITRATE
+static const GUID MF_MT_AVG_BITRATE = { 0xf3504b43, 0x450a, 0x4224, { 0xaa, 0x11, 0x20, 0xaa, 0x3d, 0x00, 0x66, 0x76 } };
+#endif
+
+#ifndef MF_MT_INTERLACE_MODE
+static const GUID MF_MT_INTERLACE_MODE = { 0xe2724bb8, 0xe676, 0x4806, { 0xb4, 0xb2, 0xa8, 0xd6, 0xef, 0xb4, 0x4c, 0xcd } };
+#endif
+
+#ifndef MF_MT_MPEG2_PROFILE
+static const GUID MF_MT_MPEG2_PROFILE = { 0x962221e9, 0x535f, 0x478c, { 0x84, 0x6b, 0xaa, 0x9c, 0x12, 0x98, 0x9a, 0x56 } };
+#endif
+
+#ifndef eAVEncH264VProfile_Main
+#define eAVEncH264VProfile_Main 77
+#endif
+
+#ifndef IID_ICodecAPI
+static const GUID IID_ICodecAPI = { 0x9010e743, 0x9477, 0x4497, { 0xa1, 0x78, 0xb7, 0xae, 0x9b, 0xce, 0x22, 0xf1 } };
+#endif
+
+#ifndef CODECAPI_AVEncMPVGOPSize
+static const GUID CODECAPI_AVEncMPVGOPSize = { 0x951a7a7e, 0xdcee, 0x4630, { 0xb2, 0xc4, 0x98, 0xf1, 0xb1, 0x37, 0x04, 0x16 } };
+#endif
+
+// Dynamic MF Function types
+typedef HRESULT (WINAPI *MFStartupFn)(ULONG, DWORD);
+typedef HRESULT (WINAPI *MFShutdownFn)();
+typedef HRESULT (WINAPI *MFCreateSampleFn)(IMFSample**);
+typedef HRESULT (WINAPI *MFCreateMemoryBufferFn)(DWORD, IMFMediaBuffer**);
+typedef HRESULT (WINAPI *MFCreateMediaTypeFn)(IMFMediaType**);
+
+static HRESULT SetAttributeSize(IMFAttributes* pAttr, REFGUID guid, UINT32 width, UINT32 height) {
+    return pAttr->SetUINT64(guid, ((UINT64)width << 32) | height);
+}
+
+static HRESULT SetAttributeRatio(IMFAttributes* pAttr, REFGUID guid, UINT32 numerator, UINT32 denominator) {
+    return pAttr->SetUINT64(guid, ((UINT64)numerator << 32) | denominator);
+}
+
+class CH264Encoder {
+private:
+    HMODULE m_hMFPlat = NULL;
+    HMODULE m_hMFLib = NULL;
+    bool m_bMFStarted = false;
+
+    MFStartupFn m_pMFStartup = NULL;
+    MFShutdownFn m_pMFShutdown = NULL;
+    MFCreateSampleFn m_pMFCreateSample = NULL;
+    MFCreateMemoryBufferFn m_pMFCreateMemoryBuffer = NULL;
+    MFCreateMediaTypeFn m_pMFCreateMediaType = NULL;
+
+    IMFTransform* m_pTransform = NULL;
+    int m_width = 0;
+    int m_height = 0;
+    UINT64 m_timestamp = 0;
+
+public:
+    CH264Encoder() {}
+
+    ~CH264Encoder() {
+        Shutdown();
+    }
+
+    bool InitializeMF() {
+        if (m_bMFStarted) return true;
+
+        m_hMFPlat = LoadLibraryA("mfplat.dll");
+        m_hMFLib = LoadLibraryA("mf.dll");
+        if (!m_hMFPlat) return false;
+
+        m_pMFStartup = (MFStartupFn)GetProcAddress(m_hMFPlat, "MFStartup");
+        m_pMFShutdown = (MFShutdownFn)GetProcAddress(m_hMFPlat, "MFShutdown");
+        m_pMFCreateSample = (MFCreateSampleFn)GetProcAddress(m_hMFPlat, "MFCreateSample");
+        m_pMFCreateMemoryBuffer = (MFCreateMemoryBufferFn)GetProcAddress(m_hMFPlat, "MFCreateMemoryBuffer");
+        m_pMFCreateMediaType = (MFCreateMediaTypeFn)GetProcAddress(m_hMFPlat, "MFCreateMediaType");
+
+        if (!m_pMFStartup || !m_pMFShutdown || !m_pMFCreateSample ||
+            !m_pMFCreateMemoryBuffer || !m_pMFCreateMediaType) {
+            Shutdown();
+            return false;
+        }
+
+        HRESULT hr = m_pMFStartup(0x00020070, 0); // MF_VERSION
+        if (FAILED(hr)) {
+            Shutdown();
+            return false;
+        }
+
+        m_bMFStarted = true;
+        return true;
+    }
+
+    void Shutdown() {
+        ResetMFT();
+        if (m_bMFStarted && m_pMFShutdown) {
+            m_pMFShutdown();
+            m_bMFStarted = false;
+        }
+        if (m_hMFLib) {
+            FreeLibrary(m_hMFLib);
+            m_hMFLib = NULL;
+        }
+        if (m_hMFPlat) {
+            FreeLibrary(m_hMFPlat);
+            m_hMFPlat = NULL;
+        }
+    }
+
+    void ResetMFT() {
+        if (m_pTransform) {
+            m_pTransform->Release();
+            m_pTransform = NULL;
+        }
+        m_width = 0;
+        m_height = 0;
+        m_timestamp = 0;
+    }
+
+    bool Configure(int width, int height, int fps) {
+        if (m_pTransform && m_width == width && m_height == height) {
+            return true;
+        }
+
+        ResetMFT();
+
+        if (!InitializeMF()) return false;
+
+        HRESULT hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, NULL, CLSCTX_INPROC_SERVER, IID_IMFTransform, (void**)&m_pTransform);
+        if (FAILED(hr)) return false;
+
+        // Determine bitrate based on resolution
+        UINT32 bitrate = 1000000; // default 1 Mbps
+        int pixels = width * height;
+        if (pixels >= 1920 * 1080) bitrate = 3000000; // 3 Mbps
+        else if (pixels >= 1280 * 720) bitrate = 2000000; // 2 Mbps
+        else if (pixels >= 800 * 600) bitrate = 1200000; // 1.2 Mbps
+
+        // Create output media type
+        IMFMediaType* pOutputType = NULL;
+        hr = m_pMFCreateMediaType(&pOutputType);
+        if (FAILED(hr)) return false;
+
+        pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        pOutputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+        pOutputType->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
+        SetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, width, height);
+        SetAttributeRatio(pOutputType, MF_MT_FRAME_RATE, fps, 1);
+        pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, 2); // Progressive
+        pOutputType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+
+        hr = m_pTransform->SetOutputType(0, pOutputType, 0);
+        pOutputType->Release();
+        if (FAILED(hr)) return false;
+
+        // Create input media type
+        IMFMediaType* pInputType = NULL;
+        hr = m_pMFCreateMediaType(&pInputType);
+        if (FAILED(hr)) return false;
+
+        pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        pInputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+        SetAttributeSize(pInputType, MF_MT_FRAME_SIZE, width, height);
+        SetAttributeRatio(pInputType, MF_MT_FRAME_RATE, fps, 1);
+        pInputType->SetUINT32(MF_MT_INTERLACE_MODE, 2); // Progressive
+
+        hr = m_pTransform->SetInputType(0, pInputType, 0);
+        pInputType->Release();
+        if (FAILED(hr)) return false;
+
+        // Configure GOP size for low latency keyframe insertion
+        ICodecAPI* pCodecAPI = NULL;
+        if (SUCCEEDED(m_pTransform->QueryInterface(IID_ICodecAPI, (void**)&pCodecAPI))) {
+            VARIANT varGOP{};
+            varGOP.vt = VT_UI4;
+            varGOP.ulVal = 30; // GOP size of 30 frames
+            pCodecAPI->SetValue(&CODECAPI_AVEncMPVGOPSize, &varGOP);
+            pCodecAPI->Release();
+        }
+
+        hr = m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        hr = m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+        m_width = width;
+        m_height = height;
+        m_timestamp = 0;
+        return true;
+    }
+
+    bool EncodeFrame(const unsigned char* nv12Bytes, int fps, vector<unsigned char>& outBytes) {
+        outBytes.clear();
+        if (!m_pTransform) return false;
+
+        IMFSample* pSample = NULL;
+        HRESULT hr = m_pMFCreateSample(&pSample);
+        if (FAILED(hr)) return false;
+
+        IMFMediaBuffer* pBuffer = NULL;
+        DWORD bufSize = (m_width * m_height * 3) / 2;
+        hr = m_pMFCreateMemoryBuffer(bufSize, &pBuffer);
+        if (FAILED(hr)) {
+            pSample->Release();
+            return false;
+        }
+
+        BYTE* pData = NULL;
+        pBuffer->Lock(&pData, NULL, NULL);
+        memcpy(pData, nv12Bytes, bufSize);
+        pBuffer->Unlock();
+        pBuffer->SetCurrentLength(bufSize);
+
+        pSample->AddBuffer(pBuffer);
+        pBuffer->Release();
+
+        UINT64 duration = 10000000ULL / fps; // 100-ns units
+        pSample->SetSampleTime(m_timestamp);
+        pSample->SetSampleDuration(duration);
+        m_timestamp += duration;
+
+        hr = m_pTransform->ProcessInput(0, pSample, 0);
+        pSample->Release();
+        if (FAILED(hr)) return false;
+
+        MFT_OUTPUT_STREAM_INFO streamInfo{};
+        m_pTransform->GetOutputStreamInfo(0, &streamInfo);
+
+        IMFSample* pOutputSample = NULL;
+        IMFMediaBuffer* pOutputBuffer = NULL;
+        if (!(streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
+            m_pMFCreateSample(&pOutputSample);
+            m_pMFCreateMemoryBuffer(streamInfo.cbSize, &pOutputBuffer);
+            pOutputSample->AddBuffer(pOutputBuffer);
+        }
+
+        MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
+        outputDataBuffer.dwStreamID = 0;
+        outputDataBuffer.pSample = pOutputSample;
+        outputDataBuffer.dwStatus = 0;
+        outputDataBuffer.pEvents = NULL;
+
+        DWORD status = 0;
+        HRESULT hrProcess = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+        if (SUCCEEDED(hrProcess)) {
+            IMFSample* pResSample = outputDataBuffer.pSample ? outputDataBuffer.pSample : pOutputSample;
+            if (pResSample) {
+                IMFMediaBuffer* pResBuffer = NULL;
+                hr = pResSample->GetBufferByIndex(0, &pResBuffer);
+                if (SUCCEEDED(hr)) {
+                    BYTE* pOutData = NULL;
+                    DWORD currentLength = 0;
+                    pResBuffer->Lock(&pOutData, NULL, &currentLength);
+                    if (currentLength > 0) {
+                        outBytes.resize(currentLength);
+                        memcpy(outBytes.data(), pOutData, currentLength);
+                    }
+                    pResBuffer->Unlock();
+                    pResBuffer->Release();
+                }
+            }
+        }
+
+        if (outputDataBuffer.pSample && outputDataBuffer.pSample != pOutputSample) {
+            outputDataBuffer.pSample->Release();
+        }
+        if (outputDataBuffer.pEvents) {
+            outputDataBuffer.pEvents->Release();
+        }
+        if (pOutputSample) {
+            pOutputSample->Release();
+        }
+        if (pOutputBuffer) {
+            pOutputBuffer->Release();
+        }
+
+        return !outBytes.empty();
+    }
+};
+
+static CH264Encoder g_encoder;
+
+static void ConvertBGRXtoNV12(const unsigned char* bgrx, int width, int height, unsigned char* nv12) {
+    int y_plane_size = width * height;
+    unsigned char* y_plane = nv12;
+    unsigned char* uv_plane = nv12 + y_plane_size;
+
+    // Populate Y plane
+    for (int i = 0; i < y_plane_size; ++i) {
+        int bgrx_idx = i * 4;
+        unsigned char b = bgrx[bgrx_idx];
+        unsigned char g = bgrx[bgrx_idx + 1];
+        unsigned char r = bgrx[bgrx_idx + 2];
+
+        int y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+        y_plane[i] = (unsigned char)max(0, min(y, 255));
+    }
+
+    // Populate interleaved UV plane with 2x2 downsampling
+    int uv_width = width / 2;
+    int uv_height = height / 2;
+    for (int r = 0; r < uv_height; ++r) {
+        for (int c = 0; c < uv_width; ++c) {
+            int src_r = r * 2;
+            int src_c = c * 2;
+
+            int sum_r = 0, sum_g = 0, sum_b = 0;
+            for (int dy = 0; dy < 2; ++dy) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    int idx = ((src_r + dy) * width + (src_c + dx)) * 4;
+                    sum_b += bgrx[idx];
+                    sum_g += bgrx[idx + 1];
+                    sum_r += bgrx[idx + 2];
+                }
+            }
+
+            int avg_b = sum_b / 4;
+            int avg_g = sum_g / 4;
+            int avg_r = sum_r / 4;
+
+            int u = (((-38 * avg_r - 74 * avg_g + 112 * avg_b + 128) >> 8) + 128);
+            int v = (((112 * avg_r - 94 * avg_g - 18 * avg_b + 128) >> 8) + 128);
+
+            int uv_idx = (r * uv_width + c) * 2;
+            uv_plane[uv_idx] = (unsigned char)max(0, min(u, 255));
+            uv_plane[uv_idx + 1] = (unsigned char)max(0, min(v, 255));
+        }
+    }
+}
 
 static bool safe_send_raw(SOCKET sock, const string& data) {
     const char* ptr = data.c_str();
@@ -94,8 +467,9 @@ static bool safe_send_monitor_frame(SOCKET sock,
                                     int fps,
                                     int width,
                                     int height,
-                                    const vector<unsigned char>& jpegBytes) {
-    if (jpegBytes.empty())
+                                    int format,
+                                    const vector<unsigned char>& frameBytes) {
+    if (frameBytes.empty())
         return false;
 
     MonitorFrameHeader frameHeader{};
@@ -104,19 +478,19 @@ static bool safe_send_monitor_frame(SOCKET sock,
     frameHeader.fps = (uint32_t)max(0, fps);
     frameHeader.width = (uint32_t)max(0, width);
     frameHeader.height = (uint32_t)max(0, height);
-    frameHeader.format = MONITOR_FRAME_FORMAT_JPEG;
-    frameHeader.dataSize = (uint32_t)jpegBytes.size();
+    frameHeader.format = (uint32_t)format;
+    frameHeader.dataSize = (uint32_t)frameBytes.size();
 
     PacketHeader packetHeader{};
     packetHeader.signature = PACKET_SIGNATURE;
     packetHeader.type = PACKET_TYPE_MONITOR_FRAME;
-    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + jpegBytes.size());
+    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + frameBytes.size());
 
     string packet;
     packet.resize(sizeof(PacketHeader) + packetHeader.size);
     memcpy(&packet[0], &packetHeader, sizeof(PacketHeader));
     memcpy(&packet[sizeof(PacketHeader)], &frameHeader, sizeof(MonitorFrameHeader));
-    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], jpegBytes.data(), jpegBytes.size());
+    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], frameBytes.data(), frameBytes.size());
 
     lock_guard<mutex> lock(g_sendMutex);
     return safe_send_raw(sock, packet);
@@ -240,29 +614,6 @@ static void shutdown_gdiplus() {
     }
 }
 
-static int get_encoder_clsid(const WCHAR* mimeType, CLSID* clsid) {
-    UINT count = 0;
-    UINT size = 0;
-
-    GetImageEncodersSize(&count, &size);
-    if (size == 0)
-        return -1;
-
-    vector<unsigned char> buffer(size);
-    ImageCodecInfo* codecs = reinterpret_cast<ImageCodecInfo*>(buffer.data());
-    if (GetImageEncoders(count, size, codecs) != Ok)
-        return -1;
-
-    for (UINT i = 0; i < count; ++i) {
-        if (wcscmp(codecs[i].MimeType, mimeType) == 0) {
-            *clsid = codecs[i].Clsid;
-            return (int)i;
-        }
-    }
-
-    return -1;
-}
-
 static DWORD now_ms() {
     return GetTickCount();
 }
@@ -278,91 +629,13 @@ static int automatic_fps_for_scale(int scalePercent) {
     return 25;
 }
 
-static ULONG automatic_jpeg_quality(int width, int height, int scalePercent) {
-    int pixels = max(1, width * height);
-
-    if (scalePercent >= 90 || pixels >= 2500000) return 30;
-    if (scalePercent >= 70 || pixels >= 1600000) return 36;
-    if (scalePercent >= 50 || pixels >= 900000) return 44;
-    return 52;
-}
-
-static bool bitmap_to_jpeg(HBITMAP bitmapHandle, ULONG quality, vector<unsigned char>& bytes, string& error) {
-    bytes.clear();
-
-    if (!ensure_gdiplus()) {
-        error = "GDI+ could not be started";
-        return false;
-    }
-
-    CLSID jpegClsid;
-    if (get_encoder_clsid(L"image/jpeg", &jpegClsid) < 0) {
-        error = "JPEG encoder not found";
-        return false;
-    }
-
-    Bitmap bitmap(bitmapHandle, NULL);
-    if (bitmap.GetLastStatus() != Ok) {
-        error = "Bitmap conversion failed";
-        return false;
-    }
-
-    IStream* stream = NULL;
-    if (CreateStreamOnHGlobal(NULL, TRUE, &stream) != S_OK || !stream) {
-        error = "Memory stream could not be created";
-        return false;
-    }
-
-    EncoderParameters params{};
-    params.Count = 1;
-    params.Parameter[0].Guid = EncoderQuality;
-    params.Parameter[0].Type = EncoderParameterValueTypeLong;
-    params.Parameter[0].NumberOfValues = 1;
-    params.Parameter[0].Value = &quality;
-
-    Status status = bitmap.Save(stream, &jpegClsid, &params);
-    if (status != Ok) {
-        stream->Release();
-        error = "JPEG encoding failed";
-        return false;
-    }
-
-    STATSTG stat{};
-    if (stream->Stat(&stat, STATFLAG_NONAME) != S_OK || stat.cbSize.QuadPart <= 0) {
-        stream->Release();
-        error = "Encoded image size could not be read";
-        return false;
-    }
-
-    if (stat.cbSize.QuadPart > 64LL * 1024LL * 1024LL) {
-        stream->Release();
-        error = "Encoded image is too large";
-        return false;
-    }
-
-    LARGE_INTEGER seekPos{};
-    stream->Seek(seekPos, STREAM_SEEK_SET, NULL);
-
-    bytes.resize((size_t)stat.cbSize.QuadPart);
-    ULONG readBytes = 0;
-    HRESULT readResult = stream->Read(bytes.data(), (ULONG)bytes.size(), &readBytes);
-    stream->Release();
-
-    if (readResult != S_OK || readBytes != bytes.size()) {
-        error = "Encoded image could not be read";
-        bytes.clear();
-        return false;
-    }
-
-    return true;
-}
-
-static bool capture_monitor_frame(const RECT& rect,
-                                  int scalePercent,
-                                  vector<unsigned char>& jpegBytes,
-                                  int& outputWidth,
-                                  int& outputHeight,
-                                  string& error) {
+static bool capture_monitor_frame_h264(const RECT& rect,
+                                       int scalePercent,
+                                       int targetFps,
+                                       vector<unsigned char>& h264Bytes,
+                                       int& outputWidth,
+                                       int& outputHeight,
+                                       string& error) {
     scalePercent = max(10, min(scalePercent, 100));
 
     int sourceWidth = rect.right - rect.left;
@@ -372,9 +645,11 @@ static bool capture_monitor_frame(const RECT& rect,
         return false;
     }
 
-    outputWidth = max(1, (sourceWidth * scalePercent) / 100);
-    outputHeight = max(1, (sourceHeight * scalePercent) / 100);
-    ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
+    // Align to even dimensions for NV12 conversion and H264 encoding
+    int rawW = max(1, (sourceWidth * scalePercent) / 100);
+    int rawH = max(1, (sourceHeight * scalePercent) / 100);
+    outputWidth = (rawW + 1) & ~1;
+    outputHeight = (rawH + 1) & ~1;
 
     HDC screenDC = GetDC(NULL);
     if (!screenDC) {
@@ -389,11 +664,21 @@ static bool capture_monitor_frame(const RECT& rect,
         return false;
     }
 
-    HBITMAP bitmap = CreateCompatibleBitmap(screenDC, outputWidth, outputHeight);
-    if (!bitmap) {
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = outputWidth;
+    bmi.bmiHeader.biHeight = -outputHeight; // Top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* pPixels = NULL;
+    HBITMAP bitmap = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &pPixels, NULL, 0);
+    if (!bitmap || !pPixels) {
+        if (bitmap) DeleteObject(bitmap);
         DeleteDC(memoryDC);
         ReleaseDC(NULL, screenDC);
-        error = "Capture bitmap could not be created";
+        error = "Capture DIB section could not be created";
         return false;
     }
 
@@ -424,12 +709,34 @@ static bool capture_monitor_frame(const RECT& rect,
         return false;
     }
 
-    bool encoded = bitmap_to_jpeg(bitmap, jpegQuality, jpegBytes, error);
+    // Allocate buffer and convert BGRX to NV12
+    int nv12_size = (outputWidth * outputHeight * 3) / 2;
+    vector<unsigned char> nv12Bytes(nv12_size);
+    ConvertBGRXtoNV12(reinterpret_cast<const unsigned char*>(pPixels), outputWidth, outputHeight, nv12Bytes.data());
     DeleteObject(bitmap);
-    return encoded;
+
+    // Initialize/configure encoder
+    if (!g_encoder.Configure(outputWidth, outputHeight, targetFps)) {
+        error = "H.264 Encoder configuration failed";
+        return false;
+    }
+
+    // Encode frame
+    if (!g_encoder.EncodeFrame(nv12Bytes.data(), targetFps, h264Bytes)) {
+        if (h264Bytes.empty()) {
+            // Need more input frames to produce first output, not a hard error
+            error = "";
+            return true;
+        }
+        error = "H.264 encoding failed";
+        return false;
+    }
+
+    return true;
 }
 
 static void capture_loop() {
+    CoInitialize(NULL);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 
     while (g_captureRunning.load()) {
@@ -457,15 +764,17 @@ static void capture_loop() {
             break;
         }
 
-        vector<unsigned char> jpegBytes;
+        vector<unsigned char> h264Bytes;
         int width = 0;
         int height = 0;
         string error;
 
-        if (capture_monitor_frame(captureRect, scale, jpegBytes, width, height, error)) {
-            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, jpegBytes)) {
-                g_captureRunning.store(false);
-                break;
+        if (capture_monitor_frame_h264(captureRect, scale, targetFps, h264Bytes, width, height, error)) {
+            if (!h264Bytes.empty()) {
+                if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, MONITOR_FRAME_FORMAT_H264, h264Bytes)) {
+                    g_captureRunning.store(false);
+                    break;
+                }
             }
         } else {
             send_monitor_error(sock, error.empty() ? "Capture failed" : error);
@@ -483,6 +792,7 @@ static void capture_loop() {
             waitMs -= chunk;
         }
     }
+    CoUninitialize();
 }
 
 static void stop_capture_thread() {
@@ -497,6 +807,7 @@ static void stop_capture_thread() {
 
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
+    g_encoder.ResetMFT();
 }
 
 static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
@@ -532,6 +843,7 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
     json response;
     response["action"] = "monitorstatus";
     response["status"] = "started";
+    response["codec"] = "h264";
     response["monitor"] = safeMonitorIndex;
     response["scale"] = scalePercent;
     response["fps"] = targetFps;
@@ -546,14 +858,9 @@ static void simulate_mouse(const string& event, int button, int x, int y) {
         rect = g_captureRect;
     }
 
-    // Normalized (0-65535) to Screen Absolute
-    // x_abs = rect.left + (x * (rect.right - rect.left) / 65535)
-    // SendInput uses MOUSEEVENTF_ABSOLUTE which maps 0-65535 to the virtual screen.
-
     int screen_x = rect.left + MulDiv(x, rect.right - rect.left, 65535);
     int screen_y = rect.top + MulDiv(y, rect.bottom - rect.top, 65535);
 
-    // Map screen coordinate to MOUSEEVENTF_ABSOLUTE (0-65535 of virtual screen)
     int v_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int v_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int v_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -654,6 +961,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_DETACH) {
         g_captureRunning.store(false);
+        g_encoder.Shutdown();
         shutdown_gdiplus();
     }
     return TRUE;

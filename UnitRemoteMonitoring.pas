@@ -705,10 +705,10 @@ begin
   FLastStatusTick    := 0;
   FPendingFrame      := '';
   SetLength(FPendingFrameBytes, 0);
-  FPendingFrameFormat := MONITOR_FRAME_FORMAT_JPEG;
+  FPendingFrameFormat := MONITOR_FRAME_FORMAT_H264;
   FDecodeStopping    := False;
   FDecodedFrameSize  := 0;
-  FCurrentCodec      := 'jpeg';
+  FCurrentCodec      := 'h264';
 
   if not Assigned(FFrameLock) then
     FFrameLock := TCriticalSection.Create;
@@ -922,7 +922,7 @@ begin
   FFrameLock.Enter;
   try
     FPendingFrame       := AText;
-    FPendingFrameFormat := MONITOR_FRAME_FORMAT_JPEG;
+    FPendingFrameFormat := MONITOR_FRAME_FORMAT_H264;
     SetLength(FPendingFrameBytes, 0);
     if Assigned(FDecodeEvent) then
       FDecodeEvent.SetEvent;
