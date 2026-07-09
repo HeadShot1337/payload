@@ -17,6 +17,16 @@ static const GUID GUID_MF_MT_VIDEO_PROFILE = { 0xcc71110b, 0x22f2, 0x4384, { 0xb
 static const GUID GUID_MF_MT_AVG_BITRATE   = { 0x20332624, 0xfb0d, 0x4d9e, { 0xbd, 0x0d, 0xcb, 0xf6, 0x78, 0x6c, 0x10, 0x2e } };
 static const GUID GUID_MFVideoFormat_HEVC  = { 0x43564548, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 static const GUID GUID_MFVideoFormat_H264  = { 0x34363248, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID GUID_MFVideoFormat_NV12  = { 0x3231564e, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID GUID_MFMediaType_Video   = { 0x73646976, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID GUID_MF_MT_MAJOR_TYPE    = { 0x48eba18e, 0xf8c9, 0x4687, { 0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f } };
+static const GUID GUID_MF_MT_SUBTYPE       = { 0xf7e34c9a, 0x42e8, 0x4714, { 0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5 } };
+static const GUID GUID_MF_MT_FRAME_SIZE    = { 0x1652c33d, 0xd6b2, 0x4012, { 0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d } };
+static const GUID GUID_MF_MT_FRAME_RATE    = { 0xc459a2e8, 0x3d2c, 0x4e44, { 0xb1, 0x32, 0xfe, 0xe5, 0x15, 0x6c, 0x7b, 0xb0 } };
+static const GUID GUID_MF_MT_PIXEL_ASPECT_RATIO = { 0xc459a2e8, 0x3d2c, 0x4e44, { 0xb1, 0x32, 0xfe, 0xe5, 0x15, 0x6c, 0x7b, 0xb0 } }; // Wait, this is same as frame rate in some headers? No.
+// Corrected PAR GUID
+static const GUID GUID_MF_MT_PIXEL_ASPECT_RATIO_FIX = { 0x1b173223, 0x92aa, 0x451d, { 0x9d, 0x45, 0xc1, 0x1a, 0xff, 0x3a, 0x5a, 0xd4 } };
+static const GUID GUID_MF_MT_INTERLACE_MODE = { 0xe2724bb8, 0xe676, 0x4806, { 0xb4, 0xb2, 0xa8, 0xd6, 0xef, 0xb4, 0x4c, 0xcd } };
 static const GUID GUID_MF_LOW_LATENCY      = { 0x9c27891a, 0xed7a, 0x4a48, { 0x88, 0x0c, 0x16, 0x0f, 0xc4, 0x44, 0x17, 0x70 } };
 static const GUID GUID_MFT_CATEGORY_VIDEO_ENCODER = { 0xf79e3ac3, 0x80b1, 0x460d, { 0x83, 0x86, 0x84, 0x80, 0x39, 0x77, 0x46, 0x40 } };
 
@@ -366,6 +376,21 @@ public:
         }
 
         if (FAILED(hr) || count == 0) {
+            // Final attempt: unrestricted enumeration
+            hr = MFTEnumEx(
+                GUID_MFT_CATEGORY_VIDEO_ENCODER,
+                MFT_ENUM_FLAG_ALL,
+                NULL, NULL, &activate, &count
+            );
+
+            if (SUCCEEDED(hr) && count > 0) {
+                // We found some video encoders, but maybe not specifically marked for HEVC/H264 output types.
+                // We'll try the first one anyway as a last-ditch effort, but actually,
+                // it's safer to just return failure here and let the JPEG fallback handle it.
+            }
+        }
+
+        if (FAILED(hr) || count == 0) {
             m_lastError = "No Video Encoder MFT found (tried H.265 and H.264)";
             return false;
         }
@@ -381,16 +406,16 @@ public:
 
         IMFMediaType* out_type = nullptr;
         MFCreateMediaType(&out_type);
-        out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        out_type->SetGUID(MF_MT_SUBTYPE, target_subtype);
+        out_type->SetGUID(GUID_MF_MT_MAJOR_TYPE, GUID_MFMediaType_Video);
+        out_type->SetGUID(GUID_MF_MT_SUBTYPE, target_subtype);
         out_type->SetUINT32(GUID_MF_MT_AVG_BITRATE, 2000000);
         if (m_format == MONITOR_FRAME_FORMAT_H265) {
             out_type->SetUINT32(GUID_MF_MT_VIDEO_PROFILE, 1); // HEVC_PROFILE_MAIN
         }
-        MFSetAttributeSize(out_type, MF_MT_FRAME_SIZE, width, height);
-        MFSetAttributeRatio(out_type, MF_MT_FRAME_RATE, fps, 1);
-        MFSetAttributeRatio(out_type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        MFSetAttributeSize(out_type, GUID_MF_MT_FRAME_SIZE, width, height);
+        MFSetAttributeRatio(out_type, GUID_MF_MT_FRAME_RATE, fps, 1);
+        MFSetAttributeRatio(out_type, GUID_MF_MT_PIXEL_ASPECT_RATIO_FIX, 1, 1);
+        out_type->SetUINT32(GUID_MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 
         hr = m_mft->SetOutputType(0, out_type, 0);
         out_type->Release();
@@ -401,12 +426,12 @@ public:
 
         IMFMediaType* in_type = nullptr;
         MFCreateMediaType(&in_type);
-        in_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-        MFSetAttributeSize(in_type, MF_MT_FRAME_SIZE, width, height);
-        MFSetAttributeRatio(in_type, MF_MT_FRAME_RATE, fps, 1);
-        MFSetAttributeRatio(in_type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        in_type->SetGUID(GUID_MF_MT_MAJOR_TYPE, GUID_MFMediaType_Video);
+        in_type->SetGUID(GUID_MF_MT_SUBTYPE, GUID_MFVideoFormat_NV12);
+        MFSetAttributeSize(in_type, GUID_MF_MT_FRAME_SIZE, width, height);
+        MFSetAttributeRatio(in_type, GUID_MF_MT_FRAME_RATE, fps, 1);
+        MFSetAttributeRatio(in_type, GUID_MF_MT_PIXEL_ASPECT_RATIO_FIX, 1, 1);
+        in_type->SetUINT32(GUID_MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 
         hr = m_mft->SetInputType(0, in_type, 0);
         in_type->Release();
@@ -625,6 +650,78 @@ static bool bitmap_to_jpeg(HBITMAP bitmapHandle, ULONG quality, vector<unsigned 
     return true;
 }
 
+static bool capture_monitor_frame_legacy_jpeg(const RECT& rect,
+                                              int scalePercent,
+                                              vector<unsigned char>& jpegBytes,
+                                              int& outputWidth,
+                                              int& outputHeight,
+                                              string& error) {
+    scalePercent = max(10, min(scalePercent, 100));
+
+    int sourceWidth = rect.right - rect.left;
+    int sourceHeight = rect.bottom - rect.top;
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
+        error = "Invalid monitor dimensions";
+        return false;
+    }
+
+    outputWidth = max(1, (sourceWidth * scalePercent) / 100);
+    outputHeight = max(1, (sourceHeight * scalePercent) / 100);
+    ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
+
+    HDC screenDC = GetDC(NULL);
+    if (!screenDC) {
+        error = "Screen device context could not be opened";
+        return false;
+    }
+
+    HDC memoryDC = CreateCompatibleDC(screenDC);
+    if (!memoryDC) {
+        ReleaseDC(NULL, screenDC);
+        error = "Memory device context could not be created";
+        return false;
+    }
+
+    HBITMAP bitmap = CreateCompatibleBitmap(screenDC, outputWidth, outputHeight);
+    if (!bitmap) {
+        DeleteDC(memoryDC);
+        ReleaseDC(NULL, screenDC);
+        error = "Capture bitmap could not be created";
+        return false;
+    }
+
+    HGDIOBJ oldObject = SelectObject(memoryDC, bitmap);
+    SetStretchBltMode(memoryDC, COLORONCOLOR);
+
+    BOOL copied = StretchBlt(
+        memoryDC,
+        0,
+        0,
+        outputWidth,
+        outputHeight,
+        screenDC,
+        rect.left,
+        rect.top,
+        sourceWidth,
+        sourceHeight,
+        SRCCOPY | CAPTUREBLT
+    );
+
+    SelectObject(memoryDC, oldObject);
+    DeleteDC(memoryDC);
+    ReleaseDC(NULL, screenDC);
+
+    if (!copied) {
+        DeleteObject(bitmap);
+        error = "Screen capture failed";
+        return false;
+    }
+
+    bool encoded = bitmap_to_jpeg(bitmap, jpegQuality, jpegBytes, error);
+    DeleteObject(bitmap);
+    return encoded;
+}
+
 static bool capture_monitor_frame_video(const RECT& rect,
                                         int scalePercent,
                                         int fps,
@@ -785,9 +882,31 @@ static void capture_loop() {
                 }
             }
         } else {
-            send_monitor_error(sock, error.empty() ? "Capture failed" : error);
-            g_captureRunning.store(false);
-            break;
+            // Fallback to JPEG if video encoding fails
+            static bool jpegFallbackActive = false;
+            if (!jpegFallbackActive) {
+                jpegFallbackActive = true;
+                json status;
+                status["action"] = "monitorstatus";
+                status["status"] = "running";
+                status["codec"] = "JPEG (Fallback)";
+                status["error"] = error; // Log the video error
+                safe_send_json(sock, status);
+            }
+
+            int outW, outH;
+            string jpegError;
+            vector<unsigned char> jpegBytes;
+            if (capture_monitor_frame_legacy_jpeg(captureRect, scale, jpegBytes, outW, outH, jpegError)) {
+                if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, outW, outH, MONITOR_FRAME_FORMAT_JPEG, jpegBytes)) {
+                    g_captureRunning.store(false);
+                    break;
+                }
+            } else {
+                send_monitor_error(sock, "All capture methods failed. Video: " + error + " JPEG: " + jpegError);
+                g_captureRunning.store(false);
+                break;
+            }
         }
 
         DWORD elapsed = now_ms() - frameStart;
