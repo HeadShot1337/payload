@@ -16,6 +16,7 @@
 static const GUID GUID_MF_MT_VIDEO_PROFILE = { 0xcc71110b, 0x22f2, 0x4384, { 0xb6, 0x96, 0xc9, 0xdb, 0x38, 0x34, 0x92, 0x98 } };
 static const GUID GUID_MF_MT_AVG_BITRATE   = { 0x20332624, 0xfb0d, 0x4d9e, { 0xbd, 0x0d, 0xcb, 0xf6, 0x78, 0x6c, 0x10, 0x2e } };
 static const GUID GUID_MFVideoFormat_HEVC  = { 0x43564548, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID GUID_MFVideoFormat_H264  = { 0x34363248, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 static const GUID GUID_MF_LOW_LATENCY      = { 0x9c27891a, 0xed7a, 0x4a48, { 0x88, 0x0c, 0x16, 0x0f, 0xc4, 0x44, 0x17, 0x70 } };
 static const GUID GUID_MFT_CATEGORY_VIDEO_ENCODER = { 0xf79e3ac3, 0x80b1, 0x460d, { 0x83, 0x86, 0x84, 0x80, 0x39, 0x77, 0x46, 0x40 } };
 
@@ -70,6 +71,7 @@ struct MonitorFrameHeader {
 static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_MONITOR_FRAME = 0x03;
 static const uint32_t MONITOR_FRAME_FORMAT_JPEG = 1;
+static const uint32_t MONITOR_FRAME_FORMAT_H264 = 2;
 static const uint32_t MONITOR_FRAME_FORMAT_H265 = 3;
 
 static atomic_bool g_captureRunning(false);
@@ -317,12 +319,14 @@ static void rgbx_to_nv12(const uint8_t* rgbx, uint8_t* nv12, int width, int heig
     }
 }
 
-class H265Encoder {
+class VideoEncoder {
 public:
-    H265Encoder() : m_mft(nullptr), m_width(0), m_height(0), m_fps(0), m_input_sample_count(0) {}
-    ~H265Encoder() { Shutdown(); }
+    VideoEncoder() : m_mft(nullptr), m_width(0), m_height(0), m_fps(0), m_format(0), m_input_sample_count(0) {}
+    ~VideoEncoder() { Shutdown(); }
 
     string GetLastError() const { return m_lastError; }
+    uint32_t GetFormat() const { return m_format; }
+    string GetCodecName() const { return m_format == MONITOR_FRAME_FORMAT_H265 ? "H265" : "H264"; }
 
     bool Initialize(int width, int height, int fps) {
         if (m_mft && m_width == width && m_height == height) return true;
@@ -334,45 +338,55 @@ public:
             return false;
         }
 
-        // Dynamically find an HEVC encoder instead of using a hardcoded CLSID
-        MFT_REGISTER_TYPE_INFO outputType = { MFMediaType_Video, GUID_MFVideoFormat_HEVC };
+        // Try H.265 first, then fall back to H.264
+        m_format = MONITOR_FRAME_FORMAT_H265;
+        GUID target_subtype = GUID_MFVideoFormat_HEVC;
+
+        MFT_REGISTER_TYPE_INFO outputType = { MFMediaType_Video, target_subtype };
         IMFActivate** activate = nullptr;
         UINT32 count = 0;
 
         hr = MFTEnumEx(
             GUID_MFT_CATEGORY_VIDEO_ENCODER,
             MFT_ENUM_FLAG_ALL | MFT_ENUM_FLAG_SORTANDFILTER,
-            NULL,           // Input type
-            &outputType,    // Output type
-            &activate,
-            &count
+            NULL, &outputType, &activate, &count
         );
 
         if (FAILED(hr) || count == 0) {
-            m_lastError = "No H.265 Encoder MFT found: " + to_string(hr);
+            // Fallback to H.264
+            m_format = MONITOR_FRAME_FORMAT_H264;
+            target_subtype = GUID_MFVideoFormat_H264;
+            outputType.guidSubtype = target_subtype;
+
+            hr = MFTEnumEx(
+                GUID_MFT_CATEGORY_VIDEO_ENCODER,
+                MFT_ENUM_FLAG_ALL | MFT_ENUM_FLAG_SORTANDFILTER,
+                NULL, &outputType, &activate, &count
+            );
+        }
+
+        if (FAILED(hr) || count == 0) {
+            m_lastError = "No Video Encoder MFT found (tried H.265 and H.264)";
             return false;
         }
 
-        // Use the first available encoder
         hr = activate[0]->ActivateObject(IID_PPV_ARGS(&m_mft));
-
-        // Clean up activation objects
-        for (UINT32 i = 0; i < count; i++) {
-            activate[i]->Release();
-        }
+        for (UINT32 i = 0; i < count; i++) activate[i]->Release();
         CoTaskMemFree(activate);
 
         if (FAILED(hr)) {
-            m_lastError = "Failed to activate H265 Encoder MFT: " + to_string(hr);
+            m_lastError = "Failed to activate Encoder MFT: " + to_string(hr);
             return false;
         }
 
         IMFMediaType* out_type = nullptr;
         MFCreateMediaType(&out_type);
         out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        out_type->SetGUID(MF_MT_SUBTYPE, GUID_MFVideoFormat_HEVC); // Annex B default
-        out_type->SetUINT32(GUID_MF_MT_AVG_BITRATE, 2000000); // 2 Mbps baseline
-        out_type->SetUINT32(GUID_MF_MT_VIDEO_PROFILE, 1); // HEVC_PROFILE_MAIN
+        out_type->SetGUID(MF_MT_SUBTYPE, target_subtype);
+        out_type->SetUINT32(GUID_MF_MT_AVG_BITRATE, 2000000);
+        if (m_format == MONITOR_FRAME_FORMAT_H265) {
+            out_type->SetUINT32(GUID_MF_MT_VIDEO_PROFILE, 1); // HEVC_PROFILE_MAIN
+        }
         MFSetAttributeSize(out_type, MF_MT_FRAME_SIZE, width, height);
         MFSetAttributeRatio(out_type, MF_MT_FRAME_RATE, fps, 1);
         MFSetAttributeRatio(out_type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -520,6 +534,7 @@ private:
     int m_width;
     int m_height;
     int m_fps;
+    uint32_t m_format;
     LONGLONG m_input_sample_count;
     string m_lastError;
 };
@@ -610,14 +625,14 @@ static bool bitmap_to_jpeg(HBITMAP bitmapHandle, ULONG quality, vector<unsigned 
     return true;
 }
 
-static bool capture_monitor_frame_h265(const RECT& rect,
-                                       int scalePercent,
-                                       int fps,
-                                       H265Encoder& encoder,
-                                       vector<unsigned char>& frameBytes,
-                                       int& outputWidth,
-                                       int& outputHeight,
-                                       string& error) {
+static bool capture_monitor_frame_video(const RECT& rect,
+                                        int scalePercent,
+                                        int fps,
+                                        VideoEncoder& encoder,
+                                        vector<unsigned char>& frameBytes,
+                                        int& outputWidth,
+                                        int& outputHeight,
+                                        string& error) {
     scalePercent = max(10, min(scalePercent, 100));
 
     int sourceWidth = rect.right - rect.left;
@@ -696,7 +711,7 @@ static bool capture_monitor_frame_h265(const RECT& rect,
         DeleteObject(bitmap);
         DeleteDC(memoryDC);
         ReleaseDC(NULL, screenDC);
-        error = "H.265 encoder initialization failed: " + encoder.GetLastError();
+        error = "Video encoder initialization failed: " + encoder.GetLastError();
         return false;
     }
 
@@ -709,7 +724,7 @@ static bool capture_monitor_frame_h265(const RECT& rect,
 
     frameBytes.clear();
     if (!encoder.Encode(nv12.data(), frameBytes)) {
-        error = "H.265 encoding failed";
+        error = "Video encoding failed";
         return false;
     }
 
@@ -719,7 +734,7 @@ static bool capture_monitor_frame_h265(const RECT& rect,
 static void capture_loop() {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-    H265Encoder encoder;
+    VideoEncoder encoder;
 
     while (g_captureRunning.load()) {
         DWORD frameStart = now_ms();
@@ -751,11 +766,22 @@ static void capture_loop() {
         int height = 0;
         string error;
 
-        if (capture_monitor_frame_h265(captureRect, scale, targetFps, encoder, frameBytes, width, height, error)) {
+        if (capture_monitor_frame_video(captureRect, scale, targetFps, encoder, frameBytes, width, height, error)) {
             if (!frameBytes.empty()) {
-                if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, MONITOR_FRAME_FORMAT_H265, frameBytes)) {
+                if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, encoder.GetFormat(), frameBytes)) {
                     g_captureRunning.store(false);
                     break;
+                }
+
+                // Periodically report actual codec
+                static DWORD lastCodecReport = 0;
+                if (now_ms() - lastCodecReport > 5000) {
+                    lastCodecReport = now_ms();
+                    json status;
+                    status["action"] = "monitorstatus";
+                    status["status"] = "running";
+                    status["codec"] = encoder.GetCodecName();
+                    safe_send_json(sock, status);
                 }
             }
         } else {
@@ -826,7 +852,7 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
     json response;
     response["action"] = "monitorstatus";
     response["status"] = "started";
-    response["codec"] = "H265";
+    response["codec"] = "AUTO"; // Client will report actual codec upon first frame
     response["monitor"] = safeMonitorIndex;
     response["scale"] = scalePercent;
     response["fps"] = targetFps;
