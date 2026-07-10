@@ -44,6 +44,10 @@ type
     FFrameTimer       : TTimer;
     FPendingFrame     : string;
     FPendingFrameBytes: TBytes;
+    FPendingFrameFormat: Integer;
+    FPendingFrameWidth: Integer;
+    FPendingFrameHeight: Integer;
+    FDecodedFrameFormat: Integer;
     FFrameLock        : TCriticalSection;
     FDecodeEvent      : TEvent;
     FDecodeThread     : TThread;
@@ -53,7 +57,9 @@ type
     FDisplayBitmap    : TBitmap;         // Repaint fallback için
     FPaintBox         : TNoFlickerPaintBox; // Gerçek görüntü alanı
     FLastMouseMoveTick: UInt64;
+    FCodecComboBox    : TComboBox;
 
+    function  SelectedFormat: Integer;
     procedure FillDefaultOptions;
     procedure SendMonitoringCommand(const AAction: string);
     function  SelectedMonitorIndex: Integer;
@@ -68,7 +74,7 @@ type
     procedure StartFrameWorker;
     procedure StopFrameWorker;
     procedure DecodeFrameWorker;
-    function  TakePendingFrame(out AText: string; out ABytes: TBytes): Boolean;
+    function  TakePendingFrame(out AText: string; out ABytes: TBytes; out AFormat, AWidth, AHeight: Integer): Boolean;
     function  TakeDecodedFrame(out ABitmap: TBitmap; out AFrameSize: Integer): Boolean;
     procedure UpdateStatusBar;
     procedure UpdateButtonCaption;
@@ -90,7 +96,7 @@ type
     procedure RequestMonitorList;
     procedure RequestCaptureStart;
     procedure RequestCaptureStop;
-    procedure QueueFrameBytes(const ABytes: TBytes);
+    procedure QueueFrameBytes(const ABytes: TBytes; AFormat: Integer; AWidth, AHeight: Integer);
     procedure HandleMonitoringJSON(JSONObj: TJSONObject);
   end;
 
@@ -100,6 +106,353 @@ var
 implementation
 
 {$R *.dfm}
+
+uses
+  Winapi.ActiveX;
+
+const
+  CLSID_CMSH264DecoderMFT: TGUID = '{62CE7E72-4C71-4D20-B13D-451974B054AA}';
+  CLSID_CMSH265DecoderMFT: TGUID = '{42453111-18EE-4304-8319-1AA4D0A5647C}';
+
+  MF_MT_MAJOR_TYPE: TGUID = '{48eba18e-f8c9-4687-bf11-0a74c9f96a8f}';
+  MF_MT_SUBTYPE: TGUID = '{f7e34c9a-425f-4e15-aa3c-5a224d3f0bc}';
+  MF_MT_FRAME_SIZE: TGUID = '{16a0eb0e-6e40-4e0a-9ddb-05fa91a1077f}';
+
+  MFMediaType_Video: TGUID = '{73646976-0000-0010-8000-00aa00389b71}';
+  MFVideoFormat_H264: TGUID = '{34363248-0000-0010-8000-00aa00389b71}';
+  MFVideoFormat_HEVC: TGUID = '{43564548-0000-0010-8000-00aa00389b71}';
+  MFVideoFormat_RGB32: TGUID = '{00000016-0000-0010-8000-00aa00389b71}';
+
+type
+  IMFAttributes = interface(IUnknown)
+    ['{2CD2D17D-CA37-4FA6-97D1-46E3D390FA0A}']
+    function GetItem(guidKey: TGUID; pValue: Pointer): HRESULT; stdcall;
+    function GetItemType(guidKey: TGUID; pType: Pointer): HRESULT; stdcall;
+    function Compare(pTheirs: Pointer; Relation: Pointer; pfEqual: PBoolean): HRESULT; stdcall;
+    function GetUINT32(guidKey: TGUID; out punValue: UINT32): HRESULT; stdcall;
+    function GetUINT64(guidKey: TGUID; out punValue: UINT64): HRESULT; stdcall;
+    function GetDouble(guidKey: TGUID; out pdbValue: Double): HRESULT; stdcall;
+    function GetGUID(guidKey: TGUID; out pguidValue: TGUID): HRESULT; stdcall;
+    function GetStringLength(guidKey: TGUID; out pcchLength: UINT32): HRESULT; stdcall;
+    function GetString(guidKey: TGUID; pwszValue: PWideChar; cchBufSize: UINT32; pcchLength: PUINT32): HRESULT; stdcall;
+    function GetAllocatedString(guidKey: TGUID; out ppwszValue: PWideChar; out pcchLength: UINT32): HRESULT; stdcall;
+    function GetBlobSize(guidKey: TGUID; out pcbBlobSize: UINT32): HRESULT; stdcall;
+    function GetBlob(guidKey: TGUID; pBuf: PByte; cbBufSize: UINT32; pcbBlobSize: PUINT32): HRESULT; stdcall;
+    function GetAllocatedBlob(guidKey: TGUID; out ppBuf: PByte; out pcbSize: UINT32): HRESULT; stdcall;
+    function GetUnknown(guidKey: TGUID; riid: TGUID; out ppv: Pointer): HRESULT; stdcall;
+    function SetItem(guidKey: TGUID; Value: Pointer): HRESULT; stdcall;
+    function DeleteItem(guidKey: TGUID): HRESULT; stdcall;
+    function DeleteAllItems: HRESULT; stdcall;
+    function SetUINT32(guidKey: TGUID; unValue: UINT32): HRESULT; stdcall;
+    function SetUINT64(guidKey: TGUID; unValue: UINT64): HRESULT; stdcall;
+    function SetDouble(guidKey: TGUID; dbValue: Double): HRESULT; stdcall;
+    function SetGUID(guidKey: TGUID; guidValue: TGUID): HRESULT; stdcall;
+    function SetString(guidKey: TGUID; pwszValue: PWideChar): HRESULT; stdcall;
+    function SetBlob(guidKey: TGUID; pBuf: PByte; cbBufSize: UINT32): HRESULT; stdcall;
+    function SetUnknown(guidKey: TGUID; pUnknown: IUnknown): HRESULT; stdcall;
+    function LockStore: HRESULT; stdcall;
+    function UnlockStore: HRESULT; stdcall;
+    function GetCount(pcItems: PUINT32): HRESULT; stdcall;
+    function GetItemByIndex(unIndex: UINT32; out pguidKey: TGUID; pValue: Pointer): HRESULT; stdcall;
+    function CopyAllItems(pDest: Pointer): HRESULT; stdcall;
+  end;
+
+  IMFMediaType = interface(IMFAttributes)
+    ['{44AE1270-EF3E-43A2-BC2C-38A27361DE8A}']
+    function GetMajorType(out pguidMajorType: TGUID): HRESULT; stdcall;
+    function IsCompressedFormat(out pfCompressed: BOOL): HRESULT; stdcall;
+    function IsEqual(pIMediaType: IMFMediaType; out pdwFlags: DWORD): HRESULT; stdcall;
+    function GetRepresentation(guidRepresentation: TGUID; out ppvRepresentation: Pointer): HRESULT; stdcall;
+    function FreeRepresentation(guidRepresentation: TGUID; pvRepresentation: Pointer): HRESULT; stdcall;
+  end;
+
+  IMFMediaBuffer = interface(IUnknown)
+    ['{045E9DBE-1A1E-4A43-B94D-2B5032FDF16A}']
+    function Lock(out ppbBuffer: PByte; pdwMaxLength: PDWORD; pdwCurrentLength: PDWORD): HRESULT; stdcall;
+    function Unlock: HRESULT; stdcall;
+    function GetCurrentLength(out pdwCurrentLength: DWORD): HRESULT; stdcall;
+    function SetCurrentLength(dwCurrentLength: DWORD): HRESULT; stdcall;
+    function GetMaxLength(out pdwMaxLength: DWORD): HRESULT; stdcall;
+  end;
+
+  IMFSample = interface(IMFAttributes)
+    ['{C40A7347-4C77-4091-B536-D7E63E97E601}']
+    function GetSampleFlags(out pdwSampleFlags: DWORD): HRESULT; stdcall;
+    function SetSampleFlags(dwSampleFlags: DWORD): HRESULT; stdcall;
+    function GetSampleTime(out phnsSampleTime: Int64): HRESULT; stdcall;
+    function SetSampleTime(hnsSampleTime: Int64): HRESULT; stdcall;
+    function GetSampleDuration(out phnsSampleDuration: Int64): HRESULT; stdcall;
+    function SetSampleDuration(hnsSampleDuration: Int64): HRESULT; stdcall;
+    function GetBufferCount(out pdwBufferCount: DWORD): HRESULT; stdcall;
+    function GetBufferByIndex(dwIndex: DWORD; out ppBuffer: IMFMediaBuffer): HRESULT; stdcall;
+    function ConvertToContiguousBuffer(out ppBuffer: IMFMediaBuffer): HRESULT; stdcall;
+    function AddBuffer(pBuffer: IMFMediaBuffer): HRESULT; stdcall;
+    function RemoveBufferByIndex(dwIndex: DWORD): HRESULT; stdcall;
+    function RemoveAllBuffers: HRESULT; stdcall;
+    function GetTotalLength(out pdwTotalLength: DWORD): HRESULT; stdcall;
+    function CopyAllSamples(pDestSample: IMFSample): HRESULT; stdcall;
+  end;
+
+  PMFT_OUTPUT_DATA_BUFFER = ^TMFT_OUTPUT_DATA_BUFFER;
+  TMFT_OUTPUT_DATA_BUFFER = record
+    dwStreamID: DWORD;
+    pSample: Pointer; // IMFSample
+    dwStatus: DWORD;
+    pEvents: Pointer; // IMFCollection
+  end;
+
+  IMFTransform = interface(IUnknown)
+    ['{BF94C121-5B05-4E6F-8000-BA598961414D}']
+    function GetStreamLimits(pdwInputMinimum, pdwInputMaximum, pdwOutputMinimum, pdwOutputMaximum: PDWORD): HRESULT; stdcall;
+    function GetStreamCount(pcInputStreams, pcOutputStreams: PDWORD): HRESULT; stdcall;
+    function GetStreamIDs(dwInputIDArraySize: DWORD; pdwInputIDs: PDWORD; dwOutputIDArraySize: DWORD; pdwOutputIDs: PDWORD): HRESULT; stdcall;
+    function GetInputStreamInfo(dwInputStreamID: DWORD; pStreamInfo: Pointer): HRESULT; stdcall;
+    function GetOutputStreamInfo(dwOutputStreamID: DWORD; pStreamInfo: Pointer): HRESULT; stdcall;
+    function GetAttributes(ppAttributes: Pointer): HRESULT; stdcall;
+    function GetInputStreamAttributes(dwInputStreamID: DWORD; ppAttributes: Pointer): HRESULT; stdcall;
+    function GetOutputStreamAttributes(dwOutputStreamID: DWORD; ppAttributes: Pointer): HRESULT; stdcall;
+    function DeleteInputStream(dwStreamID: DWORD): HRESULT; stdcall;
+    function AddInputStreams(cStreams: DWORD; pdwStreamIDs: PDWORD): HRESULT; stdcall;
+    function GetInputAvailableType(dwInputStreamID: DWORD; dwTypeIndex: DWORD; ppType: Pointer): HRESULT; stdcall;
+    function GetOutputAvailableType(dwOutputStreamID: DWORD; dwTypeIndex: DWORD; ppType: Pointer): HRESULT; stdcall;
+    function SetInputType(dwInputStreamID: DWORD; pType: Pointer; dwFlags: DWORD): HRESULT; stdcall;
+    function SetOutputType(dwOutputStreamID: DWORD; pType: Pointer; dwFlags: DWORD): HRESULT; stdcall;
+    function GetInputCurrentType(dwInputStreamID: DWORD; ppType: Pointer): HRESULT; stdcall;
+    function GetOutputCurrentType(dwOutputStreamID: DWORD; ppType: Pointer): HRESULT; stdcall;
+    function GetInputStatus(dwInputStreamID: DWORD; pdwFlags: PDWORD): HRESULT; stdcall;
+    function GetOutputStatus(pdwFlags: PDWORD): HRESULT; stdcall;
+    function SetInputBounds(dwInputStreamID: DWORD; hnsLowerBound, hnsUpperBound: Int64): HRESULT; stdcall;
+    function ProcessMessage(eMessage: DWORD; ulParam: ULONG_PTR): HRESULT; stdcall;
+    function ProcessInput(dwInputStreamID: DWORD; pSample: Pointer; dwFlags: DWORD): HRESULT; stdcall;
+    function ProcessOutput(dwFlags: DWORD; cOutputBufferCount: DWORD; pOutputSamples: PMFT_OUTPUT_DATA_BUFFER; pdwStatus: PDWORD): HRESULT; stdcall;
+  end;
+
+var
+  MFStartup: function(Version: ULONG; dwFlags: DWORD): HRESULT; stdcall = nil;
+  MFShutdown: function: HRESULT; stdcall = nil;
+  MFCreateMediaType: function(out ppMFType: IMFMediaType): HRESULT; stdcall = nil;
+  MFCreateMemoryBuffer: function(cbMaxLength: DWORD; out ppBuffer: IMFMediaBuffer): HRESULT; stdcall = nil;
+  MFCreateSample: function(out ppSample: IMFSample): HRESULT; stdcall = nil;
+
+function LoadMFPlat: Boolean;
+var
+  hDLL: THandle;
+begin
+  Result := True;
+  if Assigned(MFStartup) then Exit;
+
+  hDLL := LoadLibrary('mfplat.dll');
+  if hDLL <> 0 then
+  begin
+    @MFStartup := GetProcAddress(hDLL, 'MFStartup');
+    @MFShutdown := GetProcAddress(hDLL, 'MFShutdown');
+    @MFCreateMediaType := GetProcAddress(hDLL, 'MFCreateMediaType');
+    @MFCreateMemoryBuffer := GetProcAddress(hDLL, 'MFCreateMemoryBuffer');
+    @MFCreateSample := GetProcAddress(hDLL, 'MFCreateSample');
+  end;
+
+  Result := Assigned(MFStartup) and Assigned(MFShutdown) and
+            Assigned(MFCreateMediaType) and Assigned(MFCreateMemoryBuffer) and
+            Assigned(MFCreateSample);
+end;
+
+type
+  TMFVideoDecoder = class
+  private
+    FDecoder: IMFTransform;
+    FInitialized: Boolean;
+    procedure Reset;
+  public
+    FWidth: Integer;
+    FHeight: Integer;
+    FFormat: Integer; // 2 = H.264, 3 = H.265/HEVC
+
+    constructor Create(AFormat: Integer);
+    destructor Destroy; override;
+    function Init(AWidth, AHeight: Integer): Boolean;
+    function DecodeFrame(const AInputBytes: TBytes; ABitmap: TBitmap): Boolean;
+  end;
+
+constructor TMFVideoDecoder.Create(AFormat: Integer);
+begin
+  inherited Create;
+  FFormat := AFormat;
+  FInitialized := False;
+end;
+
+destructor TMFVideoDecoder.Destroy;
+begin
+  Reset;
+  if LoadMFPlat then
+  begin
+    MFShutdown;
+  end;
+  CoUninitialize;
+  inherited;
+end;
+
+procedure TMFVideoDecoder.Reset;
+begin
+  FDecoder := nil;
+  FInitialized := False;
+end;
+
+function TMFVideoDecoder.Init(AWidth, AHeight: Integer): Boolean;
+var
+  CLSID: TGUID;
+  InType, OutType: IMFMediaType;
+  hr: HRESULT;
+begin
+  Result := False;
+  Reset;
+
+  if not LoadMFPlat then Exit;
+
+  CoInitialize(nil);
+  MFStartup($00020070, 0);
+
+  if FFormat = 3 then
+    CLSID := CLSID_CMSH265DecoderMFT
+  else
+    CLSID := CLSID_CMSH264DecoderMFT;
+
+  hr := CoCreateInstance(CLSID, nil, CLSCTX_INPROC_SERVER, IMFTransform, FDecoder);
+  if (hr < 0) or not Assigned(FDecoder) then Exit;
+
+  // Set Input Type
+  hr := MFCreateMediaType(InType);
+  if hr < 0 then Exit;
+  try
+    InType.SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    if FFormat = 3 then
+      InType.SetGUID(MF_MT_SUBTYPE, MFVideoFormat_HEVC)
+    else
+      InType.SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    InType.SetUINT64(MF_MT_FRAME_SIZE, (UInt64(AWidth) shl 32) or UInt64(AHeight));
+    hr := FDecoder.SetInputType(0, Pointer(InType), 0);
+    if hr < 0 then Exit;
+  finally
+    InType := nil;
+  end;
+
+  // Set Output Type
+  hr := MFCreateMediaType(OutType);
+  if hr < 0 then Exit;
+  try
+    OutType.SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    OutType.SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+    OutType.SetUINT64(MF_MT_FRAME_SIZE, (UInt64(AWidth) shl 32) or UInt64(AHeight));
+    hr := FDecoder.SetOutputType(0, Pointer(OutType), 0);
+    if hr < 0 then Exit;
+  finally
+    OutType := nil;
+  end;
+
+  FDecoder.ProcessMessage($10000001, 0); // MFT_MESSAGE_COMMAND_FLUSH
+  FDecoder.ProcessMessage($00000001, 0); // MFT_MESSAGE_NOTIFY_BEGIN_STREAMING
+  FDecoder.ProcessMessage($00000003, 0); // MFT_MESSAGE_NOTIFY_START_OF_STREAM
+
+  FWidth := AWidth;
+  FHeight := AHeight;
+  FInitialized := True;
+  Result := True;
+end;
+
+function TMFVideoDecoder.DecodeFrame(const AInputBytes: TBytes; ABitmap: TBitmap): Boolean;
+var
+  InMediaBuf: IMFMediaBuffer;
+  InSample: IMFSample;
+  OutMediaBuf: IMFMediaBuffer;
+  OutSample: IMFSample;
+  pData, pDest: PByte;
+  cbMax, cbCur: DWORD;
+  hr: HRESULT;
+  OutDataBuffer: TMFT_OUTPUT_DATA_BUFFER;
+  dwStatus: DWORD;
+  y: Integer;
+begin
+  Result := False;
+  if not FInitialized or not Assigned(FDecoder) then Exit;
+  if Length(AInputBytes) = 0 then Exit;
+
+  // 1. Create Input Buffer and Sample
+  hr := MFCreateMemoryBuffer(Length(AInputBytes), InMediaBuf);
+  if hr < 0 then Exit;
+  try
+    if (InMediaBuf.Lock(pData, @cbMax, @cbCur) >= 0) then
+    begin
+      Move(AInputBytes[0], pData^, Length(AInputBytes));
+      InMediaBuf.Unlock;
+    end;
+    InMediaBuf.SetCurrentLength(Length(AInputBytes));
+
+    hr := MFCreateSample(InSample);
+    if hr < 0 then Exit;
+    try
+      InSample.AddBuffer(InMediaBuf);
+
+      // Feed Input
+      hr := FDecoder.ProcessInput(0, Pointer(InSample), 0);
+      if hr < 0 then Exit;
+    finally
+      InSample := nil;
+    end;
+  finally
+    InMediaBuf := nil;
+  end;
+
+  // 2. Poll Output
+  hr := MFCreateSample(OutSample);
+  if hr < 0 then Exit;
+  try
+    hr := MFCreateMemoryBuffer(FWidth * FHeight * 4, OutMediaBuf);
+    if hr < 0 then Exit;
+    try
+      OutSample.AddBuffer(OutMediaBuf);
+
+      FillChar(OutDataBuffer, SizeOf(OutDataBuffer), 0);
+      OutDataBuffer.dwStreamID := 0;
+      OutDataBuffer.pSample := Pointer(OutSample);
+
+      dwStatus := 0;
+      hr := FDecoder.ProcessOutput(0, 1, @OutDataBuffer, @dwStatus);
+
+      // Handle stream change: MF_E_TRANSFORM_STREAM_CHANGE = $C00D6D73
+      if hr = HRESULT($C00D6D73) then
+      begin
+        Init(FWidth, FHeight);
+        Exit;
+      end;
+
+      if hr < 0 then Exit;
+
+      // Successfully decoded! Copy RGB32 buffer to TBitmap
+      ABitmap.PixelFormat := pf32bit;
+      ABitmap.SetSize(FWidth, FHeight);
+
+      if (OutMediaBuf.Lock(pData, @cbMax, @cbCur) >= 0) then
+      begin
+        ABitmap.Canvas.Lock;
+        try
+          for y := 0 to FHeight - 1 do
+          begin
+            pDest := ABitmap.ScanLine[y];
+            Move(pData[y * FWidth * 4], pDest^, FWidth * 4);
+          end;
+        finally
+          ABitmap.Canvas.Unlock;
+        end;
+        OutMediaBuf.Unlock;
+        Result := True;
+      end;
+
+    finally
+      OutMediaBuf := nil;
+    end;
+  finally
+    OutSample := nil;
+  end;
+end;
 
 { TNoFlickerPaintBox }
 
@@ -233,6 +586,22 @@ begin
   ComboBox2.OnChange := ComboBox2Change;
 
   FillDefaultOptions;
+
+  if not Assigned(FCodecComboBox) then
+  begin
+    FCodecComboBox := TComboBox.Create(Self);
+    FCodecComboBox.Parent := Panel1;
+    FCodecComboBox.Left := ComboBox1.Left + ComboBox1.Width + 10;
+    FCodecComboBox.Top := ComboBox1.Top;
+    FCodecComboBox.Width := 100;
+    FCodecComboBox.Style := csDropDownList;
+    FCodecComboBox.Items.Add('H.264');
+    FCodecComboBox.Items.Add('H.265/HEVC');
+    FCodecComboBox.Items.Add('JPEG');
+    FCodecComboBox.ItemIndex := 0; // Default to H.264 as requested
+    FCodecComboBox.OnChange := ComboBox1Change; // Automatically triggers monitorstart command
+  end;
+
   UpdateButtonCaption;
   UpdateStatusBar;
 end;
@@ -280,6 +649,19 @@ begin
     Result := 0;
 end;
 
+function TForm6.SelectedFormat: Integer;
+begin
+  Result := 2; // Default to H.264
+  if Assigned(FCodecComboBox) then
+  begin
+    case FCodecComboBox.ItemIndex of
+      0: Result := 2; // H.264
+      1: Result := 3; // H.265/HEVC
+      2: Result := 1; // JPEG
+    end;
+  end;
+end;
+
 procedure TForm6.SendMonitoringCommand(const AAction: string);
 var
   JSONObj: TJSONObject;
@@ -292,6 +674,7 @@ begin
     JSONObj.AddPair('action',  AAction);
     JSONObj.AddPair('monitor', TJSONNumber.Create(SelectedMonitorIndex));
     JSONObj.AddPair('scale',   TJSONNumber.Create(SelectedScalePercent));
+    JSONObj.AddPair('format',  TJSONNumber.Create(SelectedFormat));
     FOnSendJSON(FLine, JSONObj);
   finally
     JSONObj.Free;
@@ -379,8 +762,9 @@ begin
 
   FFrameLock.Enter;
   try
-    FPendingFrame := AText;
+    FPendingFrame       := AText;
     SetLength(FPendingFrameBytes, 0);
+    FPendingFrameFormat := 1; // Default to JPEG for Base64 strings
     if Assigned(FDecodeEvent) then
       FDecodeEvent.SetEvent;
   finally
@@ -388,7 +772,7 @@ begin
   end;
 end;
 
-procedure TForm6.QueueFrameBytes(const ABytes: TBytes);
+procedure TForm6.QueueFrameBytes(const ABytes: TBytes; AFormat, AWidth, AHeight: Integer);
 begin
   if Length(ABytes) = 0 then
     Exit;
@@ -397,8 +781,11 @@ begin
 
   FFrameLock.Enter;
   try
-    FPendingFrame      := '';
-    FPendingFrameBytes := Copy(ABytes, 0, Length(ABytes));
+    FPendingFrame       := '';
+    FPendingFrameBytes  := Copy(ABytes, 0, Length(ABytes));
+    FPendingFrameFormat := AFormat;
+    FPendingFrameWidth  := AWidth;
+    FPendingFrameHeight := AHeight;
     if Assigned(FDecodeEvent) then
       FDecodeEvent.SetEvent;
   finally
@@ -569,11 +956,14 @@ begin
   end;
 end;
 
-function TForm6.TakePendingFrame(out AText: string; out ABytes: TBytes): Boolean;
+function TForm6.TakePendingFrame(out AText: string; out ABytes: TBytes; out AFormat, AWidth, AHeight: Integer): Boolean;
 begin
-  Result := False;
-  AText  := '';
+  Result  := False;
+  AText   := '';
   SetLength(ABytes, 0);
+  AFormat := 1;
+  AWidth  := 0;
+  AHeight := 0;
 
   if not Assigned(FFrameLock) then
     Exit;
@@ -582,16 +972,22 @@ begin
   try
     if Length(FPendingFrameBytes) > 0 then
     begin
-      ABytes := FPendingFrameBytes;
+      ABytes  := FPendingFrameBytes;
+      AFormat := FPendingFrameFormat;
+      AWidth  := FPendingFrameWidth;
+      AHeight := FPendingFrameHeight;
       SetLength(FPendingFrameBytes, 0);
       FPendingFrame := '';
-      Result := True;
+      Result  := True;
     end
     else if FPendingFrame <> '' then
     begin
-      AText         := FPendingFrame;
+      AText   := FPendingFrame;
+      AFormat := FPendingFrameFormat;
+      AWidth  := FPendingFrameWidth;
+      AHeight := FPendingFrameHeight;
       FPendingFrame := '';
-      Result        := True;
+      Result  := True;
     end;
 
     if (FPendingFrame = '') and (Length(FPendingFrameBytes) = 0) and
@@ -630,38 +1026,70 @@ procedure TForm6.DecodeFrameWorker;
 var
   Text     : string;
   Bytes    : TBytes;
+  Format   : Integer;
+  Width    : Integer;
+  Height   : Integer;
   Decoded  : TBitmap;
   FrameSize: Integer;
+  Decoder  : TMFVideoDecoder;
 begin
-  while not FDecodeStopping do
-  begin
-    if Assigned(FDecodeEvent) then
-      FDecodeEvent.WaitFor(100);
-
-    while (not FDecodeStopping) and TakePendingFrame(Text, Bytes) do
+  Decoder := nil;
+  try
+    while not FDecodeStopping do
     begin
-      if (Length(Bytes) = 0) and (Text <> '') then
-        DecodeBase64Image(Text, Bytes);
+      if Assigned(FDecodeEvent) then
+        FDecodeEvent.WaitFor(100);
 
-      FrameSize := Length(Bytes);
-      Decoded   := nil;
-      try
-        if DecodeFrameToBitmap(Bytes, Decoded) then
+      while (not FDecodeStopping) and TakePendingFrame(Text, Bytes, Format, Width, Height) do
+      begin
+        if (Length(Bytes) = 0) and (Text <> '') then
         begin
-          FFrameLock.Enter;
-          try
-            FreeAndNil(FDecodedBitmap);
-            FDecodedBitmap    := Decoded;
-            FDecodedFrameSize := FrameSize;
-            Decoded           := nil;
-          finally
-            FFrameLock.Leave;
-          end;
+          DecodeBase64Image(Text, Bytes);
+          Format := 1;
         end;
-      except
-        FreeAndNil(Decoded);
+
+        FrameSize := Length(Bytes);
+        Decoded   := nil;
+        try
+          if Format = 1 then
+          begin
+            DecodeFrameToBitmap(Bytes, Decoded);
+          end
+          else if (Format = 2) or (Format = 3) then
+          begin
+            if Assigned(Decoder) and ((Decoder.FFormat <> Format) or (Decoder.FWidth <> Width) or (Decoder.FHeight <> Height)) then
+              FreeAndNil(Decoder);
+
+            if not Assigned(Decoder) then
+            begin
+              Decoder := TMFVideoDecoder.Create(Format);
+              Decoder.Init(Width, Height);
+            end;
+
+            Decoded := TBitmap.Create;
+            if not Decoder.DecodeFrame(Bytes, Decoded) then
+              FreeAndNil(Decoded);
+          end;
+
+          if Assigned(Decoded) then
+          begin
+            FFrameLock.Enter;
+            try
+              FreeAndNil(FDecodedBitmap);
+              FDecodedBitmap    := Decoded;
+              FDecodedFrameSize := FrameSize;
+              Decoded           := nil;
+            finally
+              FFrameLock.Leave;
+            end;
+          end;
+        except
+          FreeAndNil(Decoded);
+        end;
       end;
     end;
+  finally
+    FreeAndNil(Decoder);
   end;
 end;
 
