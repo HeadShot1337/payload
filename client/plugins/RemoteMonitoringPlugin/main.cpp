@@ -63,6 +63,8 @@ static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
 static mutex g_captureMutex;
 static mutex g_sendMutex;
+static mutex g_encoderMutex; // Protects g_videoEncoder and its session tracking state
+
 static SOCKET g_captureSocket = INVALID_SOCKET;
 static int g_monitorIndex = 0;
 static int g_scalePercent = 50;
@@ -263,7 +265,22 @@ public:
         if (pMFTEnumEx) {
             MFT_REGISTER_TYPE_INFO input_info = { My_MFMediaType_Video, My_MFVideoFormat_NV12 };
             MFT_REGISTER_TYPE_INFO output_info = { My_MFMediaType_Video, (format == 3) ? My_MFVideoFormat_HEVC : My_MFVideoFormat_H264 };
-            UINT32 flags = MFT_ENUM_FLAG_SYNCHRONOUSMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCHRONOUSMFT | MFT_ENUM_FLAG_FIELDOFUSE;
+
+            // Compatibility defines for older/minimal Mingw SDK headers
+            #ifndef MFT_ENUM_FLAG_SYNCMFT
+            #define MFT_ENUM_FLAG_SYNCMFT 0x00000001
+            #endif
+            #ifndef MFT_ENUM_FLAG_ASYNCMFT
+            #define MFT_ENUM_FLAG_ASYNCMFT 0x00000002
+            #endif
+            #ifndef MFT_ENUM_FLAG_HARDWARE
+            #define MFT_ENUM_FLAG_HARDWARE 0x00000004
+            #endif
+            #ifndef MFT_ENUM_FLAG_FIELDOFUSE
+            #define MFT_ENUM_FLAG_FIELDOFUSE 0x00000008
+            #endif
+
+            UINT32 flags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_FIELDOFUSE;
 
             IMFActivate** activate_array = nullptr;
             UINT32 count = 0;
@@ -885,6 +902,9 @@ static bool capture_monitor_frame(const RECT& rect,
             vector<uint8_t> nv12(outputWidth * outputHeight * 3 / 2);
             BGRX_to_NV12(bgrx.data(), outputWidth, outputHeight, nv12.data());
 
+            // Protect videoEncoder initialization and encoding against thread-race
+            lock_guard<mutex> lock(g_encoderMutex);
+
             // Lazily initialize/reinitialize encoder if resolution or format changed
             if (!g_encoderInitialized || outputWidth != g_lastWidth || outputHeight != g_lastHeight || format != g_lastFormat) {
                 g_videoEncoder.Cleanup();
@@ -987,11 +1007,16 @@ static void stop_capture_thread() {
 
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
-    g_videoEncoder.Cleanup();
-    g_lastWidth = 0;
-    g_lastHeight = 0;
-    g_lastFormat = 0;
-    g_encoderInitialized = false;
+
+    // Secure the encoder cleanup and session state variables against thread-race conditions
+    {
+        lock_guard<mutex> enc_lock(g_encoderMutex);
+        g_videoEncoder.Cleanup();
+        g_lastWidth = 0;
+        g_lastHeight = 0;
+        g_lastFormat = 0;
+        g_encoderInitialized = false;
+    }
 }
 
 static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps, int videoFormat) {

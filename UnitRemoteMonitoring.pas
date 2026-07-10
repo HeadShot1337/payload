@@ -359,6 +359,7 @@ begin
       if (hr >= 0) and Assigned(FDecoder) then
         Activated := True;
 
+      ActivateObj := nil; // Release Delphi's automatic reference
       for i := 0 to Count - 1 do
         IUnknown(ActivateArray^[i])._Release;
       CoTaskMemFree(ActivateArrayPtr);
@@ -1274,6 +1275,7 @@ begin
   ErrorText := JSONValueText(JSONObj, 'error');
   if ErrorText <> '' then
   begin
+    RequestCaptureStop;
     FCapturing := False;
     UpdateButtonCaption;
 
