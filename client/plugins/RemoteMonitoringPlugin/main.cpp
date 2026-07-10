@@ -112,15 +112,13 @@ static bool load_media_foundation() {
 }
 
 // Manual GUID definitions to avoid linker errors
-#ifndef DEFINE_MEDIATYPE_GUID
-#define DEFINE_MEDIATYPE_GUID(name, format) \
+#define OUR_DEFINE_MEDIATYPE_GUID(name, format) \
     static const GUID name = { format, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } }
-#endif
 
-DEFINE_MEDIATYPE_GUID(My_MFMediaType_Video, 0x73646976); // 'vids'
-DEFINE_MEDIATYPE_GUID(My_MFVideoFormat_NV12, 0x3231564e); // 'NV12'
-DEFINE_MEDIATYPE_GUID(My_MFVideoFormat_H264, 0x34363248); // 'H264'
-DEFINE_MEDIATYPE_GUID(My_MFVideoFormat_HEVC, 0x43564548); // 'HEVC'
+OUR_DEFINE_MEDIATYPE_GUID(My_MFMediaType_Video, 0x73646976); // 'vids'
+OUR_DEFINE_MEDIATYPE_GUID(My_MFVideoFormat_NV12, 0x3231564e); // 'NV12'
+OUR_DEFINE_MEDIATYPE_GUID(My_MFVideoFormat_H264, 0x34363248); // 'H264'
+OUR_DEFINE_MEDIATYPE_GUID(My_MFVideoFormat_HEVC, 0x43564548); // 'HEVC'
 
 static const GUID My_MF_MT_MAJOR_TYPE = { 0x48eba18e, 0xf8c9, 0x4687, { 0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f } };
 static const GUID My_MF_MT_SUBTYPE = { 0xf7e34c9a, 0x425f, 0x4e15, { 0xaa, 0x3c, 0x5a, 0x22, 0x4d, 0x3f, 0xd0, 0xbc } };
