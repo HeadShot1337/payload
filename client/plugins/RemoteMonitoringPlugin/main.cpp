@@ -14,6 +14,13 @@
 #include <vector>
 #include "../../include/json.hpp"
 
+// Media Foundation minimal headers we can include or define
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mftransform.h>
+#include <mferror.h>
+#include <codecapi.h>
+
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -51,21 +58,461 @@ struct MonitorFrameHeader {
 
 static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_MONITOR_FRAME = 0x03;
-static const uint32_t MONITOR_FRAME_FORMAT_JPEG = 1;
 
 static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
 static mutex g_captureMutex;
 static mutex g_sendMutex;
+static mutex g_encoderMutex; // Protects g_videoEncoder and its session tracking state
+
 static SOCKET g_captureSocket = INVALID_SOCKET;
 static int g_monitorIndex = 0;
 static int g_scalePercent = 50;
 static int g_targetFps = 20;
+static int g_videoFormat = 1; // 1 = JPEG, 2 = H.264, 3 = H.265/HEVC
 static RECT g_captureRect{};
 static bool g_hasCaptureRect = false;
 
+static int g_lastWidth = 0;
+static int g_lastHeight = 0;
+static int g_lastFormat = 0;
+static bool g_encoderInitialized = false;
+
 static mutex g_gdiplusMutex;
 static ULONG_PTR g_gdiplusToken = 0;
+
+// Manual definition of IMFActivate to support all compiler environments
+#ifndef __IMFActivate_INTERFACE_DEFINED__
+#define __IMFActivate_INTERFACE_DEFINED__
+interface IMFActivate : public IMFAttributes {
+    virtual HRESULT STDMETHODCALLTYPE ActivateObject(REFIID riid, void** ppv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ShutdownObject(void) = 0;
+    virtual HRESULT STDMETHODCALLTYPE DetachObject(void) = 0;
+};
+#endif
+
+// Dynamic loader for Media Foundation functions
+typedef HRESULT (WINAPI *MFStartupFn)(ULONG Version, DWORD dwFlags);
+typedef HRESULT (WINAPI *MFShutdownFn)();
+typedef HRESULT (WINAPI *MFCreateMediaTypeFn)(IMFMediaType** ppMFType);
+typedef HRESULT (WINAPI *MFCreateMemoryBufferFn)(DWORD cbMaxLength, IMFMediaBuffer** ppBuffer);
+typedef HRESULT (WINAPI *MFCreateSampleFn)(IMFSample** ppSample);
+typedef HRESULT (WINAPI *MFTEnumExFn)(
+    GUID guidCategory,
+    UINT32 Flags,
+    const MFT_REGISTER_TYPE_INFO *pInputType,
+    const MFT_REGISTER_TYPE_INFO *pOutputType,
+    IMFActivate ***pppMFTActivate,
+    UINT32 *pnumMFTActivate
+);
+
+static MFStartupFn pMFStartup = nullptr;
+static MFShutdownFn pMFShutdown = nullptr;
+static MFCreateMediaTypeFn pMFCreateMediaType = nullptr;
+static MFCreateMemoryBufferFn pMFCreateMemoryBuffer = nullptr;
+static MFCreateSampleFn pMFCreateSample = nullptr;
+static MFTEnumExFn pMFTEnumEx = nullptr;
+static bool g_mfLoaded = false;
+
+static bool load_media_foundation() {
+    if (g_mfLoaded) return true;
+    HMODULE hMfplat = LoadLibraryA("mfplat.dll");
+    if (!hMfplat) return false;
+
+    pMFStartup = (MFStartupFn)GetProcAddress(hMfplat, "MFStartup");
+    pMFShutdown = (MFShutdownFn)GetProcAddress(hMfplat, "MFShutdown");
+    pMFCreateMediaType = (MFCreateMediaTypeFn)GetProcAddress(hMfplat, "MFCreateMediaType");
+    pMFCreateMemoryBuffer = (MFCreateMemoryBufferFn)GetProcAddress(hMfplat, "MFCreateMemoryBuffer");
+    pMFCreateSample = (MFCreateSampleFn)GetProcAddress(hMfplat, "MFCreateSample");
+    pMFTEnumEx = (MFTEnumExFn)GetProcAddress(hMfplat, "MFTEnumEx");
+
+    if (pMFStartup && pMFShutdown && pMFCreateMediaType && pMFCreateMemoryBuffer && pMFCreateSample) {
+        g_mfLoaded = true;
+        return true;
+    }
+    return false;
+}
+
+// Manual GUID definitions to avoid linker errors
+#define OUR_DEFINE_MEDIATYPE_GUID(name, format) \
+    static const GUID name = { format, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } }
+
+OUR_DEFINE_MEDIATYPE_GUID(My_MFMediaType_Video, 0x73646976); // 'vids'
+OUR_DEFINE_MEDIATYPE_GUID(My_MFVideoFormat_NV12, 0x3231564e); // 'NV12'
+OUR_DEFINE_MEDIATYPE_GUID(My_MFVideoFormat_H264, 0x34363248); // 'H264'
+OUR_DEFINE_MEDIATYPE_GUID(My_MFVideoFormat_HEVC, 0x43564548); // 'HEVC'
+
+static const GUID My_MF_MT_MAJOR_TYPE = { 0x48eba18e, 0xf8c9, 0x4687, { 0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f } };
+static const GUID My_MF_MT_SUBTYPE = { 0xf7e34c9a, 0x425f, 0x4e15, { 0xaa, 0x3c, 0x5a, 0x22, 0x4d, 0x3f, 0xd0, 0xbc } };
+static const GUID My_MF_MT_FRAME_SIZE = { 0x16a0eb0e, 0x6e40, 0x4e0a, { 0x9d, 0xdb, 0x05, 0xfa, 0x91, 0xa1, 0x07, 0x7f } };
+static const GUID My_MF_MT_FRAME_RATE = { 0xc459a2e5, 0x4358, 0x452c, { 0x8b, 0x00, 0xdb, 0x97, 0xc2, 0x53, 0x7e, 0x22 } };
+static const GUID My_MF_MT_PIXEL_ASPECT_RATIO = { 0xc63db510, 0xc8e4, 0x4243, { 0x99, 0x0d, 0x56, 0x07, 0x3d, 0xf0, 0xff, 0xd4 } };
+static const GUID My_MF_MT_INTERLACE_MODE = { 0xe2724d48, 0xae60, 0x4758, { 0x94, 0xb8, 0xbc, 0xda, 0x8e, 0x3e, 0x24, 0xe1 } };
+static const GUID My_MF_MT_AVG_BITRATE = { 0x20332624, 0xc891, 0x4705, { 0xa0, 0x78, 0xbc, 0x85, 0x75, 0x2f, 0x10, 0x0d } };
+static const GUID My_MF_MT_VIDEO_PROFILE = { 0x96f54c4a, 0xca68, 0x450b, { 0x97, 0xbc, 0x5d, 0x2a, 0x5d, 0x43, 0xbc, 0x99 } };
+
+static const GUID My_IID_IMFTransform = { 0xbf94c121, 0x5b05, 0x4e6f, { 0x80, 0x00, 0xba, 0x59, 0x89, 0x61, 0x41, 0x4d } };
+static const GUID My_IID_ICodecAPI = { 0x901db749, 0xf86f, 0x4560, { 0x96, 0xd7, 0x8a, 0x35, 0x2f, 0x0d, 0x2d, 0xb9 } };
+static const GUID My_CODECAPI_AVEncMPVGOPSize = { 0x951a7a7e, 0xdcee, 0x4630, { 0xb2, 0xc4, 0x98, 0xf1, 0xb1, 0x37, 0x04, 0x16 } };
+static const GUID My_CODECAPI_AVLowLatencyMode = { 0x9c3893c6, 0x7538, 0x4a92, { 0xa5, 0x50, 0x60, 0xaf, 0xcb, 0x54, 0x88, 0x5a } };
+
+static const GUID My_MFT_CATEGORY_VIDEO_ENCODER = { 0xf79e49c1, 0x00dd, 0x432f, { 0x99, 0x08, 0x27, 0xc8, 0x13, 0x4c, 0x40, 0xf6 } };
+
+static const CLSID My_CLSID_CMSH264EncoderMFT = { 0x6ca50344, 0x051a, 0x4ded, { 0x97, 0x79, 0xa4, 0x33, 0x05, 0x16, 0x5e, 0x35 } };
+static const CLSID My_CLSID_CMSH265EncoderMFT = { 0xf2f84074, 0x8bca, 0x40bd, { 0x91, 0x59, 0xe8, 0x80, 0xf6, 0x73, 0xdd, 0x3b } };
+
+// Manually define ICodecAPI interface if not declared in current compiler environment
+#ifndef __ICodecAPI_INTERFACE_DEFINED__
+#define __ICodecAPI_INTERFACE_DEFINED__
+interface ICodecAPI : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE IsSupported(const GUID* Api, BOOL* IsSupported) = 0;
+    virtual HRESULT STDMETHODCALLTYPE IsModifiable(const GUID* Api, BOOL* IsModifiable) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetParameterRange(const GUID* Api, VARIANT* ValueMin, VARIANT* ValueMax, VARIANT* SteppingDelta) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetParameterValues(const GUID* Api, VARIANT** Values, ULONG* ValuesCount) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDefaultValue(const GUID* Api, VARIANT* Value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetValue(const GUID* Api, VARIANT* Value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetValue(const GUID* Api, VARIANT* Value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE RegisterForEvent(const GUID* Api, LONG_PTR UserData) = 0;
+    virtual HRESULT STDMETHODCALLTYPE UnregisterForEvent(const GUID* Api) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetAllDefaults(void) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetValueWithChangeSet(const GUID* Api, VARIANT* Value, const GUID* ChangeSet, ULONG ChangeSetCount) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetFullChangeSet(VARIANT* Value, VARIANT* ChangeSet, ULONG* ChangeSetCount) = 0;
+};
+#endif
+
+static string hr_to_hex(HRESULT hr) {
+    char buf[32];
+    sprintf(buf, "0x%08X", (unsigned int)hr);
+    return string(buf);
+}
+
+// Video conversion helper: BGRX to NV12
+static void BGRX_to_NV12(const uint8_t* bgrx, int width, int height, uint8_t* nv12) {
+    int y_size = width * height;
+    uint8_t* y_plane = nv12;
+    uint8_t* uv_plane = nv12 + y_size;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int src_idx = (y * width + x) * 4;
+            uint8_t b = bgrx[src_idx];
+            uint8_t g = bgrx[src_idx + 1];
+            uint8_t r = bgrx[src_idx + 2];
+
+            int Y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+            y_plane[y * width + x] = (uint8_t)max(0, min(Y, 255));
+
+            if ((y % 2 == 0) && (x % 2 == 0)) {
+                int U = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                int V = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+                int uv_idx = (y / 2) * width + x;
+                uv_plane[uv_idx] = (uint8_t)max(0, min(U, 255));
+                uv_plane[uv_idx + 1] = (uint8_t)max(0, min(V, 255));
+            }
+        }
+    }
+}
+
+class VideoEncoder {
+private:
+    IMFTransform* m_mft = nullptr;
+    int m_width = 0;
+    int m_height = 0;
+    int m_format = 0; // 2 = H.264, 3 = H.265/HEVC
+    uint64_t m_frameCount = 0;
+    bool m_initialized = false;
+
+public:
+    VideoEncoder() {}
+    ~VideoEncoder() {
+        Cleanup();
+    }
+
+    void Cleanup() {
+        if (m_mft) {
+            m_mft->Release();
+            m_mft = nullptr;
+        }
+        m_initialized = false;
+        m_width = 0;
+        m_height = 0;
+        m_format = 0;
+    }
+
+    bool Init(int width, int height, int format, int fps, string& errorMsg) {
+        Cleanup();
+
+        if (format != 2 && format != 3) {
+            errorMsg = "Invalid video format";
+            return false;
+        }
+
+        if (!load_media_foundation()) {
+            errorMsg = "Failed to load mfplat.dll";
+            return false;
+        }
+
+        CoInitialize(NULL);
+        HRESULT hr = pMFStartup(MF_VERSION, 0);
+        if (FAILED(hr)) {
+            errorMsg = "MFStartup failed: " + hr_to_hex(hr);
+            return false;
+        }
+
+        bool activated = false;
+
+        // Try dual-lookup: First attempt via official MFTEnumEx (best for Portability across all Windows versions)
+        if (pMFTEnumEx) {
+            MFT_REGISTER_TYPE_INFO input_info = { My_MFMediaType_Video, My_MFVideoFormat_NV12 };
+            MFT_REGISTER_TYPE_INFO output_info = { My_MFMediaType_Video, (format == 3) ? My_MFVideoFormat_HEVC : My_MFVideoFormat_H264 };
+
+            // Compatibility defines for older/minimal Mingw SDK headers
+            #ifndef MFT_ENUM_FLAG_SYNCMFT
+            #define MFT_ENUM_FLAG_SYNCMFT 0x00000001
+            #endif
+            #ifndef MFT_ENUM_FLAG_ASYNCMFT
+            #define MFT_ENUM_FLAG_ASYNCMFT 0x00000002
+            #endif
+            #ifndef MFT_ENUM_FLAG_HARDWARE
+            #define MFT_ENUM_FLAG_HARDWARE 0x00000004
+            #endif
+            #ifndef MFT_ENUM_FLAG_FIELDOFUSE
+            #define MFT_ENUM_FLAG_FIELDOFUSE 0x00000008
+            #endif
+            #ifndef MFT_ENUM_FLAG_ALL
+            #define MFT_ENUM_FLAG_ALL 0x0000003F
+            #endif
+
+            UINT32 flags = MFT_ENUM_FLAG_ALL;
+
+            IMFActivate** activate_array = nullptr;
+            UINT32 count = 0;
+            hr = pMFTEnumEx(My_MFT_CATEGORY_VIDEO_ENCODER, flags, &input_info, &output_info, &activate_array, &count);
+            if (SUCCEEDED(hr) && count > 0) {
+                hr = activate_array[0]->ActivateObject(My_IID_IMFTransform, (void**)&m_mft);
+                if (SUCCEEDED(hr) && m_mft) {
+                    activated = true;
+                }
+                for (UINT32 i = 0; i < count; i++) {
+                    activate_array[i]->Release();
+                }
+                CoTaskMemFree(activate_array);
+            }
+        }
+
+        // Fallback to CoCreateInstance on standard Microsoft Software Encoders
+        if (!activated) {
+            CLSID encoderClsid = (format == 3) ? My_CLSID_CMSH265EncoderMFT : My_CLSID_CMSH264EncoderMFT;
+            hr = CoCreateInstance(encoderClsid, NULL, CLSCTX_INPROC_SERVER, My_IID_IMFTransform, (void**)&m_mft);
+            if (FAILED(hr) || !m_mft) {
+                errorMsg = "CoCreateInstance and MFTEnumEx both failed. HRESULT: " + hr_to_hex(hr);
+                return false;
+            }
+        }
+
+        // Configure Output Media Type
+        IMFMediaType* out_type = nullptr;
+        if (FAILED(pMFCreateMediaType(&out_type))) {
+            errorMsg = "pMFCreateMediaType failed";
+            Cleanup();
+            return false;
+        }
+
+        out_type->SetGUID(My_MF_MT_MAJOR_TYPE, My_MFMediaType_Video);
+        out_type->SetGUID(My_MF_MT_SUBTYPE, (format == 3) ? My_MFVideoFormat_HEVC : My_MFVideoFormat_H264);
+        out_type->SetUINT64(My_MF_MT_FRAME_SIZE, ((uint64_t)width << 32) | height);
+        out_type->SetUINT64(My_MF_MT_FRAME_RATE, ((uint64_t)fps << 32) | 1);
+        out_type->SetUINT64(My_MF_MT_PIXEL_ASPECT_RATIO, ((uint64_t)1 << 32) | 1);
+        out_type->SetUINT32(My_MF_MT_INTERLACE_MODE, 2); // Progressive
+
+        uint32_t bitrate = width * height * 2;
+        if (bitrate < 500000) bitrate = 500000;
+        if (bitrate > 4000000) bitrate = 4000000;
+        out_type->SetUINT32(My_MF_MT_AVG_BITRATE, bitrate);
+
+        if (format == 3) {
+            out_type->SetUINT32(My_MF_MT_VIDEO_PROFILE, 1); // Main Profile
+        }
+
+        hr = m_mft->SetOutputType(0, out_type, 0);
+        out_type->Release();
+        if (FAILED(hr)) {
+            errorMsg = "SetOutputType failed: " + hr_to_hex(hr);
+            Cleanup();
+            return false;
+        }
+
+        // Configure Input Media Type
+        IMFMediaType* in_type = nullptr;
+        if (FAILED(pMFCreateMediaType(&in_type))) {
+            errorMsg = "pMFCreateMediaType for input failed";
+            Cleanup();
+            return false;
+        }
+
+        in_type->SetGUID(My_MF_MT_MAJOR_TYPE, My_MFMediaType_Video);
+        in_type->SetGUID(My_MF_MT_SUBTYPE, My_MFVideoFormat_NV12);
+        in_type->SetUINT64(My_MF_MT_FRAME_SIZE, ((uint64_t)width << 32) | height);
+        in_type->SetUINT64(My_MF_MT_FRAME_RATE, ((uint64_t)fps << 32) | 1);
+        in_type->SetUINT64(My_MF_MT_PIXEL_ASPECT_RATIO, ((uint64_t)1 << 32) | 1);
+        in_type->SetUINT32(My_MF_MT_INTERLACE_MODE, 2); // Progressive
+
+        hr = m_mft->SetInputType(0, in_type, 0);
+        in_type->Release();
+        if (FAILED(hr)) {
+            errorMsg = "SetInputType failed: " + hr_to_hex(hr);
+            Cleanup();
+            return false;
+        }
+
+        // Configure Codec API (GOP & Low Latency)
+        ICodecAPI* codec_api = nullptr;
+        if (SUCCEEDED(m_mft->QueryInterface(My_IID_ICodecAPI, (void**)&codec_api))) {
+            VARIANT var;
+            memset(&var, 0, sizeof(VARIANT));
+            var.vt = VT_UI4;
+            var.ulVal = 30; // GOP size = 30
+            codec_api->SetValue(&My_CODECAPI_AVEncMPVGOPSize, &var);
+
+            memset(&var, 0, sizeof(VARIANT));
+            var.vt = VT_BOOL;
+            var.boolVal = VARIANT_TRUE;
+            codec_api->SetValue(&My_CODECAPI_AVLowLatencyMode, &var);
+            codec_api->Release();
+        }
+
+        m_mft->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        m_mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        m_mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+        m_width = width;
+        m_height = height;
+        m_format = format;
+        m_frameCount = 0;
+        m_initialized = true;
+        return true;
+    }
+
+    bool EncodeFrame(const uint8_t* nv12Data, int fps, vector<uint8_t>& outBytes, string& errorMsg) {
+        if (!m_initialized || !m_mft) {
+            errorMsg = "Encoder not initialized";
+            return false;
+        }
+
+        outBytes.clear();
+
+        // Create Input Sample
+        IMFMediaBuffer* in_buffer = nullptr;
+        int nv12_size = m_width * m_height * 1.5;
+        HRESULT hr = pMFCreateMemoryBuffer(nv12_size, &in_buffer);
+        if (FAILED(hr)) {
+            errorMsg = "pMFCreateMemoryBuffer failed: " + hr_to_hex(hr);
+            return false;
+        }
+
+        BYTE* pData = nullptr;
+        if (SUCCEEDED(in_buffer->Lock(&pData, nullptr, nullptr))) {
+            memcpy(pData, nv12Data, nv12_size);
+            in_buffer->Unlock();
+        }
+        in_buffer->SetCurrentLength(nv12_size);
+
+        IMFSample* in_sample = nullptr;
+        hr = pMFCreateSample(&in_sample);
+        if (FAILED(hr)) {
+            in_buffer->Release();
+            errorMsg = "pMFCreateSample failed: " + hr_to_hex(hr);
+            return false;
+        }
+        in_sample->AddBuffer(in_buffer);
+        in_buffer->Release();
+
+        uint64_t timestamp = m_frameCount * (10000000ULL / fps);
+        uint64_t duration = 10000000ULL / fps;
+        in_sample->SetSampleTime(timestamp);
+        in_sample->SetSampleDuration(duration);
+        m_frameCount++;
+
+        // Feed input
+        hr = m_mft->ProcessInput(0, in_sample, 0);
+        in_sample->Release();
+        if (FAILED(hr)) {
+            errorMsg = "ProcessInput failed: " + hr_to_hex(hr);
+            return false;
+        }
+
+        // Read output
+        MFT_OUTPUT_STREAM_INFO stream_info{};
+        m_mft->GetOutputStreamInfo(0, &stream_info);
+
+        while (true) {
+            MFT_OUTPUT_DATA_BUFFER output_buffer{};
+            output_buffer.dwStreamID = 0;
+
+            IMFMediaBuffer* out_mem_buffer = nullptr;
+            IMFSample* out_sample = nullptr;
+
+            if (!(stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
+                if (FAILED(pMFCreateSample(&out_sample))) {
+                    break;
+                }
+                if (FAILED(pMFCreateMemoryBuffer(stream_info.cbSize, &out_mem_buffer))) {
+                    out_sample->Release();
+                    break;
+                }
+                out_sample->AddBuffer(out_mem_buffer);
+                output_buffer.pSample = out_sample;
+            }
+
+            DWORD status = 0;
+            hr = m_mft->ProcessOutput(0, 1, &output_buffer, &status);
+
+            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+                if (out_mem_buffer) out_mem_buffer->Release();
+                if (out_sample) out_sample->Release();
+                break;
+            }
+
+            if (FAILED(hr)) {
+                if (out_mem_buffer) out_mem_buffer->Release();
+                if (out_sample) out_sample->Release();
+                errorMsg = "ProcessOutput failed: " + hr_to_hex(hr);
+                return false;
+            }
+
+            IMFSample* sample = output_buffer.pSample;
+            if (sample) {
+                IMFMediaBuffer* buf = nullptr;
+                if (SUCCEEDED(sample->GetBufferByIndex(0, &buf))) {
+                    BYTE* dataPtr = nullptr;
+                    DWORD currentLen = 0;
+                    if (SUCCEEDED(buf->Lock(&dataPtr, nullptr, &currentLen))) {
+                        outBytes.insert(outBytes.end(), dataPtr, dataPtr + currentLen);
+                        buf->Unlock();
+                    }
+                    buf->Release();
+                }
+
+                if (stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) {
+                    sample->Release();
+                }
+            }
+
+            if (output_buffer.pEvents) {
+                output_buffer.pEvents->Release();
+            }
+
+            if (!(stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
+                if (out_mem_buffer) out_mem_buffer->Release();
+                if (out_sample) out_sample->Release();
+            }
+        }
+
+        return true;
+    }
+};
+
+static VideoEncoder g_videoEncoder;
 
 static bool safe_send_raw(SOCKET sock, const string& data) {
     const char* ptr = data.c_str();
@@ -94,8 +541,9 @@ static bool safe_send_monitor_frame(SOCKET sock,
                                     int fps,
                                     int width,
                                     int height,
-                                    const vector<unsigned char>& jpegBytes) {
-    if (jpegBytes.empty())
+                                    int format,
+                                    const vector<unsigned char>& frameBytes) {
+    if (frameBytes.empty())
         return false;
 
     MonitorFrameHeader frameHeader{};
@@ -104,19 +552,19 @@ static bool safe_send_monitor_frame(SOCKET sock,
     frameHeader.fps = (uint32_t)max(0, fps);
     frameHeader.width = (uint32_t)max(0, width);
     frameHeader.height = (uint32_t)max(0, height);
-    frameHeader.format = MONITOR_FRAME_FORMAT_JPEG;
-    frameHeader.dataSize = (uint32_t)jpegBytes.size();
+    frameHeader.format = (uint32_t)format; // 1 = JPEG, 2 = H.264, 3 = H.265
+    frameHeader.dataSize = (uint32_t)frameBytes.size();
 
     PacketHeader packetHeader{};
     packetHeader.signature = PACKET_SIGNATURE;
     packetHeader.type = PACKET_TYPE_MONITOR_FRAME;
-    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + jpegBytes.size());
+    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + frameBytes.size());
 
     string packet;
     packet.resize(sizeof(PacketHeader) + packetHeader.size);
     memcpy(&packet[0], &packetHeader, sizeof(PacketHeader));
     memcpy(&packet[sizeof(PacketHeader)], &frameHeader, sizeof(MonitorFrameHeader));
-    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], jpegBytes.data(), jpegBytes.size());
+    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], frameBytes.data(), frameBytes.size());
 
     lock_guard<mutex> lock(g_sendMutex);
     return safe_send_raw(sock, packet);
@@ -357,9 +805,28 @@ static bool bitmap_to_jpeg(HBITMAP bitmapHandle, ULONG quality, vector<unsigned 
     return true;
 }
 
+static bool get_raw_bitmap_pixels(HBITMAP bitmapHandle, int width, int height, vector<uint8_t>& bgrxBytes) {
+    bgrxBytes.resize(width * height * 4);
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height; // Top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    HDC hdc = GetDC(NULL);
+    int lines = GetDIBits(hdc, bitmapHandle, 0, height, bgrxBytes.data(), &bmi, DIB_RGB_COLORS);
+    ReleaseDC(NULL, hdc);
+
+    return lines == height;
+}
+
 static bool capture_monitor_frame(const RECT& rect,
                                   int scalePercent,
-                                  vector<unsigned char>& jpegBytes,
+                                  int format,
+                                  int fps,
+                                  vector<unsigned char>& outBytes,
                                   int& outputWidth,
                                   int& outputHeight,
                                   string& error) {
@@ -372,9 +839,13 @@ static bool capture_monitor_frame(const RECT& rect,
         return false;
     }
 
-    outputWidth = max(1, (sourceWidth * scalePercent) / 100);
-    outputHeight = max(1, (sourceHeight * scalePercent) / 100);
-    ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
+    // Media Foundation H.264/H.265 encoders require standard dimensions (at least 128x128)
+    outputWidth = max(128, (sourceWidth * scalePercent) / 100);
+    outputHeight = max(128, (sourceHeight * scalePercent) / 100);
+
+    // Media Foundation H.264/H.265 encoders require even dimensions
+    outputWidth = (outputWidth / 2) * 2;
+    outputHeight = (outputHeight / 2) * 2;
 
     HDC screenDC = GetDC(NULL);
     if (!screenDC) {
@@ -424,13 +895,46 @@ static bool capture_monitor_frame(const RECT& rect,
         return false;
     }
 
-    bool encoded = bitmap_to_jpeg(bitmap, jpegQuality, jpegBytes, error);
+    bool success = false;
+    if (format == 1) { // JPEG
+        ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
+        success = bitmap_to_jpeg(bitmap, jpegQuality, outBytes, error);
+    } else { // H.264 or H.265
+        vector<uint8_t> bgrx;
+        if (get_raw_bitmap_pixels(bitmap, outputWidth, outputHeight, bgrx)) {
+            vector<uint8_t> nv12(outputWidth * outputHeight * 3 / 2);
+            BGRX_to_NV12(bgrx.data(), outputWidth, outputHeight, nv12.data());
+
+            // Protect videoEncoder initialization and encoding against thread-race
+            lock_guard<mutex> lock(g_encoderMutex);
+
+            // Lazily initialize/reinitialize encoder if resolution or format changed
+            if (!g_encoderInitialized || outputWidth != g_lastWidth || outputHeight != g_lastHeight || format != g_lastFormat) {
+                g_videoEncoder.Cleanup();
+                if (!g_videoEncoder.Init(outputWidth, outputHeight, format, fps, error)) {
+                    DeleteObject(bitmap);
+                    return false;
+                }
+                g_lastWidth = outputWidth;
+                g_lastHeight = outputHeight;
+                g_lastFormat = format;
+                g_encoderInitialized = true;
+            }
+
+            success = g_videoEncoder.EncodeFrame(nv12.data(), fps, outBytes, error);
+        } else {
+            error = "Failed to retrieve raw pixels";
+        }
+    }
+
     DeleteObject(bitmap);
-    return encoded;
+    return success;
 }
 
 static void capture_loop() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+
+    CoInitialize(NULL);
 
     while (g_captureRunning.load()) {
         DWORD frameStart = now_ms();
@@ -438,6 +942,7 @@ static void capture_loop() {
         int monitor = 0;
         int scale = 50;
         int targetFps = 20;
+        int videoFormat = 1;
         RECT captureRect{};
         bool hasCaptureRect = false;
 
@@ -447,6 +952,7 @@ static void capture_loop() {
             monitor = g_monitorIndex;
             scale = g_scalePercent;
             targetFps = g_targetFps;
+            videoFormat = g_videoFormat;
             captureRect = g_captureRect;
             hasCaptureRect = g_hasCaptureRect;
         }
@@ -457,15 +963,20 @@ static void capture_loop() {
             break;
         }
 
-        vector<unsigned char> jpegBytes;
+        vector<unsigned char> frameBytes;
         int width = 0;
         int height = 0;
         string error;
 
-        if (capture_monitor_frame(captureRect, scale, jpegBytes, width, height, error)) {
-            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, jpegBytes)) {
-                g_captureRunning.store(false);
-                break;
+        if (capture_monitor_frame(captureRect, scale, videoFormat, targetFps, frameBytes, width, height, error)) {
+            // If frame was successfully processed, send it (if not buffered)
+            if (frameBytes.empty()) {
+                // Encoder is buffering, skip sending this frame but continue
+            } else {
+                if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, videoFormat, frameBytes)) {
+                    g_captureRunning.store(false);
+                    break;
+                }
             }
         } else {
             send_monitor_error(sock, error.empty() ? "Capture failed" : error);
@@ -483,6 +994,8 @@ static void capture_loop() {
             waitMs -= chunk;
         }
     }
+
+    CoUninitialize();
 }
 
 static void stop_capture_thread() {
@@ -497,9 +1010,19 @@ static void stop_capture_thread() {
 
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
+
+    // Secure the encoder cleanup and session state variables against thread-race conditions
+    {
+        lock_guard<mutex> enc_lock(g_encoderMutex);
+        g_videoEncoder.Cleanup();
+        g_lastWidth = 0;
+        g_lastHeight = 0;
+        g_lastFormat = 0;
+        g_encoderInitialized = false;
+    }
 }
 
-static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
+static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps, int videoFormat) {
     scalePercent = clamp_int(scalePercent, 10, 100);
     int targetFps = requestedFps > 0
         ? clamp_int(requestedFps, 20, 30)
@@ -519,6 +1042,7 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
         g_monitorIndex = safeMonitorIndex;
         g_scalePercent = scalePercent;
         g_targetFps = targetFps;
+        g_videoFormat = videoFormat;
         g_captureRect = monitors[(size_t)safeMonitorIndex].rect;
         g_hasCaptureRect = true;
     }
@@ -535,6 +1059,7 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
     response["monitor"] = safeMonitorIndex;
     response["scale"] = scalePercent;
     response["fps"] = targetFps;
+    response["format"] = videoFormat;
     safe_send_json(sock, response);
 }
 
@@ -546,14 +1071,9 @@ static void simulate_mouse(const string& event, int button, int x, int y) {
         rect = g_captureRect;
     }
 
-    // Normalized (0-65535) to Screen Absolute
-    // x_abs = rect.left + (x * (rect.right - rect.left) / 65535)
-    // SendInput uses MOUSEEVENTF_ABSOLUTE which maps 0-65535 to the virtual screen.
-
     int screen_x = rect.left + MulDiv(x, rect.right - rect.left, 65535);
     int screen_y = rect.top + MulDiv(y, rect.bottom - rect.top, 65535);
 
-    // Map screen coordinate to MOUSEEVENTF_ABSOLUTE (0-65535 of virtual screen)
     int v_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int v_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int v_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -613,7 +1133,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             int monitor = command.value("monitor", 0);
             int scale = command.value("scale", 50);
             int fps = command.value("fps", 0);
-            start_capture(sock, monitor, scale, fps);
+            int format = command.value("format", 1); // 1 = JPEG, 2 = H.264, 3 = H.265
+            start_capture(sock, monitor, scale, fps, format);
             return;
         }
 
