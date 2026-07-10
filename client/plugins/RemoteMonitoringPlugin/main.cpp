@@ -136,6 +136,25 @@ static const GUID My_IID_ICodecAPI = { 0x901db749, 0xf86f, 0x4560, { 0x96, 0xd7,
 static const GUID My_CODECAPI_AVEncMPVGOPSize = { 0x951a7a7e, 0xdcee, 0x4630, { 0xb2, 0xc4, 0x98, 0xf1, 0xb1, 0x37, 0x04, 0x16 } };
 static const GUID My_CODECAPI_AVLowLatencyMode = { 0x9c3893c6, 0x7538, 0x4a92, { 0xa5, 0x50, 0x60, 0xaf, 0xcb, 0x54, 0x88, 0x5a } };
 
+// Manually define ICodecAPI interface if not declared in current compiler environment
+#ifndef __ICodecAPI_INTERFACE_DEFINED__
+#define __ICodecAPI_INTERFACE_DEFINED__
+interface ICodecAPI : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE IsSupported(const GUID* Api, BOOL* IsSupported) = 0;
+    virtual HRESULT STDMETHODCALLTYPE IsModifiable(const GUID* Api, BOOL* IsModifiable) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetParameterRange(const GUID* Api, VARIANT* ValueMin, VARIANT* ValueMax, VARIANT* SteppingDelta) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetParameterValues(const GUID* Api, VARIANT** Values, ULONG* ValuesCount) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDefaultValue(const GUID* Api, VARIANT* Value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetValue(const GUID* Api, VARIANT* Value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetValue(const GUID* Api, VARIANT* Value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE RegisterForEvent(const GUID* Api, LONG_PTR UserData) = 0;
+    virtual HRESULT STDMETHODCALLTYPE UnregisterForEvent(const GUID* Api) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetAllDefaults(void) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetValueWithChangeSet(const GUID* Api, VARIANT* Value, const GUID* ChangeSet, ULONG ChangeSetCount) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetFullChangeSet(VARIANT* Value, VARIANT* ChangeSet, ULONG* ChangeSetCount) = 0;
+};
+#endif
+
 static const CLSID My_CLSID_CMSH264EncoderMFT = { 0x6ca50380, 0x1114, 0x4159, { 0x83, 0x93, 0x44, 0xfe, 0x3e, 0x1a, 0x3c, 0xe9 } };
 static const CLSID My_CLSID_CMSH265EncoderMFT = { 0x2c417f4d, 0x1abd, 0x433c, { 0xab, 0xb5, 0x97, 0xb1, 0xc4, 0x69, 0x71, 0xe2 } };
 

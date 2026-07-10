@@ -47,7 +47,6 @@ type
     FPendingFrameFormat: Integer;
     FPendingFrameWidth: Integer;
     FPendingFrameHeight: Integer;
-    FDecodedFrameFormat: Integer;
     FFrameLock        : TCriticalSection;
     FDecodeEvent      : TEvent;
     FDecodeThread     : TThread;
@@ -115,7 +114,7 @@ const
   CLSID_CMSH265DecoderMFT: TGUID = '{42453111-18EE-4304-8319-1AA4D0A5647C}';
 
   MF_MT_MAJOR_TYPE: TGUID = '{48eba18e-f8c9-4687-bf11-0a74c9f96a8f}';
-  MF_MT_SUBTYPE: TGUID = '{f7e34c9a-425f-4e15-aa3c-5a224d3f0bc}';
+  MF_MT_SUBTYPE: TGUID = '{f7e34c9a-425f-4e15-aa3c-5a224d3fd0bc}';
   MF_MT_FRAME_SIZE: TGUID = '{16a0eb0e-6e40-4e0a-9ddb-05fa91a1077f}';
 
   MFMediaType_Video: TGUID = '{73646976-0000-0010-8000-00aa00389b71}';
