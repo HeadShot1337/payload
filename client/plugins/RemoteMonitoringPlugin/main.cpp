@@ -79,18 +79,37 @@ static bool g_encoderInitialized = false;
 static mutex g_gdiplusMutex;
 static ULONG_PTR g_gdiplusToken = 0;
 
+// Manual definition of IMFActivate to support all compiler environments
+#ifndef __IMFActivate_INTERFACE_DEFINED__
+#define __IMFActivate_INTERFACE_DEFINED__
+interface IMFActivate : public IMFAttributes {
+    virtual HRESULT STDMETHODCALLTYPE ActivateObject(REFIID riid, void** ppv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ShutdownObject(void) = 0;
+    virtual HRESULT STDMETHODCALLTYPE DetachObject(void) = 0;
+};
+#endif
+
 // Dynamic loader for Media Foundation functions
 typedef HRESULT (WINAPI *MFStartupFn)(ULONG Version, DWORD dwFlags);
 typedef HRESULT (WINAPI *MFShutdownFn)();
 typedef HRESULT (WINAPI *MFCreateMediaTypeFn)(IMFMediaType** ppMFType);
 typedef HRESULT (WINAPI *MFCreateMemoryBufferFn)(DWORD cbMaxLength, IMFMediaBuffer** ppBuffer);
 typedef HRESULT (WINAPI *MFCreateSampleFn)(IMFSample** ppSample);
+typedef HRESULT (WINAPI *MFTEnumExFn)(
+    GUID guidCategory,
+    UINT32 Flags,
+    const MFT_REGISTER_TYPE_INFO *pInputType,
+    const MFT_REGISTER_TYPE_INFO *pOutputType,
+    IMFActivate ***pppMFTActivate,
+    UINT32 *pnumMFTActivate
+);
 
 static MFStartupFn pMFStartup = nullptr;
 static MFShutdownFn pMFShutdown = nullptr;
 static MFCreateMediaTypeFn pMFCreateMediaType = nullptr;
 static MFCreateMemoryBufferFn pMFCreateMemoryBuffer = nullptr;
 static MFCreateSampleFn pMFCreateSample = nullptr;
+static MFTEnumExFn pMFTEnumEx = nullptr;
 static bool g_mfLoaded = false;
 
 static bool load_media_foundation() {
@@ -103,6 +122,7 @@ static bool load_media_foundation() {
     pMFCreateMediaType = (MFCreateMediaTypeFn)GetProcAddress(hMfplat, "MFCreateMediaType");
     pMFCreateMemoryBuffer = (MFCreateMemoryBufferFn)GetProcAddress(hMfplat, "MFCreateMemoryBuffer");
     pMFCreateSample = (MFCreateSampleFn)GetProcAddress(hMfplat, "MFCreateSample");
+    pMFTEnumEx = (MFTEnumExFn)GetProcAddress(hMfplat, "MFTEnumEx");
 
     if (pMFStartup && pMFShutdown && pMFCreateMediaType && pMFCreateMemoryBuffer && pMFCreateSample) {
         g_mfLoaded = true;
@@ -133,6 +153,8 @@ static const GUID My_IID_IMFTransform = { 0xbf94c121, 0x5b05, 0x4e6f, { 0x80, 0x
 static const GUID My_IID_ICodecAPI = { 0x901db749, 0xf86f, 0x4560, { 0x96, 0xd7, 0x8a, 0x35, 0x2f, 0x0d, 0x2d, 0xb9 } };
 static const GUID My_CODECAPI_AVEncMPVGOPSize = { 0x951a7a7e, 0xdcee, 0x4630, { 0xb2, 0xc4, 0x98, 0xf1, 0xb1, 0x37, 0x04, 0x16 } };
 static const GUID My_CODECAPI_AVLowLatencyMode = { 0x9c3893c6, 0x7538, 0x4a92, { 0xa5, 0x50, 0x60, 0xaf, 0xcb, 0x54, 0x88, 0x5a } };
+
+static const GUID My_MFT_CATEGORY_VIDEO_ENCODER = { 0xf79e49c1, 0x00dd, 0x432f, { 0x99, 0x08, 0x27, 0xc8, 0x13, 0x4c, 0x40, 0xf6 } };
 
 static const CLSID My_CLSID_CMSH264EncoderMFT = { 0x6ca50380, 0x1114, 0x4159, { 0x83, 0x93, 0x44, 0xfe, 0x3e, 0x1a, 0x3c, 0xe9 } };
 static const CLSID My_CLSID_CMSH265EncoderMFT = { 0x2c417f4d, 0x1abd, 0x433c, { 0xab, 0xb5, 0x97, 0xb1, 0xc4, 0x69, 0x71, 0xe2 } };
@@ -235,11 +257,37 @@ public:
             return false;
         }
 
-        CLSID encoderClsid = (format == 3) ? My_CLSID_CMSH265EncoderMFT : My_CLSID_CMSH264EncoderMFT;
-        hr = CoCreateInstance(encoderClsid, NULL, CLSCTX_INPROC_SERVER, My_IID_IMFTransform, (void**)&m_mft);
-        if (FAILED(hr) || !m_mft) {
-            errorMsg = "CoCreateInstance failed: " + hr_to_hex(hr);
-            return false;
+        bool activated = false;
+
+        // Try dual-lookup: First attempt via official MFTEnumEx (best for synchronous/hardware/software portability)
+        if (pMFTEnumEx) {
+            MFT_REGISTER_TYPE_INFO input_info = { My_MFMediaType_Video, My_MFVideoFormat_NV12 };
+            MFT_REGISTER_TYPE_INFO output_info = { My_MFMediaType_Video, (format == 3) ? My_MFVideoFormat_HEVC : My_MFVideoFormat_H264 };
+            UINT32 flags = MFT_ENUM_FLAG_SYNCHRONOUSMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCHRONOUSMFT | MFT_ENUM_FLAG_FIELDOFUSE;
+
+            IMFActivate** activate_array = nullptr;
+            UINT32 count = 0;
+            hr = pMFTEnumEx(My_MFT_CATEGORY_VIDEO_ENCODER, flags, &input_info, &output_info, &activate_array, &count);
+            if (SUCCEEDED(hr) && count > 0) {
+                hr = activate_array[0]->ActivateObject(My_IID_IMFTransform, (void**)&m_mft);
+                if (SUCCEEDED(hr) && m_mft) {
+                    activated = true;
+                }
+                for (UINT32 i = 0; i < count; i++) {
+                    activate_array[i]->Release();
+                }
+                CoTaskMemFree(activate_array);
+            }
+        }
+
+        // Fallback to CoCreateInstance on standard Microsoft Software Encoders
+        if (!activated) {
+            CLSID encoderClsid = (format == 3) ? My_CLSID_CMSH265EncoderMFT : My_CLSID_CMSH264EncoderMFT;
+            hr = CoCreateInstance(encoderClsid, NULL, CLSCTX_INPROC_SERVER, My_IID_IMFTransform, (void**)&m_mft);
+            if (FAILED(hr) || !m_mft) {
+                errorMsg = "CoCreateInstance and MFTEnumEx both failed. HRESULT: " + hr_to_hex(hr);
+                return false;
+            }
         }
 
         // Configure Output Media Type

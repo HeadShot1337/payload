@@ -192,6 +192,22 @@ type
     function CopyAllSamples(pDestSample: IMFSample): HRESULT; stdcall;
   end;
 
+  PPointerList = ^TPointerList;
+  TPointerList = array[0..65535] of Pointer;
+
+  TMFT_REGISTER_TYPE_INFO = record
+    guidMajorType: TGUID;
+    guidSubtype: TGUID;
+  end;
+  PMFT_REGISTER_TYPE_INFO = ^TMFT_REGISTER_TYPE_INFO;
+
+  IMFActivate = interface(IMFAttributes)
+    ['{5F36B12C-378A-44D1-9D1D-1E0D7A48776E}']
+    function ActivateObject(const riid: TGUID; out ppv: Pointer): HRESULT; stdcall;
+    function ShutdownObject: HRESULT; stdcall;
+    function DetachObject: HRESULT; stdcall;
+  end;
+
   PMFT_OUTPUT_DATA_BUFFER = ^TMFT_OUTPUT_DATA_BUFFER;
   TMFT_OUTPUT_DATA_BUFFER = record
     dwStreamID: DWORD;
@@ -232,6 +248,7 @@ var
   MFCreateMediaType: function(out ppMFType: IMFMediaType): HRESULT; stdcall = nil;
   MFCreateMemoryBuffer: function(cbMaxLength: DWORD; out ppBuffer: IMFMediaBuffer): HRESULT; stdcall = nil;
   MFCreateSample: function(out ppSample: IMFSample): HRESULT; stdcall = nil;
+  MFTEnumEx: function(guidCategory: TGUID; Flags: UINT32; pInputType: PMFT_REGISTER_TYPE_INFO; pOutputType: PMFT_REGISTER_TYPE_INFO; out pppMFTActivate: Pointer; out pnumMFTActivate: UINT32): HRESULT; stdcall = nil;
 
 function LoadMFPlat: Boolean;
 var
@@ -248,6 +265,7 @@ begin
     @MFCreateMediaType := GetProcAddress(hDLL, 'MFCreateMediaType');
     @MFCreateMemoryBuffer := GetProcAddress(hDLL, 'MFCreateMemoryBuffer');
     @MFCreateSample := GetProcAddress(hDLL, 'MFCreateSample');
+    @MFTEnumEx := GetProcAddress(hDLL, 'MFTEnumEx');
   end;
 
   Result := Assigned(MFStartup) and Assigned(MFShutdown) and
@@ -298,9 +316,16 @@ end;
 
 function TMFVideoDecoder.Init(AWidth, AHeight: Integer): Boolean;
 var
-  CLSID: TGUID;
+  CLSID, MFT_CATEGORY_VIDEO_DECODER: TGUID;
   InType, OutType: IMFMediaType;
   hr: HRESULT;
+  InputInfo, OutputInfo: TMFT_REGISTER_TYPE_INFO;
+  ActivateArrayPtr: Pointer;
+  ActivateArray: PPointerList;
+  ActivateObj: IMFActivate;
+  Count: UINT32;
+  Activated: Boolean;
+  i: Integer;
 begin
   Result := False;
   Reset;
@@ -310,13 +335,46 @@ begin
   CoInitialize(nil);
   MFStartup($00020070, 0);
 
-  if FFormat = 3 then
-    CLSID := CLSID_CMSH265DecoderMFT
-  else
-    CLSID := CLSID_CMSH264DecoderMFT;
+  Activated := False;
 
-  hr := CoCreateInstance(CLSID, nil, CLSCTX_INPROC_SERVER, IMFTransform, FDecoder);
-  if (hr < 0) or not Assigned(FDecoder) then Exit;
+  if Assigned(MFTEnumEx) then
+  begin
+    MFT_CATEGORY_VIDEO_DECODER := StringToGUID('{d6c02d4b-6833-45b4-971A-05a4b04bab91}');
+
+    InputInfo.guidMajorType := MFMediaType_Video;
+    if FFormat = 3 then
+      InputInfo.guidSubtype := MFVideoFormat_HEVC
+    else
+      InputInfo.guidSubtype := MFVideoFormat_H264;
+
+    OutputInfo.guidMajorType := MFMediaType_Video;
+    OutputInfo.guidSubtype := MFVideoFormat_RGB32;
+
+    hr := MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, $00000007, @InputInfo, @OutputInfo, ActivateArrayPtr, Count);
+    if (hr >= 0) and (Count > 0) then
+    begin
+      ActivateArray := PPointerList(ActivateArrayPtr);
+      ActivateObj := IMFActivate(ActivateArray^[0]);
+      hr := ActivateObj.ActivateObject(IMFTransform, Pointer(FDecoder));
+      if (hr >= 0) and Assigned(FDecoder) then
+        Activated := True;
+
+      for i := 0 to Count - 1 do
+        IUnknown(ActivateArray^[i])._Release;
+      CoTaskMemFree(ActivateArrayPtr);
+    end;
+  end;
+
+  if not Activated then
+  begin
+    if FFormat = 3 then
+      CLSID := CLSID_CMSH265DecoderMFT
+    else
+      CLSID := CLSID_CMSH264DecoderMFT;
+
+    hr := CoCreateInstance(CLSID, nil, CLSCTX_INPROC_SERVER, IMFTransform, FDecoder);
+    if (hr < 0) or not Assigned(FDecoder) then Exit;
+  end;
 
   // Set Input Type
   hr := MFCreateMediaType(InType);
