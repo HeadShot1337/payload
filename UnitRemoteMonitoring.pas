@@ -475,6 +475,7 @@ var
   hr: HRESULT;
   OutDataBuffer: TMFT_OUTPUT_DATA_BUFFER;
   dwStatus: DWORD;
+  AvailableTypePtr: Pointer;
 begin
   Result := False;
   if not FInitialized or not Assigned(FDecoder) then Exit;
@@ -522,11 +523,17 @@ begin
       dwStatus := 0;
       hr := FDecoder.ProcessOutput(0, 1, @OutDataBuffer, @dwStatus);
 
-      // Handle stream change: MF_E_TRANSFORM_STREAM_CHANGE = $C00D6D73
-      if hr = HRESULT($C00D6D73) then
+      // Handle dynamic stream change on the same decoder instance
+      if hr = HRESULT($C00D6D61) then
       begin
-        Init(FWidth, FHeight);
-        Exit;
+        hr := FDecoder.GetOutputAvailableType(0, 0, AvailableTypePtr);
+        if hr >= 0 then
+        begin
+          hr := FDecoder.SetOutputType(0, AvailableTypePtr, 0);
+          IUnknown(AvailableTypePtr)._Release;
+        end;
+        // Retry ProcessOutput directly
+        hr := FDecoder.ProcessOutput(0, 1, @OutDataBuffer, @dwStatus);
       end;
 
       if hr < 0 then Exit;
@@ -1161,6 +1168,9 @@ begin
               Decoder := TMFVideoDecoder.Create(Format);
               Decoder.Init(Width, Height);
             end;
+
+            Decoder.FWidth := Width;
+            Decoder.FHeight := Height;
 
             Decoded := TBitmap.Create;
             if not Decoder.DecodeFrame(Bytes, Decoded) then
