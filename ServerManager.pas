@@ -1333,7 +1333,7 @@ begin
 
   MonitoringForm := GetMonitoringForm(aLine);
   if Assigned(MonitoringForm) then
-    MonitoringForm.QueueFrameBytes(FrameBytes, FrameHeader.Format, FrameHeader.Width, FrameHeader.Height);
+    MonitoringForm.QueueFrameBytes(FrameBytes, Integer(FrameHeader.Format), Integer(FrameHeader.Width), Integer(FrameHeader.Height));
 end;
 
 procedure TServerManager.ProcessHVNCBinaryFrame(aLine: TncLine;
