@@ -436,7 +436,7 @@ begin
           for y := 0 to FHeight - 1 do
           begin
             pDest := ABitmap.ScanLine[y];
-            Move(pData[y * FWidth * 4], pDest^, FWidth * 4);
+            Move((pData + (y * FWidth * 4))^, pDest^, FWidth * 4);
           end;
         finally
           ABitmap.Canvas.Unlock;

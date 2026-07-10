@@ -134,6 +134,9 @@ static const GUID My_IID_ICodecAPI = { 0x901db749, 0xf86f, 0x4560, { 0x96, 0xd7,
 static const GUID My_CODECAPI_AVEncMPVGOPSize = { 0x951a7a7e, 0xdcee, 0x4630, { 0xb2, 0xc4, 0x98, 0xf1, 0xb1, 0x37, 0x04, 0x16 } };
 static const GUID My_CODECAPI_AVLowLatencyMode = { 0x9c3893c6, 0x7538, 0x4a92, { 0xa5, 0x50, 0x60, 0xaf, 0xcb, 0x54, 0x88, 0x5a } };
 
+static const CLSID My_CLSID_CMSH264EncoderMFT = { 0x6ca50380, 0x1114, 0x4159, { 0x83, 0x93, 0x44, 0xfe, 0x3e, 0x1a, 0x3c, 0xe9 } };
+static const CLSID My_CLSID_CMSH265EncoderMFT = { 0x2c417f4d, 0x1abd, 0x433c, { 0xab, 0xb5, 0x97, 0xb1, 0xc4, 0x69, 0x71, 0xe2 } };
+
 // Manually define ICodecAPI interface if not declared in current compiler environment
 #ifndef __ICodecAPI_INTERFACE_DEFINED__
 #define __ICodecAPI_INTERFACE_DEFINED__
@@ -153,8 +156,11 @@ interface ICodecAPI : public IUnknown {
 };
 #endif
 
-static const CLSID My_CLSID_CMSH264EncoderMFT = { 0x6ca50380, 0x1114, 0x4159, { 0x83, 0x93, 0x44, 0xfe, 0x3e, 0x1a, 0x3c, 0xe9 } };
-static const CLSID My_CLSID_CMSH265EncoderMFT = { 0x2c417f4d, 0x1abd, 0x433c, { 0xab, 0xb5, 0x97, 0xb1, 0xc4, 0x69, 0x71, 0xe2 } };
+static string hr_to_hex(HRESULT hr) {
+    char buf[32];
+    sprintf(buf, "0x%08X", (unsigned int)hr);
+    return string(buf);
+}
 
 // Video conversion helper: BGRX to NV12
 static void BGRX_to_NV12(const uint8_t* bgrx, int width, int height, uint8_t* nv12) {
@@ -209,29 +215,37 @@ public:
         m_format = 0;
     }
 
-    bool Init(int width, int height, int format, int fps) {
+    bool Init(int width, int height, int format, int fps, string& errorMsg) {
         Cleanup();
 
         if (format != 2 && format != 3) {
+            errorMsg = "Invalid video format";
             return false;
         }
 
         if (!load_media_foundation()) {
+            errorMsg = "Failed to load mfplat.dll";
             return false;
         }
 
         CoInitialize(NULL);
-        pMFStartup(MF_VERSION, 0);
+        HRESULT hr = pMFStartup(MF_VERSION, 0);
+        if (FAILED(hr)) {
+            errorMsg = "MFStartup failed: " + hr_to_hex(hr);
+            return false;
+        }
 
         CLSID encoderClsid = (format == 3) ? My_CLSID_CMSH265EncoderMFT : My_CLSID_CMSH264EncoderMFT;
-        HRESULT hr = CoCreateInstance(encoderClsid, NULL, CLSCTX_INPROC_SERVER, My_IID_IMFTransform, (void**)&m_mft);
+        hr = CoCreateInstance(encoderClsid, NULL, CLSCTX_INPROC_SERVER, My_IID_IMFTransform, (void**)&m_mft);
         if (FAILED(hr) || !m_mft) {
+            errorMsg = "CoCreateInstance failed: " + hr_to_hex(hr);
             return false;
         }
 
         // Configure Output Media Type
         IMFMediaType* out_type = nullptr;
         if (FAILED(pMFCreateMediaType(&out_type))) {
+            errorMsg = "pMFCreateMediaType failed";
             Cleanup();
             return false;
         }
@@ -255,6 +269,7 @@ public:
         hr = m_mft->SetOutputType(0, out_type, 0);
         out_type->Release();
         if (FAILED(hr)) {
+            errorMsg = "SetOutputType failed: " + hr_to_hex(hr);
             Cleanup();
             return false;
         }
@@ -262,6 +277,7 @@ public:
         // Configure Input Media Type
         IMFMediaType* in_type = nullptr;
         if (FAILED(pMFCreateMediaType(&in_type))) {
+            errorMsg = "pMFCreateMediaType for input failed";
             Cleanup();
             return false;
         }
@@ -276,6 +292,7 @@ public:
         hr = m_mft->SetInputType(0, in_type, 0);
         in_type->Release();
         if (FAILED(hr)) {
+            errorMsg = "SetInputType failed: " + hr_to_hex(hr);
             Cleanup();
             return false;
         }
@@ -296,9 +313,9 @@ public:
             codec_api->Release();
         }
 
-        hr = m_mft->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-        hr = m_mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-        hr = m_mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+        m_mft->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        m_mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        m_mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
         m_width = width;
         m_height = height;
@@ -308,15 +325,20 @@ public:
         return true;
     }
 
-    bool EncodeFrame(const uint8_t* nv12Data, int fps, vector<uint8_t>& outBytes) {
-        if (!m_initialized || !m_mft) return false;
+    bool EncodeFrame(const uint8_t* nv12Data, int fps, vector<uint8_t>& outBytes, string& errorMsg) {
+        if (!m_initialized || !m_mft) {
+            errorMsg = "Encoder not initialized";
+            return false;
+        }
 
         outBytes.clear();
 
         // Create Input Sample
         IMFMediaBuffer* in_buffer = nullptr;
         int nv12_size = m_width * m_height * 1.5;
-        if (FAILED(pMFCreateMemoryBuffer(nv12_size, &in_buffer))) {
+        HRESULT hr = pMFCreateMemoryBuffer(nv12_size, &in_buffer);
+        if (FAILED(hr)) {
+            errorMsg = "pMFCreateMemoryBuffer failed: " + hr_to_hex(hr);
             return false;
         }
 
@@ -328,8 +350,10 @@ public:
         in_buffer->SetCurrentLength(nv12_size);
 
         IMFSample* in_sample = nullptr;
-        if (FAILED(pMFCreateSample(&in_sample))) {
+        hr = pMFCreateSample(&in_sample);
+        if (FAILED(hr)) {
             in_buffer->Release();
+            errorMsg = "pMFCreateSample failed: " + hr_to_hex(hr);
             return false;
         }
         in_sample->AddBuffer(in_buffer);
@@ -342,9 +366,10 @@ public:
         m_frameCount++;
 
         // Feed input
-        HRESULT hr = m_mft->ProcessInput(0, in_sample, 0);
+        hr = m_mft->ProcessInput(0, in_sample, 0);
         in_sample->Release();
         if (FAILED(hr)) {
+            errorMsg = "ProcessInput failed: " + hr_to_hex(hr);
             return false;
         }
 
@@ -383,7 +408,8 @@ public:
             if (FAILED(hr)) {
                 if (out_mem_buffer) out_mem_buffer->Release();
                 if (out_sample) out_sample->Release();
-                break;
+                errorMsg = "ProcessOutput failed: " + hr_to_hex(hr);
+                return false;
             }
 
             IMFSample* sample = output_buffer.pSample;
@@ -414,7 +440,7 @@ public:
             }
         }
 
-        return !outBytes.empty();
+        return true;
     }
 };
 
@@ -745,8 +771,9 @@ static bool capture_monitor_frame(const RECT& rect,
         return false;
     }
 
-    outputWidth = max(2, (sourceWidth * scalePercent) / 100);
-    outputHeight = max(2, (sourceHeight * scalePercent) / 100);
+    // Media Foundation H.264/H.265 encoders require standard dimensions (at least 128x128)
+    outputWidth = max(128, (sourceWidth * scalePercent) / 100);
+    outputHeight = max(128, (sourceHeight * scalePercent) / 100);
 
     // Media Foundation H.264/H.265 encoders require even dimensions
     outputWidth = (outputWidth / 2) * 2;
@@ -813,16 +840,17 @@ static bool capture_monitor_frame(const RECT& rect,
             // Lazily initialize/reinitialize encoder if resolution or format changed
             if (!g_encoderInitialized || outputWidth != g_lastWidth || outputHeight != g_lastHeight || format != g_lastFormat) {
                 g_videoEncoder.Cleanup();
-                g_videoEncoder.Init(outputWidth, outputHeight, format, fps);
+                if (!g_videoEncoder.Init(outputWidth, outputHeight, format, fps, error)) {
+                    DeleteObject(bitmap);
+                    return false;
+                }
                 g_lastWidth = outputWidth;
                 g_lastHeight = outputHeight;
                 g_lastFormat = format;
                 g_encoderInitialized = true;
             }
-            success = g_videoEncoder.EncodeFrame(nv12.data(), fps, outBytes);
-            if (!success) {
-                error = "Video encoding failed";
-            }
+
+            success = g_videoEncoder.EncodeFrame(nv12.data(), fps, outBytes, error);
         } else {
             error = "Failed to retrieve raw pixels";
         }
@@ -870,9 +898,14 @@ static void capture_loop() {
         string error;
 
         if (capture_monitor_frame(captureRect, scale, videoFormat, targetFps, frameBytes, width, height, error)) {
-            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, videoFormat, frameBytes)) {
-                g_captureRunning.store(false);
-                break;
+            // If frame was successfully processed, send it (if not buffered)
+            if (frameBytes.empty()) {
+                // Encoder is buffering, skip sending this frame but continue
+            } else {
+                if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, videoFormat, frameBytes)) {
+                    g_captureRunning.store(false);
+                    break;
+                }
             }
         } else {
             send_monitor_error(sock, error.empty() ? "Capture failed" : error);
