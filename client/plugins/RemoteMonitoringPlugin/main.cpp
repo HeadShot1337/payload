@@ -158,8 +158,8 @@ static const GUID My_CODECAPI_AVLowLatencyMode = { 0x9c3893c6, 0x7538, 0x4a92, {
 
 static const GUID My_MFT_CATEGORY_VIDEO_ENCODER = { 0xf79e49c1, 0x00dd, 0x432f, { 0x99, 0x08, 0x27, 0xc8, 0x13, 0x4c, 0x40, 0xf6 } };
 
-static const CLSID My_CLSID_CMSH264EncoderMFT = { 0x6ca50380, 0x1114, 0x4159, { 0x83, 0x93, 0x44, 0xfe, 0x3e, 0x1a, 0x3c, 0xe9 } };
-static const CLSID My_CLSID_CMSH265EncoderMFT = { 0x2c417f4d, 0x1abd, 0x433c, { 0xab, 0xb5, 0x97, 0xb1, 0xc4, 0x69, 0x71, 0xe2 } };
+static const CLSID My_CLSID_CMSH264EncoderMFT = { 0x6ca50344, 0x051a, 0x4ded, { 0x97, 0x79, 0xa4, 0x33, 0x05, 0x16, 0x5e, 0x35 } };
+static const CLSID My_CLSID_CMSH265EncoderMFT = { 0xf2f84074, 0x8bca, 0x40bd, { 0x91, 0x59, 0xe8, 0x80, 0xf6, 0x73, 0xdd, 0x3b } };
 
 // Manually define ICodecAPI interface if not declared in current compiler environment
 #ifndef __ICodecAPI_INTERFACE_DEFINED__
@@ -261,7 +261,7 @@ public:
 
         bool activated = false;
 
-        // Try dual-lookup: First attempt via official MFTEnumEx (best for synchronous/hardware/software portability)
+        // Try dual-lookup: First attempt via official MFTEnumEx (best for Portability across all Windows versions)
         if (pMFTEnumEx) {
             MFT_REGISTER_TYPE_INFO input_info = { My_MFMediaType_Video, My_MFVideoFormat_NV12 };
             MFT_REGISTER_TYPE_INFO output_info = { My_MFMediaType_Video, (format == 3) ? My_MFVideoFormat_HEVC : My_MFVideoFormat_H264 };
@@ -279,8 +279,11 @@ public:
             #ifndef MFT_ENUM_FLAG_FIELDOFUSE
             #define MFT_ENUM_FLAG_FIELDOFUSE 0x00000008
             #endif
+            #ifndef MFT_ENUM_FLAG_ALL
+            #define MFT_ENUM_FLAG_ALL 0x0000003F
+            #endif
 
-            UINT32 flags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_FIELDOFUSE;
+            UINT32 flags = MFT_ENUM_FLAG_ALL;
 
             IMFActivate** activate_array = nullptr;
             UINT32 count = 0;

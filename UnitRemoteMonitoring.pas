@@ -121,6 +121,7 @@ const
   MFVideoFormat_H264: TGUID = '{34363248-0000-0010-8000-00aa00389b71}';
   MFVideoFormat_HEVC: TGUID = '{43564548-0000-0010-8000-00aa00389b71}';
   MFVideoFormat_RGB32: TGUID = '{00000016-0000-0010-8000-00aa00389b71}';
+  MFVideoFormat_NV12: TGUID = '{3231564e-0000-0010-8000-00aa00389b71}';
 
 type
   IMFAttributes = interface(IUnknown)
@@ -314,6 +315,53 @@ begin
   FInitialized := False;
 end;
 
+procedure NV12_To_RGB32(pNV12: PByte; AWidth, AHeight: Integer; ABitmap: TBitmap);
+var
+  y, x: Integer;
+  pY, pUV: PByte;
+  YVal, UVal, VVal: Integer;
+  r, g, b: Integer;
+  pDest: PByte;
+  uv_offset: Integer;
+begin
+  ABitmap.PixelFormat := pf32bit;
+  ABitmap.SetSize(AWidth, AHeight);
+
+  pY := pNV12;
+  pUV := pNV12 + (AWidth * AHeight);
+
+  ABitmap.Canvas.Lock;
+  try
+    for y := 0 to AHeight - 1 do
+    begin
+      pDest := ABitmap.ScanLine[y];
+      uv_offset := (y div 2) * AWidth;
+
+      for x := 0 to AWidth - 1 do
+      begin
+        YVal := pY[y * AWidth + x];
+        UVal := pUV[uv_offset + (x div 2) * 2] - 128;
+        VVal := pUV[uv_offset + (x div 2) * 2 + 1] - 128;
+
+        r := YVal + (1402 * VVal div 1000);
+        g := YVal - (344 * UVal div 1000) - (714 * VVal div 1000);
+        b := YVal + (1772 * UVal div 1000);
+
+        if r < 0 then r := 0 else if r > 255 then r := 255;
+        if g < 0 then g := 0 else if g > 255 then g := 255;
+        if b < 0 then b := 0 else if b > 255 then b := 255;
+
+        pDest[x * 4]     := b;
+        pDest[x * 4 + 1] := g;
+        pDest[x * 4 + 2] := r;
+        pDest[x * 4 + 3] := 255;
+      end;
+    end;
+  finally
+    ABitmap.Canvas.Unlock;
+  end;
+end;
+
 function TMFVideoDecoder.Init(AWidth, AHeight: Integer): Boolean;
 var
   CLSID, MFT_CATEGORY_VIDEO_DECODER: TGUID;
@@ -348,9 +396,9 @@ begin
       InputInfo.guidSubtype := MFVideoFormat_H264;
 
     OutputInfo.guidMajorType := MFMediaType_Video;
-    OutputInfo.guidSubtype := MFVideoFormat_RGB32;
+    OutputInfo.guidSubtype := MFVideoFormat_NV12; // MFT Decoders output NV12!
 
-    hr := MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, $00000007, @InputInfo, @OutputInfo, ActivateArrayPtr, Count);
+    hr := MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, $0000003F, @InputInfo, @OutputInfo, ActivateArrayPtr, Count);
     if (hr >= 0) and (Count > 0) then
     begin
       ActivateArray := PPointerList(ActivateArrayPtr);
@@ -398,7 +446,7 @@ begin
   if hr < 0 then Exit;
   try
     OutType.SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    OutType.SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+    OutType.SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12); // Standard WMF decoder output format
     OutType.SetUINT64(MF_MT_FRAME_SIZE, (UInt64(AWidth) shl 32) or UInt64(AHeight));
     hr := FDecoder.SetOutputType(0, Pointer(OutType), 0);
     if hr < 0 then Exit;
@@ -422,12 +470,11 @@ var
   InSample: IMFSample;
   OutMediaBuf: IMFMediaBuffer;
   OutSample: IMFSample;
-  pData, pDest: PByte;
+  pData: PByte;
   cbMax, cbCur: DWORD;
   hr: HRESULT;
   OutDataBuffer: TMFT_OUTPUT_DATA_BUFFER;
   dwStatus: DWORD;
-  y: Integer;
 begin
   Result := False;
   if not FInitialized or not Assigned(FDecoder) then Exit;
@@ -463,7 +510,7 @@ begin
   hr := MFCreateSample(OutSample);
   if hr < 0 then Exit;
   try
-    hr := MFCreateMemoryBuffer(FWidth * FHeight * 4, OutMediaBuf);
+    hr := MFCreateMemoryBuffer((FWidth * FHeight * 3) div 2, OutMediaBuf); // NV12 buffer size
     if hr < 0 then Exit;
     try
       OutSample.AddBuffer(OutMediaBuf);
@@ -484,24 +531,15 @@ begin
 
       if hr < 0 then Exit;
 
-      // Successfully decoded! Copy RGB32 buffer to TBitmap
-      ABitmap.PixelFormat := pf32bit;
-      ABitmap.SetSize(FWidth, FHeight);
-
+      // Successfully decoded! Convert NV12 to TBitmap RGB32
       if (OutMediaBuf.Lock(pData, @cbMax, @cbCur) >= 0) then
       begin
-        ABitmap.Canvas.Lock;
         try
-          for y := 0 to FHeight - 1 do
-          begin
-            pDest := ABitmap.ScanLine[y];
-            Move((pData + (y * FWidth * 4))^, pDest^, FWidth * 4);
-          end;
+          NV12_To_RGB32(pData, FWidth, FHeight, ABitmap);
+          Result := True;
         finally
-          ABitmap.Canvas.Unlock;
+          OutMediaBuf.Unlock;
         end;
-        OutMediaBuf.Unlock;
-        Result := True;
       end;
 
     finally
