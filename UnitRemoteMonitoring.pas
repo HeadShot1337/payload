@@ -10,7 +10,7 @@ uses
   System.NetEncoding, System.StrUtils, System.SyncObjs,
   Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls,
   Vcl.ComCtrls, Vcl.ExtCtrls, Vcl.Imaging.jpeg, Vcl.Imaging.pngimage,
-  ncLines, UnitLibVpxPayload;
+  ncLines;
 
 type
   TMonitoringSendJSONEvent   = procedure(aLine: TncLine; JSONObj: TJSONObject) of object;
@@ -166,12 +166,6 @@ var
   GLibLoadLock: TCriticalSection;
 
 function LoadLibVpx: Boolean;
-var
-  LTempPath, LTargetDll: string;
-  LBase64: string;
-  LBytes: TBytes;
-  LFS: TFileStream;
-  i: Integer;
 begin
   GLibLoadLock.Enter;
   try
@@ -183,53 +177,6 @@ begin
       HVPX := SafeLoadLibrary('vpx.dll');
     if HVPX = 0 then
       HVPX := SafeLoadLibrary('libvpx-1.dll');
-
-    if HVPX = 0 then
-    begin
-      SetLength(LTempPath, MAX_PATH);
-      if GetTempPath(MAX_PATH, PChar(LTempPath)) > 0 then
-      begin
-        LTempPath := Trim(LTempPath);
-        LTargetDll := IncludeTrailingPathDelimiter(LTempPath) + 'libvpx-1.dll';
-
-        var LExists: Boolean := False;
-        if FileExists(LTargetDll) then
-        begin
-          LFS := TFileStream.Create(LTargetDll, fmOpenRead or fmShareDenyNone);
-          try
-            if LFS.Size = 1574930 then
-              LExists := True;
-          finally
-            LFS.Free;
-          end;
-        end;
-
-        if not LExists then
-        begin
-          var LStringBuilder := TStringBuilder.Create;
-          try
-            for i := Low(LIBVPX_DLL_BASE64_PARTS) to High(LIBVPX_DLL_BASE64_PARTS) do
-              LStringBuilder.Append(LIBVPX_DLL_BASE64_PARTS[i]);
-            LBase64 := LStringBuilder.ToString;
-          finally
-            LStringBuilder.Free;
-          end;
-
-          LBytes := TNetEncoding.Base64.DecodeStringToBytes(LBase64);
-          if Length(LBytes) > 0 then
-          begin
-            LFS := TFileStream.Create(LTargetDll, fmCreate);
-            try
-              LFS.WriteBuffer(LBytes[0], Length(LBytes));
-            finally
-              LFS.Free;
-            end;
-          end;
-        end;
-
-        HVPX := SafeLoadLibrary(LTargetDll);
-      end;
-    end;
 
     if HVPX = 0 then
       Exit(False);
