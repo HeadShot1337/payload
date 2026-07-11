@@ -2,6 +2,8 @@
 
 interface
 
+{$POINTERMATH ON}
+
 uses
   Winapi.Windows, Winapi.Messages,
   System.SysUtils, System.Classes, System.JSON, System.Math,
@@ -36,6 +38,8 @@ type
   pvpx_image_t = ^vpx_image_t;
   vpx_image_t = record
     fmt: Integer;
+    cs: Integer;
+    range: Integer;
     w: Integer;
     h: Integer;
     d_w: Integer;
@@ -45,7 +49,7 @@ type
     planes: array[0..3] of PByte;
     stride: array[0..3] of Integer;
     bps: Integer;
-    user_priv: Integer;
+    user_priv: Pointer;
     img_data: PByte;
     img_data_owner: Integer;
     self_allocd: Integer;

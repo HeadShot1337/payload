@@ -67,6 +67,8 @@ typedef enum vpx_img_fmt {
 
 typedef struct vpx_image {
     vpx_img_fmt_t fmt;
+    int cs;
+    int range;
     int w;
     int h;
     int d_w;
@@ -76,7 +78,7 @@ typedef struct vpx_image {
     unsigned char *planes[4];
     int stride[4];
     int bps;
-    int user_priv;
+    void *user_priv;
     unsigned char *img_data;
     int img_data_owner;
     int self_allocd;
@@ -131,14 +133,14 @@ typedef struct vpx_codec_enc_cfg {
     unsigned int kf_min_dist;
     unsigned int kf_max_dist;
     unsigned int ss_number_layers;
-    unsigned int ss_enable_auto_alt_ref[8];
-    unsigned int ss_target_bitrate[8];
+    unsigned int ss_enable_auto_alt_ref[5];
+    unsigned int ss_target_bitrate[5];
     unsigned int ts_number_layers;
-    unsigned int ts_target_bitrate[16];
-    unsigned int ts_rate_decimator[16];
+    unsigned int ts_target_bitrate[5];
+    unsigned int ts_rate_decimator[5];
     unsigned int ts_periodicity;
     unsigned int ts_layer_id[16];
-    unsigned int layer_target_bitrate[12];
+    unsigned int layer_target_bitrate[25];
     int temporal_use_sandbox;
     unsigned char reserved[256];
 } vpx_codec_enc_cfg_t;
@@ -732,7 +734,7 @@ static void capture_loop() {
                 captureRect.top,
                 sourceWidth,
                 sourceHeight,
-                SRCOPY | CAPTUREBLT
+                SRCCOPY | CAPTUREBLT
             );
 
             SelectObject(memoryDC, oldObject);
