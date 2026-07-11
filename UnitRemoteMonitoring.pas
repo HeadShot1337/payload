@@ -367,6 +367,8 @@ end;
 destructor TMFVideoDecoder.Destroy;
 begin
   FDecoder := nil;
+  if Assigned(MFShutdown) then
+    MFShutdown();
   inherited;
 end;
 
@@ -377,6 +379,9 @@ var
 begin
   LoadMF;
   if not Assigned(MFStartup) then Exit;
+
+  hr := MFStartup(MF_VERSION, 0);
+  if FAILED(hr) then Exit;
 
   hr := CoCreateInstance(CLSID_CMSH264DecoderMFT, nil, CLSCTX_INPROC_SERVER, IID_IMFTransform, FDecoder);
   if FAILED(hr) or (FDecoder = nil) then Exit;

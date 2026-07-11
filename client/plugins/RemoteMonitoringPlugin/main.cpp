@@ -522,9 +522,17 @@ static void BGRX_to_NV12(const uint8_t* bgrx, int width, int height, uint8_t* nv
     }
 }
 
-// Media Foundation activation / Direct CoCreateInstance lookup
+// Media Foundation activation - Software First with Hardware Fallback
 static HRESULT FindEncoderMFT(IMFTransform** ppEncoder) {
     *ppEncoder = nullptr;
+
+    // 1. Try Microsoft Software H.264 Encoder MFT directly (most compatible with CPU memory buffers)
+    HRESULT hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, NULL, CLSCTX_INPROC_SERVER, IID_IMFTransform, (void**)ppEncoder);
+    if (SUCCEEDED(hr) && *ppEncoder != nullptr) {
+        return S_OK;
+    }
+
+    // 2. Fallback: Lookup other video encoders (such as hardware or third-party) via MFTEnumEx
     MFT_REGISTER_TYPE_INFO inputInfo = { MFMediaType_Video, MFVideoFormat_NV12 };
     MFT_REGISTER_TYPE_INFO outputInfo = { MFMediaType_Video, MFVideoFormat_H264 };
 
@@ -532,96 +540,54 @@ static HRESULT FindEncoderMFT(IMFTransform** ppEncoder) {
     IMFActivate** ppActivate = nullptr;
     UINT32 count = 0;
 
-    HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, &inputInfo, &outputInfo, &ppActivate, &count);
+    hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, &inputInfo, &outputInfo, &ppActivate, &count);
     if (SUCCEEDED(hr) && count > 0) {
         hr = ppActivate[0]->ActivateObject(IID_IMFTransform, (void**)ppEncoder);
         for (UINT32 i = 0; i < count; i++) {
             ppActivate[i]->Release();
         }
         CoTaskMemFree(ppActivate);
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr) && *ppEncoder != nullptr) {
             return S_OK;
         }
     }
 
-    return CoCreateInstance(CLSID_CMSH264EncoderMFT, NULL, CLSCTX_INPROC_SERVER, IID_IMFTransform, (void**)ppEncoder);
+    return hr;
 }
 
 static HRESULT ConfigureEncoder(IMFTransform* pEncoder, int width, int height, int fps) {
-    HRESULT hr = S_OK;
-
-    // 1. Configure Output Type
     IMFMediaType* pOutputType = nullptr;
-    DWORD index = 0;
-    while (true) {
-        IMFMediaType* pType = nullptr;
-        hr = pEncoder->GetOutputAvailableType(0, index++, &pType);
-        if (FAILED(hr)) break;
-        GUID subtype{};
-        if (SUCCEEDED(pType->GetGUID(MF_MT_SUBTYPE, &subtype)) && subtype == MFVideoFormat_H264) {
-            pOutputType = pType;
-            break;
-        }
-        pType->Release();
-    }
+    HRESULT hr = MFCreateMediaType(&pOutputType);
+    if (FAILED(hr)) return hr;
 
-    bool createdOutput = false;
-    if (!pOutputType) {
-        hr = MFCreateMediaType(&pOutputType);
-        if (FAILED(hr)) return hr;
-        pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        pOutputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-        createdOutput = true;
-    }
-
-    pOutputType->SetUINT32(MF_MT_AVG_BITRATE, width * height * 2);
+    pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    pOutputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    pOutputType->SetUINT32(MF_MT_AVG_BITRATE, width * height * 4); // Robust safe average bitrate
     MFSetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, width, height);
     MFSetAttributeRatio(pOutputType, MF_MT_FRAME_RATE, fps, 1);
-    if (createdOutput) {
-        pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        MFSetAttributeRatio(pOutputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    }
+    pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    MFSetAttributeRatio(pOutputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
     hr = pEncoder->SetOutputType(0, pOutputType, 0);
     pOutputType->Release();
     if (FAILED(hr)) return hr;
 
-    // 2. Configure Input Type
     IMFMediaType* pInputType = nullptr;
-    index = 0;
-    while (true) {
-        IMFMediaType* pType = nullptr;
-        hr = pEncoder->GetInputAvailableType(0, index++, &pType);
-        if (FAILED(hr)) break;
-        GUID subtype{};
-        if (SUCCEEDED(pType->GetGUID(MF_MT_SUBTYPE, &subtype)) && subtype == MFVideoFormat_NV12) {
-            pInputType = pType;
-            break;
-        }
-        pType->Release();
-    }
+    hr = MFCreateMediaType(&pInputType);
+    if (FAILED(hr)) return hr;
 
-    bool createdInput = false;
-    if (!pInputType) {
-        hr = MFCreateMediaType(&pInputType);
-        if (FAILED(hr)) return hr;
-        pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        pInputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-        createdInput = true;
-    }
-
+    pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    pInputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
     MFSetAttributeSize(pInputType, MF_MT_FRAME_SIZE, width, height);
     MFSetAttributeRatio(pInputType, MF_MT_FRAME_RATE, fps, 1);
-    if (createdInput) {
-        pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        MFSetAttributeRatio(pInputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    }
+    pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    MFSetAttributeRatio(pInputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
     hr = pEncoder->SetInputType(0, pInputType, 0);
     pInputType->Release();
     if (FAILED(hr)) return hr;
 
-    // 3. Set GOP size via ICodecAPI
+    // Set GOP size via ICodecAPI
     ICodecAPI* pCodec = nullptr;
     hr = pEncoder->QueryInterface(IID_ICodecAPI_Local, (void**)&pCodec);
     if (SUCCEEDED(hr)) {
