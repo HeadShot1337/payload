@@ -1,6 +1,11 @@
-#define WIN32_LEAN_AND_MEAN
+﻿#define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
+#include <setjmp.h>
+
+extern "C" int _setjmp(void* env, void* frame) {
+    return __builtin_setjmp(env);
+}
 #include <propidl.h>
 #include <gdiplus.h>
 #include <objidl.h>
@@ -23,6 +28,168 @@
 using json = nlohmann::json;
 using namespace Gdiplus;
 using namespace std;
+
+// libvpx structures and types
+typedef void vpx_codec_iface_t;
+typedef void vpx_codec_priv_t;
+
+typedef int vpx_codec_err_t;
+#define VPX_CODEC_OK 0
+
+typedef uint32_t vpx_codec_flags_t;
+typedef int64_t vpx_codec_pts_t;
+typedef uint32_t vpx_codec_frame_flags_t;
+
+typedef enum vpx_img_fmt {
+    VPX_IMG_FMT_NONE,
+    VPX_IMG_FMT_YV12 = 0x100 | 0x200 | 1,
+    VPX_IMG_FMT_I420 = 0x100 | 2,
+    VPX_IMG_FMT_NV12 = 0x100 | 9
+} vpx_img_fmt_t;
+
+struct vpx_rational {
+    int num;
+    int den;
+};
+
+typedef struct vpx_codec_enc_cfg {
+    unsigned int g_usage;
+    unsigned int g_threads;
+    unsigned int g_profile;
+    unsigned int g_w;
+    unsigned int g_h;
+    int g_bit_depth;
+    unsigned int g_input_bit_depth;
+    struct vpx_rational g_timebase;
+    uint32_t g_error_resilient;
+    int g_pass;
+    unsigned int g_lag_in_frames;
+    unsigned int rc_dropframe_thresh;
+    unsigned int rc_resize_allowed;
+    unsigned int rc_scaled_width;
+    unsigned int rc_scaled_height;
+    unsigned int rc_resize_up_thresh;
+    unsigned int rc_resize_down_thresh;
+    int rc_end_usage;
+    struct {
+        void* buf;
+        size_t sz;
+    } rc_twopass_stats_in;
+    struct {
+        void* buf;
+        size_t sz;
+    } rc_firstpass_mb_stats_in;
+    unsigned int rc_target_bitrate;
+    unsigned int rc_min_quantizer;
+    unsigned int rc_max_quantizer;
+    unsigned int rc_undershoot_pct;
+    unsigned int rc_overshoot_pct;
+    unsigned int rc_buf_sz;
+    unsigned int rc_buf_initial_sz;
+    unsigned int rc_buf_optimal_sz;
+    unsigned int rc_2pass_vbr_bias_pct;
+    unsigned int rc_2pass_vbr_minsection_pct;
+    unsigned int rc_2pass_vbr_maxsection_pct;
+    unsigned int rc_2pass_vbr_corpus_complexity;
+    int kf_mode;
+    unsigned int kf_min_dist;
+    unsigned int kf_max_dist;
+    unsigned int reserved[64];
+} vpx_codec_enc_cfg_t;
+
+typedef struct vpx_image {
+    vpx_img_fmt_t fmt;
+    int cs;
+    int range;
+    unsigned int w;
+    unsigned int h;
+    unsigned int bit_depth;
+    unsigned int d_w;
+    unsigned int d_h;
+    unsigned int r_w;
+    unsigned int r_h;
+    unsigned int x_chroma_shift;
+    unsigned int y_chroma_shift;
+    unsigned char *planes[4];
+    int stride[4];
+    int bps;
+    void *user_priv;
+    unsigned char *img_data;
+    int img_data_owner;
+    int self_allocd;
+    void *fb_priv;
+} vpx_image_t;
+
+enum vpx_codec_cx_pkt_kind {
+    VPX_CODEC_CX_FRAME_PKT,
+    VPX_CODEC_STATS_PKT,
+    VPX_CODEC_FPMB_STATS_PKT,
+    VPX_CODEC_PSNR_PKT,
+    VPX_CODEC_CUSTOM_PKT = 256
+};
+
+typedef struct vpx_codec_cx_pkt {
+    enum vpx_codec_cx_pkt_kind kind;
+    union {
+        struct {
+            void *buf;
+            size_t sz;
+            vpx_codec_pts_t pts;
+            unsigned long duration;
+            vpx_codec_frame_flags_t flags;
+            int partition_id;
+            unsigned int width[12];
+            unsigned int height[12];
+            uint8_t spatial_layer_encoded[12];
+        } frame;
+        struct {
+            void* buf;
+            size_t sz;
+        } twopass_stats;
+        struct {
+            void* buf;
+            size_t sz;
+        } firstpass_mb_stats;
+        struct {
+            unsigned int samples[4];
+            uint64_t sse[4];
+            double psnr[4];
+            int spatial_layer_id;
+        } psnr;
+        struct {
+            void* buf;
+            size_t sz;
+        } raw;
+        char pad[128 - sizeof(enum vpx_codec_cx_pkt_kind)];
+    } data;
+} vpx_codec_cx_pkt_t;
+
+typedef struct vpx_codec_ctx {
+    const char *name;
+    vpx_codec_iface_t *iface;
+    vpx_codec_err_t err;
+    const char *err_detail;
+    vpx_codec_flags_t init_flags;
+    union {
+        void *dec;
+        vpx_codec_enc_cfg_t *enc;
+        void *raw;
+    } config;
+    vpx_codec_priv_t *priv;
+} vpx_codec_ctx_t;
+
+typedef const void *vpx_codec_iter_t;
+
+extern "C" {
+    vpx_codec_iface_t* vpx_codec_vp9_cx(void);
+    vpx_codec_err_t vpx_codec_enc_config_default(vpx_codec_iface_t *iface, vpx_codec_enc_cfg_t *cfg, unsigned int usage);
+    vpx_codec_err_t vpx_codec_enc_init_ver(vpx_codec_ctx_t *ctx, vpx_codec_iface_t *iface, const vpx_codec_enc_cfg_t *cfg, vpx_codec_flags_t flags, int ver);
+    vpx_codec_err_t vpx_codec_encode(vpx_codec_ctx_t *ctx, const vpx_image_t *img, vpx_codec_pts_t pts, unsigned long duration, vpx_codec_frame_flags_t flags, unsigned long deadline);
+    const vpx_codec_cx_pkt_t* vpx_codec_get_cx_data(vpx_codec_ctx_t *ctx, vpx_codec_iter_t *iter);
+    vpx_codec_err_t vpx_codec_destroy(vpx_codec_ctx_t *ctx);
+    vpx_image_t* vpx_img_alloc(vpx_image_t *img, vpx_img_fmt_t fmt, unsigned int d_w, unsigned int d_h, unsigned int align);
+    void vpx_img_free(vpx_image_t *img);
+}
 
 struct MonitorData {
     RECT rect{};
@@ -51,7 +218,6 @@ struct MonitorFrameHeader {
 
 static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_MONITOR_FRAME = 0x03;
-static const uint32_t MONITOR_FRAME_FORMAT_JPEG = 1;
 
 static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
@@ -61,8 +227,17 @@ static SOCKET g_captureSocket = INVALID_SOCKET;
 static int g_monitorIndex = 0;
 static int g_scalePercent = 50;
 static int g_targetFps = 20;
+static int g_format = 1; // 1 = JPEG, 4 = VP9
 static RECT g_captureRect{};
 static bool g_hasCaptureRect = false;
+
+static mutex g_encoderMutex;
+static vpx_codec_ctx_t g_vpxEncoder{};
+static bool g_vpxEncoderInitialized = false;
+static int g_lastWidth = 0;
+static int g_lastHeight = 0;
+static int g_lastFormat = 1;
+static int64_t g_vpxPts = 0;
 
 static mutex g_gdiplusMutex;
 static ULONG_PTR g_gdiplusToken = 0;
@@ -94,8 +269,9 @@ static bool safe_send_monitor_frame(SOCKET sock,
                                     int fps,
                                     int width,
                                     int height,
-                                    const vector<unsigned char>& jpegBytes) {
-    if (jpegBytes.empty())
+                                    int format,
+                                    const vector<unsigned char>& frameBytes) {
+    if (frameBytes.empty())
         return false;
 
     MonitorFrameHeader frameHeader{};
@@ -104,19 +280,19 @@ static bool safe_send_monitor_frame(SOCKET sock,
     frameHeader.fps = (uint32_t)max(0, fps);
     frameHeader.width = (uint32_t)max(0, width);
     frameHeader.height = (uint32_t)max(0, height);
-    frameHeader.format = MONITOR_FRAME_FORMAT_JPEG;
-    frameHeader.dataSize = (uint32_t)jpegBytes.size();
+    frameHeader.format = (uint32_t)format;
+    frameHeader.dataSize = (uint32_t)frameBytes.size();
 
     PacketHeader packetHeader{};
     packetHeader.signature = PACKET_SIGNATURE;
     packetHeader.type = PACKET_TYPE_MONITOR_FRAME;
-    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + jpegBytes.size());
+    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + frameBytes.size());
 
     string packet;
     packet.resize(sizeof(PacketHeader) + packetHeader.size);
     memcpy(&packet[0], &packetHeader, sizeof(PacketHeader));
     memcpy(&packet[sizeof(PacketHeader)], &frameHeader, sizeof(MonitorFrameHeader));
-    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], jpegBytes.data(), jpegBytes.size());
+    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], frameBytes.data(), frameBytes.size());
 
     lock_guard<mutex> lock(g_sendMutex);
     return safe_send_raw(sock, packet);
@@ -357,9 +533,33 @@ static bool bitmap_to_jpeg(HBITMAP bitmapHandle, ULONG quality, vector<unsigned 
     return true;
 }
 
+static void BGRX_to_I420(const uint32_t* bgrx, int width, int height,
+                         uint8_t* dst_y, uint8_t* dst_u, uint8_t* dst_v,
+                         int stride_y, int stride_u, int stride_v) {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            uint32_t pixel = bgrx[y * width + x];
+            uint8_t b = pixel & 0xFF;
+            uint8_t g = (pixel >> 8) & 0xFF;
+            uint8_t r = (pixel >> 16) & 0xFF;
+
+            int Y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+            dst_y[y * stride_y + x] = static_cast<uint8_t>(clamp_int(Y, 0, 255));
+
+            if ((y % 2 == 0) && (x % 2 == 0)) {
+                int U = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                int V = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+                dst_u[(y / 2) * stride_u + (x / 2)] = static_cast<uint8_t>(clamp_int(U, 0, 255));
+                dst_v[(y / 2) * stride_v + (x / 2)] = static_cast<uint8_t>(clamp_int(V, 0, 255));
+            }
+        }
+    }
+}
+
 static bool capture_monitor_frame(const RECT& rect,
                                   int scalePercent,
-                                  vector<unsigned char>& jpegBytes,
+                                  int format,
+                                  vector<unsigned char>& frameBytes,
                                   int& outputWidth,
                                   int& outputHeight,
                                   string& error) {
@@ -374,59 +574,195 @@ static bool capture_monitor_frame(const RECT& rect,
 
     outputWidth = max(1, (sourceWidth * scalePercent) / 100);
     outputHeight = max(1, (sourceHeight * scalePercent) / 100);
-    ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
 
-    HDC screenDC = GetDC(NULL);
-    if (!screenDC) {
-        error = "Screen device context could not be opened";
-        return false;
-    }
+    if (outputWidth % 2 != 0) outputWidth++;
+    if (outputHeight % 2 != 0) outputHeight++;
 
-    HDC memoryDC = CreateCompatibleDC(screenDC);
-    if (!memoryDC) {
-        ReleaseDC(NULL, screenDC);
-        error = "Memory device context could not be created";
-        return false;
-    }
+    if (format == 4) {
+        lock_guard<mutex> enc_lock(g_encoderMutex);
 
-    HBITMAP bitmap = CreateCompatibleBitmap(screenDC, outputWidth, outputHeight);
-    if (!bitmap) {
+        if (!g_vpxEncoderInitialized || g_lastWidth != outputWidth || g_lastHeight != outputHeight || g_lastFormat != 4) {
+            if (g_vpxEncoderInitialized) {
+                vpx_codec_destroy(&g_vpxEncoder);
+                g_vpxEncoderInitialized = false;
+            }
+
+            vpx_codec_enc_cfg_t cfg{};
+            if (vpx_codec_enc_config_default(vpx_codec_vp9_cx(), &cfg, 0) != VPX_CODEC_OK) {
+                error = "Failed to get default vpx config";
+                return false;
+            }
+
+            cfg.g_w = outputWidth;
+            cfg.g_h = outputHeight;
+            cfg.g_timebase.num = 1;
+            cfg.g_timebase.den = 1000;
+            cfg.g_threads = 4;
+            cfg.g_lag_in_frames = 0;
+            cfg.rc_end_usage = 1; // VPX_CBR
+            cfg.rc_target_bitrate = 1500;
+            cfg.kf_mode = 1; // VPX_KF_AUTO
+            cfg.kf_max_dist = 60;
+
+            bool init_ok = false;
+            for (int abi = 1; abi <= 20; ++abi) {
+                if (vpx_codec_enc_init_ver(&g_vpxEncoder, vpx_codec_vp9_cx(), &cfg, 0, abi) == VPX_CODEC_OK) {
+                    init_ok = true;
+                    break;
+                }
+            }
+
+            if (!init_ok) {
+                error = "Failed to initialize VP9 encoder context";
+                return false;
+            }
+
+            g_vpxEncoderInitialized = true;
+            g_lastWidth = outputWidth;
+            g_lastHeight = outputHeight;
+            g_lastFormat = 4;
+            g_vpxPts = 0;
+        }
+
+        HDC screenDC = GetDC(NULL);
+        if (!screenDC) {
+            error = "Failed to get screen DC";
+            return false;
+        }
+
+        HDC memoryDC = CreateCompatibleDC(screenDC);
+        if (!memoryDC) {
+            ReleaseDC(NULL, screenDC);
+            error = "Failed to create memory DC";
+            return false;
+        }
+
+        HBITMAP bitmap = CreateCompatibleBitmap(screenDC, outputWidth, outputHeight);
+        if (!bitmap) {
+            DeleteDC(memoryDC);
+            ReleaseDC(NULL, screenDC);
+            error = "Failed to create bitmap";
+            return false;
+        }
+
+        HGDIOBJ oldObject = SelectObject(memoryDC, bitmap);
+        SetStretchBltMode(memoryDC, COLORONCOLOR);
+
+        BOOL copied = StretchBlt(
+            memoryDC, 0, 0, outputWidth, outputHeight,
+            screenDC, rect.left, rect.top, sourceWidth, sourceHeight,
+            SRCCOPY | CAPTUREBLT
+        );
+
+        SelectObject(memoryDC, oldObject);
+
+        if (!copied) {
+            DeleteObject(bitmap);
+            DeleteDC(memoryDC);
+            ReleaseDC(NULL, screenDC);
+            error = "StretchBlt failed";
+            return false;
+        }
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = outputWidth;
+        bmi.bmiHeader.biHeight = -outputHeight; // Top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        vector<uint32_t> bgrxPixels(outputWidth * outputHeight);
+        GetDIBits(memoryDC, bitmap, 0, outputHeight, bgrxPixels.data(), &bmi, DIB_RGB_COLORS);
+
+        DeleteObject(bitmap);
         DeleteDC(memoryDC);
         ReleaseDC(NULL, screenDC);
-        error = "Capture bitmap could not be created";
-        return false;
-    }
 
-    HGDIOBJ oldObject = SelectObject(memoryDC, bitmap);
-    SetStretchBltMode(memoryDC, COLORONCOLOR);
+        vpx_image_t img{};
+        if (!vpx_img_alloc(&img, VPX_IMG_FMT_I420, outputWidth, outputHeight, 32)) {
+            error = "vpx image allocation failed";
+            return false;
+        }
 
-    BOOL copied = StretchBlt(
-        memoryDC,
-        0,
-        0,
-        outputWidth,
-        outputHeight,
-        screenDC,
-        rect.left,
-        rect.top,
-        sourceWidth,
-        sourceHeight,
-        SRCCOPY | CAPTUREBLT
-    );
+        BGRX_to_I420(bgrxPixels.data(), outputWidth, outputHeight,
+                     img.planes[0], img.planes[1], img.planes[2],
+                     img.stride[0], img.stride[1], img.stride[2]);
 
-    SelectObject(memoryDC, oldObject);
-    DeleteDC(memoryDC);
-    ReleaseDC(NULL, screenDC);
+        vpx_codec_err_t enc_res = vpx_codec_encode(&g_vpxEncoder, &img, g_vpxPts++, 33, 0, 1); // VPX_DL_REALTIME = 1
+        vpx_img_free(&img);
 
-    if (!copied) {
+        if (enc_res != VPX_CODEC_OK) {
+            error = "vpx encode failed";
+            return false;
+        }
+
+        vpx_codec_iter_t iter = nullptr;
+        const vpx_codec_cx_pkt_t* pkt = nullptr;
+        while ((pkt = vpx_codec_get_cx_data(&g_vpxEncoder, &iter)) != nullptr) {
+            if (pkt->kind == VPX_CODEC_CX_FRAME_PKT) {
+                size_t old_size = frameBytes.size();
+                frameBytes.resize(old_size + pkt->data.frame.sz);
+                memcpy(&frameBytes[old_size], pkt->data.frame.buf, pkt->data.frame.sz);
+            }
+        }
+
+        return !frameBytes.empty();
+    } else {
+        ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
+
+        HDC screenDC = GetDC(NULL);
+        if (!screenDC) {
+            error = "Screen device context could not be opened";
+            return false;
+        }
+
+        HDC memoryDC = CreateCompatibleDC(screenDC);
+        if (!memoryDC) {
+            ReleaseDC(NULL, screenDC);
+            error = "Memory device context could not be created";
+            return false;
+        }
+
+        HBITMAP bitmap = CreateCompatibleBitmap(screenDC, outputWidth, outputHeight);
+        if (!bitmap) {
+            DeleteDC(memoryDC);
+            ReleaseDC(NULL, screenDC);
+            error = "Capture bitmap could not be created";
+            return false;
+        }
+
+        HGDIOBJ oldObject = SelectObject(memoryDC, bitmap);
+        SetStretchBltMode(memoryDC, COLORONCOLOR);
+
+        BOOL copied = StretchBlt(
+            memoryDC,
+            0,
+            0,
+            outputWidth,
+            outputHeight,
+            screenDC,
+            rect.left,
+            rect.top,
+            sourceWidth,
+            sourceHeight,
+            SRCCOPY | CAPTUREBLT
+        );
+
+        SelectObject(memoryDC, oldObject);
+        DeleteDC(memoryDC);
+        ReleaseDC(NULL, screenDC);
+
+        if (!copied) {
+            DeleteObject(bitmap);
+            error = "Screen capture failed";
+            return false;
+        }
+
+        bool encoded = bitmap_to_jpeg(bitmap, jpegQuality, frameBytes, error);
         DeleteObject(bitmap);
-        error = "Screen capture failed";
-        return false;
+        return encoded;
     }
-
-    bool encoded = bitmap_to_jpeg(bitmap, jpegQuality, jpegBytes, error);
-    DeleteObject(bitmap);
-    return encoded;
 }
 
 static void capture_loop() {
@@ -438,6 +774,7 @@ static void capture_loop() {
         int monitor = 0;
         int scale = 50;
         int targetFps = 20;
+        int format = 1;
         RECT captureRect{};
         bool hasCaptureRect = false;
 
@@ -447,6 +784,7 @@ static void capture_loop() {
             monitor = g_monitorIndex;
             scale = g_scalePercent;
             targetFps = g_targetFps;
+            format = g_format;
             captureRect = g_captureRect;
             hasCaptureRect = g_hasCaptureRect;
         }
@@ -457,13 +795,13 @@ static void capture_loop() {
             break;
         }
 
-        vector<unsigned char> jpegBytes;
+        vector<unsigned char> frameBytes;
         int width = 0;
         int height = 0;
         string error;
 
-        if (capture_monitor_frame(captureRect, scale, jpegBytes, width, height, error)) {
-            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, jpegBytes)) {
+        if (capture_monitor_frame(captureRect, scale, format, frameBytes, width, height, error)) {
+            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, format, frameBytes)) {
                 g_captureRunning.store(false);
                 break;
             }
@@ -497,9 +835,17 @@ static void stop_capture_thread() {
 
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
+
+    {
+        lock_guard<mutex> enc_lock(g_encoderMutex);
+        if (g_vpxEncoderInitialized) {
+            vpx_codec_destroy(&g_vpxEncoder);
+            g_vpxEncoderInitialized = false;
+        }
+    }
 }
 
-static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
+static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps, int format) {
     scalePercent = clamp_int(scalePercent, 10, 100);
     int targetFps = requestedFps > 0
         ? clamp_int(requestedFps, 20, 30)
@@ -519,6 +865,7 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
         g_monitorIndex = safeMonitorIndex;
         g_scalePercent = scalePercent;
         g_targetFps = targetFps;
+        g_format = format;
         g_captureRect = monitors[(size_t)safeMonitorIndex].rect;
         g_hasCaptureRect = true;
     }
@@ -535,6 +882,7 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
     response["monitor"] = safeMonitorIndex;
     response["scale"] = scalePercent;
     response["fps"] = targetFps;
+    response["format"] = format;
     safe_send_json(sock, response);
 }
 
@@ -546,14 +894,9 @@ static void simulate_mouse(const string& event, int button, int x, int y) {
         rect = g_captureRect;
     }
 
-    // Normalized (0-65535) to Screen Absolute
-    // x_abs = rect.left + (x * (rect.right - rect.left) / 65535)
-    // SendInput uses MOUSEEVENTF_ABSOLUTE which maps 0-65535 to the virtual screen.
-
     int screen_x = rect.left + MulDiv(x, rect.right - rect.left, 65535);
     int screen_y = rect.top + MulDiv(y, rect.bottom - rect.top, 65535);
 
-    // Map screen coordinate to MOUSEEVENTF_ABSOLUTE (0-65535 of virtual screen)
     int v_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int v_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int v_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -613,7 +956,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             int monitor = command.value("monitor", 0);
             int scale = command.value("scale", 50);
             int fps = command.value("fps", 0);
-            start_capture(sock, monitor, scale, fps);
+            int format = command.value("format", 1);
+            start_capture(sock, monitor, scale, fps, format);
             return;
         }
 
@@ -654,6 +998,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_DETACH) {
         g_captureRunning.store(false);
+        {
+            lock_guard<mutex> enc_lock(g_encoderMutex);
+            if (g_vpxEncoderInitialized) {
+                vpx_codec_destroy(&g_vpxEncoder);
+                g_vpxEncoderInitialized = false;
+            }
+        }
         shutdown_gdiplus();
     }
     return TRUE;
