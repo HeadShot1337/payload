@@ -1265,7 +1265,7 @@ begin
 
   MonitoringForm := GetMonitoringForm(aLine);
   if Assigned(MonitoringForm) then
-    MonitoringForm.QueueFrameBytes(FrameBytes, FrameHeader.Format);
+    MonitoringForm.QueueFrameBytes(FrameBytes, FrameHeader.Format, FrameHeader.Width, FrameHeader.Height);
 end;
 
 procedure TServerManager.ProcessHVNCBinaryFrame(aLine: TncLine;

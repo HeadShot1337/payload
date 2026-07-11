@@ -23,44 +23,158 @@ type
   end;
 
 type
-  vpx_codec_iface_t = Pointer;
-  vpx_codec_iter_t = Pointer;
+  // Standard Media Foundation interface declarations
+  IMFCollection = interface;
+  IMFMediaBuffer = interface;
+  IMFSample = interface;
+  IMFMediaType = interface;
+  IMFTransform = interface;
 
-  vpx_codec_ctx_t = record
-    name: PAnsiChar;
-    iface: Pointer;
-    err: Cardinal;
-    err_detail: PAnsiChar;
-    init_flags: Cardinal;
-    priv_dec: Pointer;
+  IMFMediaBuffer = interface(IUnknown)
+    ['{c40a00f2-b93a-4d80-ae90-aa3c10a48472}']
+    function Lock(out ppbBuffer: PByte; out pcbMaxLength: Cardinal; out pcbCurrentLength: Cardinal): HRESULT; stdcall;
+    function Unlock: HRESULT; stdcall;
+    function GetCurrentLength(out pcbCurrentLength: Cardinal): HRESULT; stdcall;
+    function SetCurrentLength(cbCurrentLength: Cardinal): HRESULT; stdcall;
+    function GetMaxLength(out pcbMaxLength: Cardinal): HRESULT; stdcall;
   end;
 
-  pvpx_image_t = ^vpx_image_t;
-  vpx_image_t = record
-    fmt: Integer;
-    cs: Integer;
-    range: Integer;
-    w: Integer;
-    h: Integer;
-    d_w: Integer;
-    d_h: Integer;
-    x_chroma_shift: Integer;
-    y_chroma_shift: Integer;
-    planes: array[0..3] of PByte;
-    stride: array[0..3] of Integer;
-    bps: Integer;
-    user_priv: Pointer;
-    img_data: PByte;
-    img_data_owner: Integer;
-    self_allocd: Integer;
-    fb_priv: Pointer;
+  IMFCollection = interface(IUnknown)
+    ['{5bc8a76b-869a-46a3-9b03-fa218a66aebe}']
+    function GetElementCount(out pcElements: Cardinal): HRESULT; stdcall;
+    function GetElement(dwElementIndex: Cardinal; out ppUnkElement: IUnknown): HRESULT; stdcall;
+    function AddElement(const pUnkElement: IUnknown): HRESULT; stdcall;
+    function RemoveElement(dwElementIndex: Cardinal; out ppUnkElement: IUnknown): HRESULT; stdcall;
+    function InsertElementAt(dwIndex: Cardinal; const pUnkElement: IUnknown): HRESULT; stdcall;
+    function RemoveAllElements: HRESULT; stdcall;
   end;
 
-  TFn_vpx_codec_vp9_dx = function: vpx_codec_iface_t; cdecl;
-  TFn_vpx_codec_dec_init_ver = function(ctx: Pointer; iface: vpx_codec_iface_t; cfg: Pointer; flags: LongInt; ver: Integer): Integer; cdecl;
-  TFn_vpx_codec_decode = function(ctx: Pointer; const data: PByte; data_sz: Cardinal; user_priv: Pointer; deadline: LongInt): Integer; cdecl;
-  TFn_vpx_codec_get_frame = function(ctx: Pointer; iter: Pointer): pvpx_image_t; cdecl;
-  TFn_vpx_codec_destroy = function(ctx: Pointer): Integer; cdecl;
+  IMFSample = interface(IUnknown)
+    ['{c40a00f1-b93a-4d80-ae90-aa3c10a48472}']
+    // IMFAttributes (Parent methods inside IMFSample vtable)
+    function GetItem(const guidKey: TGUID; pValue: Pointer): HRESULT; stdcall;
+    function GetItemType(const guidKey: TGUID; out pType: Integer): HRESULT; stdcall;
+    function CompareItem(const guidKey: TGUID; const Value: Pointer; out pbResult: Boolean): HRESULT; stdcall;
+    function Compare(const pTheirs: Pointer; out pbResult: Boolean): HRESULT; stdcall;
+    function GetUINT32(const guidKey: TGUID; out punValue: Cardinal): HRESULT; stdcall;
+    function GetUINT64(const guidKey: TGUID; out punValue: UInt64): HRESULT; stdcall;
+    function GetDouble(const guidKey: TGUID; out pdblValue: Double): HRESULT; stdcall;
+    function GetGUID(const guidKey: TGUID; out pguidValue: TGUID): HRESULT; stdcall;
+    function GetStringLength(const guidKey: TGUID; out pcchLength: Cardinal): HRESULT; stdcall;
+    function GetString(const guidKey: TGUID; pwszValue: PWideChar; cchBufSize: Cardinal; out pcchLength: Cardinal): HRESULT; stdcall;
+    function GetAllocatedString(const guidKey: TGUID; out ppwszValue: PWideChar; out pcchLength: Cardinal): HRESULT; stdcall;
+    function GetBlobSize(const guidKey: TGUID; out pcbBlobSize: Cardinal): HRESULT; stdcall;
+    function GetBlob(const guidKey: TGUID; pBuf: PByte; cbBufSize: Cardinal; out pcbBlobSize: Cardinal): HRESULT; stdcall;
+    function GetAllocatedBlob(const guidKey: TGUID; out ppBuf: PByte; out pcbSize: Cardinal): HRESULT; stdcall;
+    function GetUnknown(const guidKey: TGUID; const riid: TGUID; out ppvObject): HRESULT; stdcall;
+    function SetItem(const guidKey: TGUID; const Value: Pointer): HRESULT; stdcall;
+    function DeleteItem(const guidKey: TGUID): HRESULT; stdcall;
+    function DeleteAllItems: HRESULT; stdcall;
+    function SetUINT32(const guidKey: TGUID; unValue: Cardinal): HRESULT; stdcall;
+    function SetUINT64(const guidKey: TGUID; unValue: UInt64): HRESULT; stdcall;
+    function SetDouble(const guidKey: TGUID; dblValue: Double): HRESULT; stdcall;
+    function SetGUID(const guidKey: TGUID; const guidValue: TGUID): HRESULT; stdcall;
+    function SetString(const guidKey: TGUID; pwszValue: PWideChar): HRESULT; stdcall;
+    function SetBlob(const guidKey: TGUID; const pBuf: PByte; cbBufSize: Cardinal): HRESULT; stdcall;
+    function SetUnknown(const guidKey: TGUID; const pUnknown: IUnknown): HRESULT; stdcall;
+    function LockStore: HRESULT; stdcall;
+    function UnlockStore: HRESULT; stdcall;
+    function GetCount(out pcItems: Cardinal): HRESULT; stdcall;
+    function GetItemByIndex(unIndex: Cardinal; out pguidKey: TGUID; pValue: Pointer): HRESULT; stdcall;
+    function CopyAllItems(const pDest: Pointer): HRESULT; stdcall;
+
+    // IMFSample methods
+    function GetSampleFlags(out pdwFlags: Cardinal): HRESULT; stdcall;
+    function SetSampleFlags(dwFlags: Cardinal): HRESULT; stdcall;
+    function GetSampleTime(out phnsSampleTime: Int64): HRESULT; stdcall;
+    function SetSampleTime(hnsSampleTime: Int64): HRESULT; stdcall;
+    function GetSampleDuration(out phnsSampleDuration: Int64): HRESULT; stdcall;
+    function SetSampleDuration(hnsSampleDuration: Int64): HRESULT; stdcall;
+    function GetBufferCount(out pdwBufferCount: Cardinal): HRESULT; stdcall;
+    function GetBufferByIndex(dwIndex: Cardinal; out ppBuffer: IMFMediaBuffer): HRESULT; stdcall;
+    function ConvertToContiguousBuffer(out ppBuffer: IMFMediaBuffer): HRESULT; stdcall;
+    function AddBuffer(const pBuffer: IMFMediaBuffer): HRESULT; stdcall;
+    function RemoveBufferByIndex(dwIndex: Cardinal): HRESULT; stdcall;
+    function RemoveAllBuffers: HRESULT; stdcall;
+    function GetTotalLength(out pcbTotalLength: Cardinal): HRESULT; stdcall;
+    function CopyAllSamples(const pDestSample: IMFSample): HRESULT; stdcall;
+  end;
+
+  IMFMediaType = interface(IUnknown)
+    ['{04ea0fa8-ea31-4109-8d24-674f9e3efb76}']
+    // IMFAttributes (Parent methods inside IMFMediaType vtable)
+    function GetItem(const guidKey: TGUID; pValue: Pointer): HRESULT; stdcall;
+    function GetItemType(const guidKey: TGUID; out pType: Integer): HRESULT; stdcall;
+    function CompareItem(const guidKey: TGUID; const Value: Pointer; out pbResult: Boolean): HRESULT; stdcall;
+    function Compare(const pTheirs: Pointer; out pbResult: Boolean): HRESULT; stdcall;
+    function GetUINT32(const guidKey: TGUID; out punValue: Cardinal): HRESULT; stdcall;
+    function GetUINT64(const guidKey: TGUID; out punValue: UInt64): HRESULT; stdcall;
+    function GetDouble(const guidKey: TGUID; out pdblValue: Double): HRESULT; stdcall;
+    function GetGUID(const guidKey: TGUID; out pguidValue: TGUID): HRESULT; stdcall;
+    function GetStringLength(const guidKey: TGUID; out pcchLength: Cardinal): HRESULT; stdcall;
+    function GetString(const guidKey: TGUID; pwszValue: PWideChar; cchBufSize: Cardinal; out pcchLength: Cardinal): HRESULT; stdcall;
+    function GetAllocatedString(const guidKey: TGUID; out ppwszValue: PWideChar; out pcchLength: Cardinal): HRESULT; stdcall;
+    function GetBlobSize(const guidKey: TGUID; out pcbBlobSize: Cardinal): HRESULT; stdcall;
+    function GetBlob(const guidKey: TGUID; pBuf: PByte; cbBufSize: Cardinal; out pcbBlobSize: Cardinal): HRESULT; stdcall;
+    function GetAllocatedBlob(const guidKey: TGUID; out ppBuf: PByte; out pcbSize: Cardinal): HRESULT; stdcall;
+    function GetUnknown(const guidKey: TGUID; const riid: TGUID; out ppvObject): HRESULT; stdcall;
+    function SetItem(const guidKey: TGUID; const Value: Pointer): HRESULT; stdcall;
+    function DeleteItem(const guidKey: TGUID): HRESULT; stdcall;
+    function DeleteAllItems: HRESULT; stdcall;
+    function SetUINT32(const guidKey: TGUID; unValue: Cardinal): HRESULT; stdcall;
+    function SetUINT64(const guidKey: TGUID; unValue: UInt64): HRESULT; stdcall;
+    function SetDouble(const guidKey: TGUID; dblValue: Double): HRESULT; stdcall;
+    function SetGUID(const guidKey: TGUID; const guidValue: TGUID): HRESULT; stdcall;
+    function SetString(const guidKey: TGUID; pwszValue: PWideChar): HRESULT; stdcall;
+    function SetBlob(const guidKey: TGUID; const pBuf: PByte; cbBufSize: Cardinal): HRESULT; stdcall;
+    function SetUnknown(const guidKey: TGUID; const pUnknown: IUnknown): HRESULT; stdcall;
+    function LockStore: HRESULT; stdcall;
+    function UnlockStore: HRESULT; stdcall;
+    function GetCount(out pcItems: Cardinal): HRESULT; stdcall;
+    function GetItemByIndex(unIndex: Cardinal; out pguidKey: TGUID; pValue: Pointer): HRESULT; stdcall;
+    function CopyAllItems(const pDest: Pointer): HRESULT; stdcall;
+
+    // IMFMediaType methods
+    function GetMajorType(out pguidMajorType: TGUID): HRESULT; stdcall;
+    function IsCompressedFormat(out pfCompressed: Boolean): HRESULT; stdcall;
+    function IsEqual(const pIMediaType: IMFMediaType; out pdwFlags: Cardinal): HRESULT; stdcall;
+    function GetRepresentation(guidRepresentation: TGUID; out ppvRepresentation: Pointer): HRESULT; stdcall;
+    function FreeRepresentation(guidRepresentation: TGUID; pvRepresentation: Pointer): HRESULT; stdcall;
+  end;
+
+  IMFTransform = interface(IUnknown)
+    ['{bf94c121-5b05-4e6f-8000-ba598961414d}']
+    function GetStreamLimits(out pdwInputMinimum: Cardinal; out pdwInputMaximum: Cardinal; out pdwOutputMinimum: Cardinal; out pdwOutputMaximum: Cardinal): HRESULT; stdcall;
+    function GetStreamCount(out pdwInputStreams: Cardinal; out pdwOutputStreams: Cardinal): HRESULT; stdcall;
+    function GetStreamIDs(dwInputIDArraySize: Cardinal; out pdwInputIDs: Cardinal; dwOutputIDArraySize: Cardinal; out pdwOutputIDs: Cardinal): HRESULT; stdcall;
+    function GetInputStreamInfo(dwInputStreamID: Cardinal; out pStreamInfo: Pointer): HRESULT; stdcall;
+    function GetOutputStreamInfo(dwOutputStreamID: Cardinal; out pStreamInfo: Pointer): HRESULT; stdcall;
+    function GetAttributes(out ppAttributes: Pointer): HRESULT; stdcall;
+    function GetInputStreamAttributes(dwInputStreamID: Cardinal; out ppAttributes: Pointer): HRESULT; stdcall;
+    function GetOutputStreamAttributes(dwOutputStreamID: Cardinal; out ppAttributes: Pointer): HRESULT; stdcall;
+    function DeleteInputStream(dwStreamID: Cardinal): HRESULT; stdcall;
+    function AddInputStreams(cStreams: Cardinal; out pdwStreamIDs: Cardinal): HRESULT; stdcall;
+    function GetInputAvailableType(dwInputStreamID: Cardinal; dwTypeIndex: Cardinal; out ppType: IMFMediaType): HRESULT; stdcall;
+    function GetOutputAvailableType(dwOutputStreamID: Cardinal; dwTypeIndex: Cardinal; out ppType: IMFMediaType): HRESULT; stdcall;
+    function SetInputType(dwInputStreamID: Cardinal; const pType: IMFMediaType; dwFlags: Cardinal): HRESULT; stdcall;
+    function SetOutputType(dwOutputStreamID: Cardinal; const pType: IMFMediaType; dwFlags: Cardinal): HRESULT; stdcall;
+    function GetInputCurrentType(dwInputStreamID: Cardinal; out ppType: IMFMediaType): HRESULT; stdcall;
+    function GetOutputCurrentType(dwOutputStreamID: Cardinal; out ppType: IMFMediaType): HRESULT; stdcall;
+    function GetInputStatus(dwInputStreamID: Cardinal; out pdwFlags: Cardinal): HRESULT; stdcall;
+    function GetOutputStatus(out pdwFlags: Cardinal): HRESULT; stdcall;
+    function SetOutputBounds(hnsLowerBound: Int64; hnsUpperBound: Int64): HRESULT; stdcall;
+    function ProcessMessage(eMessage: Cardinal; ulParam: NativeUInt): HRESULT; stdcall;
+    function ProcessInput(dwInputStreamID: Cardinal; const pSample: IMFSample; dwFlags: Cardinal): HRESULT; stdcall;
+    function ProcessOutput(dwFlags: Cardinal; cOutputBufferCount: Cardinal; pOutputSamples: Pointer; out pdwStatus: Cardinal): HRESULT; stdcall;
+  end;
+
+  _MFT_OUTPUT_DATA_BUFFER = record
+    dwStreamID: Cardinal;
+    pSample: IMFSample;
+    dwStatus: Cardinal;
+    pEvents: IMFCollection;
+  end;
+  MFT_OUTPUT_DATA_BUFFER = _MFT_OUTPUT_DATA_BUFFER;
 
 type
   TForm6 = class(TForm)
@@ -89,6 +203,10 @@ type
     FPendingFrame     : string;
     FPendingFrameBytes: TBytes;
     FPendingFrameFormat: Integer;
+    FPendingWidth      : Integer;
+    FPendingHeight     : Integer;
+    FCurrentWidth      : Integer;
+    FCurrentHeight     : Integer;
     FFrameLock        : TCriticalSection;
     FDecodeEvent      : TEvent;
     FDecodeThread     : TThread;
@@ -99,10 +217,11 @@ type
     FPaintBox         : TNoFlickerPaintBox; // Gerçek görüntü alanı
     FLastMouseMoveTick: UInt64;
 
-    FVpxDecInitialized: Boolean;
-    FVpxDecCtx         : vpx_codec_ctx_t;
+    FWmfDecInitialized: Boolean;
+    FWmfDecoder        : IMFTransform;
 
     function  SelectedFormat: string;
+    function  InitWmfDecoder(AWidth, AHeight: Integer): Boolean;
     procedure FillDefaultOptions;
     procedure SendMonitoringCommand(const AAction: string);
     function  SelectedMonitorIndex: Integer;
@@ -117,7 +236,7 @@ type
     procedure StartFrameWorker;
     procedure StopFrameWorker;
     procedure DecodeFrameWorker;
-    function  TakePendingFrame(out AText: string; out ABytes: TBytes; out AFormat: Integer): Boolean;
+    function  TakePendingFrame(out AText: string; out ABytes: TBytes; out AFormat: Integer; out AWidth, AHeight: Integer): Boolean;
     function  TakeDecodedFrame(out ABitmap: TBitmap; out AFrameSize: Integer): Boolean;
     procedure UpdateStatusBar;
     procedure UpdateButtonCaption;
@@ -139,7 +258,7 @@ type
     procedure RequestMonitorList;
     procedure RequestCaptureStart;
     procedure RequestCaptureStop;
-    procedure QueueFrameBytes(const ABytes: TBytes; AFormat: Integer = 1);
+    procedure QueueFrameBytes(const ABytes: TBytes; AFormat: Integer = 1; AWidth: Integer = 1280; AHeight: Integer = 720);
     procedure HandleMonitoringJSON(JSONObj: TJSONObject);
   end;
 
@@ -150,44 +269,58 @@ implementation
 
 {$R *.dfm}
 
-var
-  hVpxDll: HMODULE = 0;
-  vpx_codec_vp9_dx: TFn_vpx_codec_vp9_dx = nil;
-  vpx_codec_dec_init_ver: TFn_vpx_codec_dec_init_ver = nil;
-  vpx_codec_decode: TFn_vpx_codec_decode = nil;
-  vpx_codec_get_frame: TFn_vpx_codec_get_frame = nil;
-  vpx_codec_destroy: TFn_vpx_codec_destroy = nil;
+const
+  CLSID_CMSVP9DecoderMFT: TGUID = '{65a5ca6e-0a06-4448-831b-7359929283fa}';
+  MFVideoFormat_VP9: TGUID = '{63647076-0000-0010-8000-00aa00389b71}';
+  MFVideoFormat_NV12: TGUID = '{00000015-0000-0010-8000-00aa00389b71}';
+  MF_MT_MAJOR_TYPE: TGUID = '{48eba18e-f8c9-4687-bf11-0a74c9f96a8f}';
+  MF_MT_SUBTYPE: TGUID = '{f7e34c9a-425f-4e15-aa3c-5a224d3fd0bc}';
+  MF_MT_FRAME_SIZE: TGUID = '{166177ae-3341-4ee4-9721-a3f402bab995}';
+  MFMediaType_Video: TGUID = '{73646976-0000-0010-8000-00aa00389b71}';
+  MFT_MESSAGE_COMMAND_FLUSH = 0;
+  MFT_MESSAGE_NOTIFY_BEGIN_STREAMING = $10000000;
+  MFT_MESSAGE_NOTIFY_START_OF_STREAM = $10000003;
+  MF_E_TRANSFORM_NEED_MORE_INPUT = $C00D6D72;
+  MF_VERSION = (1 shl 16) or 7;
 
-function LoadVpxDecoder: Boolean;
+var
+  hMfPlatDll: HMODULE = 0;
+  MFStartup: function(Version: Cardinal; dwFlags: Cardinal = 0): HRESULT; stdcall = nil;
+  MFShutdown: function: HRESULT; stdcall = nil;
+  MFCreateMediaType: function(out ppMFType: IMFMediaType): HRESULT; stdcall = nil;
+  MFCreateMemoryBuffer: function(cbMaxLength: Cardinal; out ppBuffer: IMFMediaBuffer): HRESULT; stdcall = nil;
+  MFCreateSample: function(out ppSample: IMFSample): HRESULT; stdcall = nil;
+
+function LoadWmfDecoder: Boolean;
 begin
-  if hVpxDll <> 0 then
+  if hMfPlatDll <> 0 then
     Exit(True);
 
-  hVpxDll := LoadLibrary('libvpx.dll');
-  if hVpxDll = 0 then
-    hVpxDll := LoadLibrary('vpx.dll');
-  if hVpxDll = 0 then
-    hVpxDll := LoadLibrary('libvpx-1.dll');
-
-  if hVpxDll <> 0 then
+  hMfPlatDll := LoadLibrary('mfplat.dll');
+  if hMfPlatDll <> 0 then
   begin
-    vpx_codec_vp9_dx       := GetProcAddress(hVpxDll, 'vpx_codec_vp9_dx');
-    vpx_codec_dec_init_ver := GetProcAddress(hVpxDll, 'vpx_codec_dec_init_ver');
-    vpx_codec_decode       := GetProcAddress(hVpxDll, 'vpx_codec_decode');
-    vpx_codec_get_frame    := GetProcAddress(hVpxDll, 'vpx_codec_get_frame');
-    vpx_codec_destroy      := GetProcAddress(hVpxDll, 'vpx_codec_destroy');
+    @MFStartup            := GetProcAddress(hMfPlatDll, 'MFStartup');
+    @MFShutdown           := GetProcAddress(hMfPlatDll, 'MFShutdown');
+    @MFCreateMediaType    := GetProcAddress(hMfPlatDll, 'MFCreateMediaType');
+    @MFCreateMemoryBuffer := GetProcAddress(hMfPlatDll, 'MFCreateMemoryBuffer');
+    @MFCreateSample       := GetProcAddress(hMfPlatDll, 'MFCreateSample');
 
-    if Assigned(vpx_codec_vp9_dx) and Assigned(vpx_codec_dec_init_ver) and
-       Assigned(vpx_codec_decode) and Assigned(vpx_codec_get_frame) and
-       Assigned(vpx_codec_destroy) then
+    if Assigned(MFStartup) and Assigned(MFShutdown) and
+       Assigned(MFCreateMediaType) and Assigned(MFCreateMemoryBuffer) and
+       Assigned(MFCreateSample) then
     begin
       Exit(True);
     end;
 
-    FreeLibrary(hVpxDll);
-    hVpxDll := 0;
+    FreeLibrary(hMfPlatDll);
+    hMfPlatDll := 0;
   end;
   Result := False;
+end;
+
+function MFSetAttributeSize(const pType: IMFMediaType; const guidKey: TGUID; unWidth, unHeight: Cardinal): HRESULT;
+begin
+  Result := pType.SetUINT64(guidKey, (Int64(unWidth) shl 32) or unHeight);
 end;
 
 { TNoFlickerPaintBox }
@@ -505,7 +638,7 @@ begin
   end;
 end;
 
-procedure TForm6.QueueFrameBytes(const ABytes: TBytes; AFormat: Integer);
+procedure TForm6.QueueFrameBytes(const ABytes: TBytes; AFormat: Integer; AWidth: Integer; AHeight: Integer);
 begin
   if Length(ABytes) = 0 then
     Exit;
@@ -517,6 +650,8 @@ begin
     FPendingFrame       := '';
     FPendingFrameBytes  := Copy(ABytes, 0, Length(ABytes));
     FPendingFrameFormat := AFormat;
+    FPendingWidth       := AWidth;
+    FPendingHeight      := AHeight;
     if Assigned(FDecodeEvent) then
       FDecodeEvent.SetEvent;
   finally
@@ -686,20 +821,26 @@ begin
     FreeAndNil(FDecodeThread);
   end;
 
-  if FVpxDecInitialized then
+  if FWmfDecInitialized then
   begin
-    if Assigned(vpx_codec_destroy) then
-      vpx_codec_destroy(@FVpxDecCtx);
-    FVpxDecInitialized := False;
+    if FWmfDecoder <> nil then
+    begin
+      FWmfDecoder.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+      FWmfDecoder := nil;
+    end;
+    MFShutdown;
+    FWmfDecInitialized := False;
   end;
 end;
 
-function TForm6.TakePendingFrame(out AText: string; out ABytes: TBytes; out AFormat: Integer): Boolean;
+function TForm6.TakePendingFrame(out AText: string; out ABytes: TBytes; out AFormat: Integer; out AWidth, AHeight: Integer): Boolean;
 begin
   Result := False;
   AText  := '';
   SetLength(ABytes, 0);
   AFormat := 1;
+  AWidth := 1280;
+  AHeight := 720;
 
   if not Assigned(FFrameLock) then
     Exit;
@@ -712,6 +853,8 @@ begin
       SetLength(FPendingFrameBytes, 0);
       FPendingFrame := '';
       AFormat := FPendingFrameFormat;
+      AWidth  := FPendingWidth;
+      AHeight := FPendingHeight;
       Result  := True;
     end
     else if FPendingFrame <> '' then
@@ -719,6 +862,8 @@ begin
       AText         := FPendingFrame;
       FPendingFrame := '';
       AFormat       := 1;
+      AWidth        := 1280;
+      AHeight       := 720;
       Result        := True;
     end;
 
@@ -754,6 +899,72 @@ begin
   end;
 end;
 
+function TForm6.InitWmfDecoder(AWidth, AHeight: Integer): Boolean;
+var
+  hr: HRESULT;
+  pInputType, pOutputType: IMFMediaType;
+begin
+  Result := False;
+  if FWmfDecInitialized then
+    Exit(True);
+
+  if not LoadWmfDecoder then
+    Exit;
+
+  hr := CoInitializeEx(nil, COINIT_APARTMENTTHREADED);
+  hr := MFStartup(MF_VERSION, 0);
+  if Failed(hr) then
+    Exit;
+
+  hr := CoCreateInstance(CLSID_CMSVP9DecoderMFT, nil, CLSCTX_INPROC_SERVER, IMFTransform, FWmfDecoder);
+  if Failed(hr) or (FWmfDecoder = nil) then
+  begin
+    MFShutdown;
+    Exit;
+  end;
+
+  hr := MFCreateMediaType(pInputType);
+  if Succeeded(hr) then
+  begin
+    pInputType.SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    pInputType.SetGUID(MF_MT_SUBTYPE, MFVideoFormat_VP9);
+    MFSetAttributeSize(pInputType, MF_MT_FRAME_SIZE, AWidth, AHeight);
+    hr := FWmfDecoder.SetInputType(0, pInputType, 0);
+  end;
+
+  if Failed(hr) then
+  begin
+    FWmfDecoder := nil;
+    MFShutdown;
+    Exit;
+  end;
+
+  hr := MFCreateMediaType(pOutputType);
+  if Succeeded(hr) then
+  begin
+    pOutputType.SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    pOutputType.SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+    MFSetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, AWidth, AHeight);
+    hr := FWmfDecoder.SetOutputType(0, pOutputType, 0);
+  end;
+
+  if Failed(hr) then
+  begin
+    FWmfDecoder := nil;
+    MFShutdown;
+    Exit;
+  end;
+
+  hr := FWmfDecoder.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+  hr := FWmfDecoder.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+  hr := FWmfDecoder.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+  FCurrentWidth := AWidth;
+  FCurrentHeight := AHeight;
+  FWmfDecInitialized := True;
+  Result := True;
+end;
+
 procedure TForm6.DecodeFrameWorker;
 var
   Text       : string;
@@ -761,9 +972,21 @@ var
   Decoded    : TBitmap;
   FrameSize  : Integer;
   FrameFormat: Integer;
-  Res, Ver   : Integer;
-  iter       : Pointer;
-  img        : pvpx_image_t;
+  FrameWidth : Integer;
+  FrameHeight: Integer;
+  hr         : HRESULT;
+  pBuffer    : IMFMediaBuffer;
+  pData      : PByte;
+  dwMaxLen   : Cardinal;
+  dwCurrentLen: Cardinal;
+  pSample    : IMFSample;
+  outputBuffer: MFT_OUTPUT_DATA_BUFFER;
+  pOutputSample: IMFSample;
+  pOutputBuffer: IMFMediaBuffer;
+  dwStatus   : Cardinal;
+  pOutData   : PByte;
+  dwOutLen   : Cardinal;
+  YPlane, UVPlane: PByte;
   y, x       : Integer;
   rowPtr     : PByte;
   YVal, UVal, VVal : Byte;
@@ -775,7 +998,7 @@ begin
     if Assigned(FDecodeEvent) then
       FDecodeEvent.WaitFor(100);
 
-    while (not FDecodeStopping) and TakePendingFrame(Text, Bytes, FrameFormat) do
+    while (not FDecodeStopping) and TakePendingFrame(Text, Bytes, FrameFormat, FrameWidth, FrameHeight) do
     begin
       if (Length(Bytes) = 0) and (Text <> '') then
       begin
@@ -791,64 +1014,128 @@ begin
       try
         if FrameFormat = 4 then
         begin
-          if not FVpxDecInitialized then
+          if FWmfDecInitialized and ((FCurrentWidth <> FrameWidth) or (FCurrentHeight <> FrameHeight)) then
           begin
-            if LoadVpxDecoder then
-            begin
-              Res := -1;
-              for Ver := 1 to 20 do
-              begin
-                Res := vpx_codec_dec_init_ver(@FVpxDecCtx, vpx_codec_vp9_dx(), nil, 0, Ver);
-                if Res = 0 then
-                  Break;
-              end;
-              if Res = 0 then
-                FVpxDecInitialized := True;
-            end;
+            FWmfDecoder.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+            FWmfDecoder := nil;
+            FWmfDecInitialized := False;
           end;
 
-          if FVpxDecInitialized then
+          if InitWmfDecoder(FrameWidth, FrameHeight) then
           begin
-            Res := vpx_codec_decode(@FVpxDecCtx, @Bytes[0], FrameSize, nil, 0);
-            if Res = 0 then
+            hr := MFCreateMemoryBuffer(FrameSize, pBuffer);
+            if Succeeded(hr) then
             begin
-              iter := nil;
-              img := vpx_codec_get_frame(@FVpxDecCtx, @iter);
-              if img <> nil then
+              hr := pBuffer.Lock(pData, dwMaxLen, dwCurrentLen);
+              if Succeeded(hr) then
               begin
-                Decoded := TBitmap.Create;
-                Decoded.PixelFormat := pf24bit;
-                Decoded.SetSize(img.w, img.h);
+                Move(Bytes[0], pData^, FrameSize);
+                pBuffer.Unlock;
+                pBuffer.SetCurrentLength(FrameSize);
+              end;
 
-                for y := 0 to img.h - 1 do
+              hr := MFCreateSample(pSample);
+              if Succeeded(hr) then
+              begin
+                pSample.AddBuffer(pBuffer);
+                hr := FWmfDecoder.ProcessInput(0, pSample, 0);
+                if Succeeded(hr) then
                 begin
-                  rowPtr := Decoded.ScanLine[y];
-                  for x := 0 to img.w - 1 do
+                  outputBuffer.dwStreamID := 0;
+                  outputBuffer.pSample := nil;
+                  outputBuffer.dwStatus := 0;
+                  outputBuffer.pEvents := nil;
+
+                  hr := MFCreateSample(pOutputSample);
+                  if Succeeded(hr) then
                   begin
-                    YVal := img.planes[0][y * img.stride[0] + x];
-                    UVal := img.planes[1][(y div 2) * img.stride[1] + (x div 2)];
-                    VVal := img.planes[2][(y div 2) * img.stride[2] + (x div 2)];
+                    hr := MFCreateMemoryBuffer(FrameWidth * FrameHeight * 3 div 2, pOutputBuffer);
+                    if Succeeded(hr) then
+                    begin
+                      pOutputSample.AddBuffer(pOutputBuffer);
+                      outputBuffer.pSample := pOutputSample;
 
-                    CVal := YVal - 16;
-                    DVal := UVal - 128;
-                    EVal := VVal - 128;
+                      dwStatus := 0;
+                      hr := FWmfDecoder.ProcessOutput(0, 1, @outputBuffer, dwStatus);
+                      if Succeeded(hr) then
+                      begin
+                        hr := outputBuffer.pSample.GetBufferByIndex(0, pOutputBuffer);
+                        if Succeeded(hr) then
+                        begin
+                          hr := pOutputBuffer.Lock(pOutData, dwMaxLen, dwOutLen);
+                          if Succeeded(hr) then
+                          begin
+                            var pActiveType: IMFMediaType;
+                            var unW, unH: Cardinal;
+                            unW := 0; unH := 0;
+                            hr := FWmfDecoder.GetOutputCurrentType(0, pActiveType);
+                            if Succeeded(hr) and (pActiveType <> nil) then
+                            begin
+                              var sizeVal: UInt64;
+                              sizeVal := 0;
+                              if Succeeded(pActiveType.GetUINT64(MF_MT_FRAME_SIZE, sizeVal)) then
+                              begin
+                                unW := sizeVal shr 32;
+                                unH := sizeVal and $FFFFFFFF;
+                              end;
+                            end;
 
-                    RVal := (298 * CVal             + 409 * EVal + 128) shr 8;
-                    GVal := (298 * CVal - 100 * DVal - 208 * EVal + 128) shr 8;
-                    BVal := (298 * CVal + 516 * DVal             + 128) shr 8;
+                            if (unW <= 0) or (unH <= 0) then
+                            begin
+                              unW := FrameWidth;
+                              unH := FrameHeight;
+                            end;
 
-                    if RVal < 0 then RVal := 0 else if RVal > 255 then RVal := 255;
-                    if GVal < 0 then GVal := 0 else if GVal > 255 then GVal := 255;
-                    if BVal < 0 then BVal := 0 else if BVal > 255 then BVal := 255;
+                            Decoded := TBitmap.Create;
+                            Decoded.PixelFormat := pf24bit;
+                            Decoded.SetSize(unW, unH);
 
-                    rowPtr[x * 3]     := BVal;
-                    rowPtr[x * 3 + 1] := GVal;
-                    rowPtr[x * 3 + 2] := RVal;
+                            YPlane  := pOutData;
+                            UVPlane := pOutData + (unW * unH);
+
+                            for y := 0 to Integer(unH) - 1 do
+                            begin
+                              rowPtr := Decoded.ScanLine[y];
+                              for x := 0 to Integer(unW) - 1 do
+                              begin
+                                YVal := YPlane[y * Integer(unW) + x];
+                                UVal := UVPlane[(y div 2) * Integer(unW) + (x div 2) * 2];
+                                VVal := UVPlane[(y div 2) * Integer(unW) + (x div 2) * 2 + 1];
+
+                                CVal := YVal - 16;
+                                DVal := UVal - 128;
+                                EVal := VVal - 128;
+
+                                RVal := (298 * CVal             + 409 * EVal + 128) shr 8;
+                                GVal := (298 * CVal - 100 * DVal - 208 * EVal + 128) shr 8;
+                                BVal := (298 * CVal + 516 * DVal             + 128) shr 8;
+
+                                if RVal < 0 then RVal := 0 else if RVal > 255 then RVal := 255;
+                                if GVal < 0 then GVal := 0 else if GVal > 255 then GVal := 255;
+                                if BVal < 0 then BVal := 0 else if BVal > 255 then BVal := 255;
+
+                                rowPtr[x * 3]     := BVal;
+                                rowPtr[x * 3 + 1] := GVal;
+                                rowPtr[x * 3 + 2] := RVal;
+                              end;
+                            end;
+
+                            pOutputBuffer.Unlock;
+                          end;
+                        end;
+                      end;
+                    end;
                   end;
                 end;
               end;
             end;
           end;
+          outputBuffer.pSample := nil;
+          outputBuffer.pEvents := nil;
+          pOutputSample := nil;
+          pOutputBuffer := nil;
+          pSample := nil;
+          pBuffer := nil;
         end
         else
         begin

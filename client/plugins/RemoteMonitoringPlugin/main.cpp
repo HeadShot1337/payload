@@ -1,6 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mftransform.h>
+#include <mferror.h>
 #include <propidl.h>
 #include <gdiplus.h>
 #include <objidl.h>
@@ -55,180 +59,20 @@ static const uint32_t MONITOR_FRAME_FORMAT_JPEG = 1;
 static const uint32_t MONITOR_FRAME_FORMAT_VP9 = 4;
 static int g_format = MONITOR_FRAME_FORMAT_JPEG;
 
-// --- Minimal libvpx Dynamic Loading Layer ---
-typedef void* vpx_codec_iface_t;
-typedef void* vpx_codec_iter_t;
+// --- Windows Media Foundation (WMF) DLL-less VP9 Encoder ---
+static IMFTransform* g_pMftEncoder = NULL;
+static DWORD g_dwInputStreamID = 0;
+static DWORD g_dwOutputStreamID = 0;
+static bool g_wmfInitialized = false;
+static int64_t g_wmfPts = 0;
+static int g_wmfWidth = 0;
+static int g_wmfHeight = 0;
 
-typedef enum vpx_img_fmt {
-    VPX_IMG_FMT_NONE,
-    VPX_IMG_FMT_YV12 = 0x301,
-    VPX_IMG_FMT_I420 = 0x102
-} vpx_img_fmt_t;
+static const GUID OUR_MFVideoFormat_VP9 = { 0x63647076, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID OUR_MFVideoFormat_NV12 = { 0x00000015, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID OUR_CLSID_CMSVP9EncoderMFT = { 0x0a80e60b, 0x80a5, 0x48ff, { 0x9d, 0x6a, 0x54, 0x31, 0xd1, 0xd8, 0xe1, 0x32 } };
 
-typedef struct vpx_image {
-    vpx_img_fmt_t fmt;
-    int cs;
-    int range;
-    int w;
-    int h;
-    int d_w;
-    int d_h;
-    int x_chroma_shift;
-    int y_chroma_shift;
-    unsigned char *planes[4];
-    int stride[4];
-    int bps;
-    void *user_priv;
-    unsigned char *img_data;
-    int img_data_owner;
-    int self_allocd;
-    void *fb_priv;
-} vpx_image_t;
-
-typedef struct vpx_codec_ctx {
-    const char *name;
-    vpx_codec_iface_t *iface;
-    uint32_t err;
-    const char *err_detail;
-    uint32_t init_flags;
-    union {
-        void *priv;
-        void *priv_enc;
-        void *priv_dec;
-    } priv;
-} vpx_codec_ctx_t;
-
-typedef struct vpx_codec_enc_cfg {
-    unsigned int g_usage;
-    unsigned int g_threads;
-    unsigned int g_profile;
-    unsigned int g_w;
-    unsigned int g_h;
-    struct {
-        unsigned int num;
-        unsigned int den;
-    } g_timebase;
-    unsigned int g_error_resilient;
-    unsigned int g_pass;
-    unsigned int g_lag_in_frames;
-    unsigned int rc_dropframe_thresh;
-    unsigned int rc_resize_allowed;
-    unsigned int rc_scaled_width;
-    unsigned int rc_scaled_height;
-    unsigned int rc_resize_up_thresh;
-    unsigned int rc_resize_down_thresh;
-    unsigned int rc_end_usage;
-    unsigned int rc_target_bitrate;
-    unsigned int rc_min_quantizer;
-    unsigned int rc_max_quantizer;
-    unsigned int rc_undershoot_pct;
-    unsigned int rc_overshoot_pct;
-    unsigned int rc_buf_sz;
-    unsigned int rc_buf_initial_sz;
-    unsigned int rc_buf_optimal_sz;
-    unsigned int rc_2pass_vbr_bias_pct;
-    unsigned int rc_2pass_vbr_minsection_pct;
-    unsigned int rc_2pass_vbr_maxsection_pct;
-    unsigned int kf_mode;
-    unsigned int kf_min_dist;
-    unsigned int kf_max_dist;
-    unsigned int ss_number_layers;
-    unsigned int ss_enable_auto_alt_ref[5];
-    unsigned int ss_target_bitrate[5];
-    unsigned int ts_number_layers;
-    unsigned int ts_target_bitrate[5];
-    unsigned int ts_rate_decimator[5];
-    unsigned int ts_periodicity;
-    unsigned int ts_layer_id[16];
-    unsigned int layer_target_bitrate[25];
-    int temporal_use_sandbox;
-    unsigned char reserved[256];
-} vpx_codec_enc_cfg_t;
-
-typedef struct vpx_codec_cx_pkt {
-    int kind;
-    union {
-        struct {
-            void *buf;
-            size_t sz;
-            int64_t pts;
-            unsigned long duration;
-            int flags;
-            int partition_id;
-        } frame;
-    } data;
-} vpx_codec_cx_pkt_t;
-
-typedef vpx_codec_iface_t* (*PFN_vpx_codec_vp9_cx)();
-typedef int (*PFN_vpx_codec_enc_config_default)(vpx_codec_iface_t* iface, vpx_codec_enc_cfg_t* cfg, unsigned int usage);
-typedef int (*PFN_vpx_codec_enc_init_ver)(vpx_codec_ctx_t* ctx, vpx_codec_iface_t* iface, const vpx_codec_enc_cfg_t* cfg, long flags, int ver);
-typedef int (*PFN_vpx_codec_encode)(vpx_codec_ctx_t* ctx, const vpx_image_t* img, int64_t pts, unsigned long duration, long flags, unsigned long deadline);
-typedef const vpx_codec_cx_pkt_t* (*PFN_vpx_codec_get_cx_data)(vpx_codec_ctx_t* ctx, vpx_codec_iter_t* iter);
-typedef int (*PFN_vpx_codec_destroy)(vpx_codec_ctx_t* ctx);
-typedef vpx_image_t* (*PFN_vpx_img_alloc)(vpx_image_t* img, vpx_img_fmt_t fmt, unsigned int d_w, unsigned int d_h, unsigned int align);
-typedef void (*PFN_vpx_img_free)(vpx_image_t* img);
-
-static HMODULE g_hVpxDll = NULL;
-static PFN_vpx_codec_vp9_cx p_vpx_codec_vp9_cx = NULL;
-static PFN_vpx_codec_enc_config_default p_vpx_codec_enc_config_default = NULL;
-static PFN_vpx_codec_enc_init_ver p_vpx_codec_enc_init_ver = NULL;
-static PFN_vpx_codec_encode p_vpx_codec_encode = NULL;
-static PFN_vpx_codec_get_cx_data p_vpx_codec_get_cx_data = NULL;
-static PFN_vpx_codec_destroy p_vpx_codec_destroy = NULL;
-static PFN_vpx_img_alloc p_vpx_img_alloc = NULL;
-static PFN_vpx_img_free p_vpx_img_free = NULL;
-
-static bool load_vpx_dll() {
-    if (g_hVpxDll) return true;
-    const wchar_t* dllNames[] = { L"libvpx.dll", L"vpx.dll", L"libvpx-1.dll" };
-    for (const auto& name : dllNames) {
-        g_hVpxDll = LoadLibraryW(name);
-        if (g_hVpxDll) break;
-    }
-    if (!g_hVpxDll) return false;
-
-    p_vpx_codec_vp9_cx = (PFN_vpx_codec_vp9_cx)GetProcAddress(g_hVpxDll, "vpx_codec_vp9_cx");
-    p_vpx_codec_enc_config_default = (PFN_vpx_codec_enc_config_default)GetProcAddress(g_hVpxDll, "vpx_codec_enc_config_default");
-    p_vpx_codec_enc_init_ver = (PFN_vpx_codec_enc_init_ver)GetProcAddress(g_hVpxDll, "vpx_codec_enc_init_ver");
-    p_vpx_codec_encode = (PFN_vpx_codec_encode)GetProcAddress(g_hVpxDll, "vpx_codec_encode");
-    p_vpx_codec_get_cx_data = (PFN_vpx_codec_get_cx_data)GetProcAddress(g_hVpxDll, "vpx_codec_get_cx_data");
-    p_vpx_codec_destroy = (PFN_vpx_codec_destroy)GetProcAddress(g_hVpxDll, "vpx_codec_destroy");
-    p_vpx_img_alloc = (PFN_vpx_img_alloc)GetProcAddress(g_hVpxDll, "vpx_img_alloc");
-    p_vpx_img_free = (PFN_vpx_img_free)GetProcAddress(g_hVpxDll, "vpx_img_free");
-
-    if (!p_vpx_codec_vp9_cx || !p_vpx_codec_enc_config_default || !p_vpx_codec_enc_init_ver ||
-        !p_vpx_codec_encode || !p_vpx_codec_get_cx_data || !p_vpx_codec_destroy ||
-        !p_vpx_img_alloc || !p_vpx_img_free) {
-        FreeLibrary(g_hVpxDll);
-        g_hVpxDll = NULL;
-        return false;
-    }
-    return true;
-}
-
-static bool g_vpxInitialized = false;
-static vpx_codec_ctx_t g_vpxCtx{};
-static vpx_image_t g_vpxImg{};
-static int64_t g_vpxPts = 0;
-static int g_vpxWidth = 0;
-static int g_vpxHeight = 0;
-
-static void cleanup_vpx() {
-    if (g_vpxInitialized) {
-        if (p_vpx_codec_destroy) {
-            p_vpx_codec_destroy(&g_vpxCtx);
-        }
-        if (p_vpx_img_free) {
-            p_vpx_img_free(&g_vpxImg);
-        }
-        g_vpxInitialized = false;
-    }
-    g_vpxPts = 0;
-    g_vpxWidth = 0;
-    g_vpxHeight = 0;
-}
-
-static void bgrx_to_i420(const uint8_t* bgrx, int width, int height, uint8_t* dst_y, uint8_t* dst_u, uint8_t* dst_v, int stride_y, int stride_u, int stride_v) {
+static void bgrx_to_nv12(const uint8_t* bgrx, int width, int height, uint8_t* dst_y, uint8_t* dst_uv, int stride_y, int stride_uv) {
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             int src_idx = (y * width + x) * 4;
@@ -261,11 +105,199 @@ static void bgrx_to_i420(const uint8_t* bgrx, int width, int height, uint8_t* ds
                 int U = (int)(-0.169 * avg_r - 0.331 * avg_g + 0.500 * avg_b + 128);
                 int V = (int)(0.500 * avg_r - 0.419 * avg_g - 0.081 * avg_b + 128);
 
-                dst_u[(y / 2) * stride_u + (x / 2)] = (uint8_t)(U < 0 ? 0 : (U > 255 ? 255 : U));
-                dst_v[(y / 2) * stride_v + (x / 2)] = (uint8_t)(V < 0 ? 0 : (V > 255 ? 255 : V));
+                int uv_row = y / 2;
+                int uv_col = x / 2;
+                dst_uv[uv_row * stride_uv + uv_col * 2]     = (uint8_t)(U < 0 ? 0 : (U > 255 ? 255 : U));
+                dst_uv[uv_row * stride_uv + uv_col * 2 + 1] = (uint8_t)(V < 0 ? 0 : (V > 255 ? 255 : V));
             }
         }
     }
+}
+
+static bool init_wmf_encoder(int width, int height, int fps) {
+    if (g_wmfInitialized) return true;
+
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    hr = MFStartup(MF_VERSION);
+    if (FAILED(hr)) return false;
+
+    hr = CoCreateInstance(OUR_CLSID_CMSVP9EncoderMFT, NULL, CLSCTX_INPROC_SERVER, IID_IMFTransform, (void**)&g_pMftEncoder);
+    if (FAILED(hr) || !g_pMftEncoder) {
+        MFT_REGISTER_TYPE_INFO outputInfo = { MFMediaType_Video, OUR_MFVideoFormat_VP9 };
+        IMFActivate** ppActivates = NULL;
+        UINT32 count = 0;
+        hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ALL, NULL, &outputInfo, &ppActivates, &count);
+        if (SUCCEEDED(hr) && count > 0) {
+            hr = ppActivates[0]->ActivateObject(IID_IMFTransform, (void**)&g_pMftEncoder);
+            for (UINT32 i = 0; i < count; i++) ppActivates[i]->Release();
+            CoTaskMemFree(ppActivates);
+        }
+    }
+
+    if (!g_pMftEncoder) {
+        MFShutdown();
+        CoUninitialize();
+        return false;
+    }
+
+    g_dwInputStreamID = 0;
+    g_dwOutputStreamID = 0;
+
+    IMFMediaType* pOutputType = NULL;
+    hr = MFCreateMediaType(&pOutputType);
+    if (SUCCEEDED(hr)) {
+        pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        pOutputType->SetGUID(MF_MT_SUBTYPE, OUR_MFVideoFormat_VP9);
+        pOutputType->SetUINT32(MF_MT_AVG_BITRATE, 1000000);
+        MFSetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, width, height);
+        MFSetAttributeRatio(pOutputType, MF_MT_FRAME_RATE, fps, 1);
+        MFSetAttributeRatio(pOutputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+        pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
+        hr = g_pMftEncoder->SetOutputType(g_dwOutputStreamID, pOutputType, 0);
+        pOutputType->Release();
+    }
+
+    if (FAILED(hr)) {
+        g_pMftEncoder->Release();
+        g_pMftEncoder = NULL;
+        MFShutdown();
+        CoUninitialize();
+        return false;
+    }
+
+    IMFMediaType* pInputType = NULL;
+    hr = MFCreateMediaType(&pInputType);
+    if (SUCCEEDED(hr)) {
+        pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        pInputType->SetGUID(MF_MT_SUBTYPE, OUR_MFVideoFormat_NV12);
+        MFSetAttributeSize(pInputType, MF_MT_FRAME_SIZE, width, height);
+        MFSetAttributeRatio(pInputType, MF_MT_FRAME_RATE, fps, 1);
+        MFSetAttributeRatio(pInputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+        pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
+        hr = g_pMftEncoder->SetInputType(g_dwInputStreamID, pInputType, 0);
+        pInputType->Release();
+    }
+
+    if (FAILED(hr)) {
+        g_pMftEncoder->Release();
+        g_pMftEncoder = NULL;
+        MFShutdown();
+        CoUninitialize();
+        return false;
+    }
+
+    hr = g_pMftEncoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+    hr = g_pMftEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+    hr = g_pMftEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+    g_wmfWidth = width;
+    g_wmfHeight = height;
+    g_wmfInitialized = true;
+    return true;
+}
+
+static void cleanup_wmf_encoder() {
+    if (g_wmfInitialized) {
+        if (g_pMftEncoder) {
+            g_pMftEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            g_pMftEncoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+            g_pMftEncoder->Release();
+            g_pMftEncoder = NULL;
+        }
+        MFShutdown();
+        CoUninitialize();
+        g_wmfInitialized = false;
+    }
+    g_wmfPts = 0;
+    g_wmfWidth = 0;
+    g_wmfHeight = 0;
+}
+
+static bool encode_wmf_frame(const uint8_t* bgrx, int width, int height, int64_t pts, int fps, vector<uint8_t>& out_bytes) {
+    if (!init_wmf_encoder(width, height, fps)) return false;
+
+    IMFMediaBuffer* pBuffer = NULL;
+    HRESULT hr = MFCreateMemoryBuffer(width * height * 3 / 2, &pBuffer);
+    if (FAILED(hr)) return false;
+
+    BYTE* pData = NULL;
+    DWORD dwMaxLen = 0, dwCurrentLen = 0;
+    hr = pBuffer->Lock(&pData, &dwMaxLen, &dwCurrentLen);
+    if (SUCCEEDED(hr)) {
+        bgrx_to_nv12(bgrx, width, height, pData, pData + (width * height), width, width);
+        pBuffer->Unlock();
+        pBuffer->SetCurrentLength(width * height * 3 / 2);
+    }
+
+    if (FAILED(hr)) {
+        pBuffer->Release();
+        return false;
+    }
+
+    IMFSample* pSample = NULL;
+    hr = MFCreateSample(&pSample);
+    if (SUCCEEDED(hr)) {
+        pSample->AddBuffer(pBuffer);
+        pSample->SetSampleTime(pts * 10000000 / fps);
+        pSample->SetSampleDuration(10000000 / fps);
+    }
+    pBuffer->Release();
+
+    if (FAILED(hr)) {
+        if (pSample) pSample->Release();
+        return false;
+    }
+
+    hr = g_pMftEncoder->ProcessInput(g_dwInputStreamID, pSample, 0);
+    pSample->Release();
+    if (FAILED(hr)) return false;
+
+    MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
+    outputDataBuffer.dwStreamID = g_dwOutputStreamID;
+
+    IMFSample* pOutputSample = NULL;
+    hr = MFCreateSample(&pOutputSample);
+    if (FAILED(hr)) return false;
+
+    IMFMediaBuffer* pOutputBuffer = NULL;
+    hr = MFCreateMemoryBuffer(width * height * 3 / 2, &pOutputBuffer);
+    if (SUCCEEDED(hr)) {
+        pOutputSample->AddBuffer(pOutputBuffer);
+        pOutputBuffer->Release();
+    } else {
+        pOutputSample->Release();
+        return false;
+    }
+
+    outputDataBuffer.pSample = pOutputSample;
+
+    DWORD dwStatus = 0;
+    hr = g_pMftEncoder->ProcessOutput(0, 1, &outputDataBuffer, &dwStatus);
+    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        pOutputSample->Release();
+        return true;
+    }
+
+    if (SUCCEEDED(hr)) {
+        IMFMediaBuffer* pMediaBuf = NULL;
+        hr = outputDataBuffer.pSample->GetBufferByIndex(0, &pMediaBuf);
+        if (SUCCEEDED(hr)) {
+            BYTE* pOutData = NULL;
+            DWORD dwLen = 0;
+            hr = pMediaBuf->Lock(&pOutData, NULL, &dwLen);
+            if (SUCCEEDED(hr)) {
+                out_bytes.assign(pOutData, pOutData + dwLen);
+                pMediaBuf->Unlock();
+            }
+            pMediaBuf->Release();
+        }
+        if (outputDataBuffer.pEvents) outputDataBuffer.pEvents->Release();
+    }
+
+    pOutputSample->Release();
+    return SUCCEEDED(hr);
 }
 
 static atomic_bool g_captureRunning(false);
@@ -763,65 +795,14 @@ static void capture_loop() {
             DeleteDC(memoryDC);
             ReleaseDC(NULL, screenDC);
 
-            if (!g_vpxInitialized || g_vpxWidth != width || g_vpxHeight != height) {
-                cleanup_vpx();
-
-                vpx_codec_enc_cfg_t cfg{};
-                int config_res = p_vpx_codec_enc_config_default(p_vpx_codec_vp9_cx(), &cfg, 0);
-                if (config_res == 0) {
-                    cfg.g_w = width;
-                    cfg.g_h = height;
-                    cfg.g_timebase.num = 1;
-                    cfg.g_timebase.den = clamp_int(targetFps, 1, 100);
-                    cfg.g_threads = 4;
-                    cfg.rc_end_usage = 0;
-                    cfg.g_lag_in_frames = 0;
-                    cfg.rc_target_bitrate = 1000;
-
-                    int init_res = -1;
-                    for (int ver = 1; ver <= 20; ++ver) {
-                        init_res = p_vpx_codec_enc_init_ver(&g_vpxCtx, p_vpx_codec_vp9_cx(), &cfg, 0, ver);
-                        if (init_res == 0) {
-                            break;
-                        }
-                    }
-
-                    if (init_res == 0) {
-                        p_vpx_img_alloc(&g_vpxImg, VPX_IMG_FMT_I420, width, height, 1);
-                        g_vpxWidth = width;
-                        g_vpxHeight = height;
-                        g_vpxInitialized = true;
-                    } else {
-                        error = "VP9 encoder initialization failed (code: " + to_string(init_res) + ")";
-                    }
-                } else {
-                    error = "VP9 encoder config default failed (code: " + to_string(config_res) + ")";
-                }
+            if (!g_wmfInitialized || g_wmfWidth != width || g_wmfHeight != height) {
+                cleanup_wmf_encoder();
             }
 
-            if (g_vpxInitialized) {
-                bgrx_to_i420(bgrx.data(), width, height,
-                             g_vpxImg.planes[0], g_vpxImg.planes[1], g_vpxImg.planes[2],
-                             g_vpxImg.stride[0], g_vpxImg.stride[1], g_vpxImg.stride[2]);
-
-                int flags = 0;
-                if (g_vpxPts % 60 == 0) {
-                    flags |= 1;
-                }
-
-                int encode_res = p_vpx_codec_encode(&g_vpxCtx, &g_vpxImg, g_vpxPts++, 1, flags, 1);
-                if (encode_res == 0) {
-                    vpx_codec_iter_t iter = NULL;
-                    const vpx_codec_cx_pkt_t* pkt;
-                    while ((pkt = p_vpx_codec_get_cx_data(&g_vpxCtx, &iter)) != NULL) {
-                        if (pkt->kind == 0) {
-                            const unsigned char* pkt_buf = (const unsigned char*)pkt->data.frame.buf;
-                            frameBytes.insert(frameBytes.end(), pkt_buf, pkt_buf + pkt->data.frame.sz);
-                        }
-                    }
-                } else {
-                    error = "VP9 encoding failed (code: " + to_string(encode_res) + ")";
-                }
+            if (encode_wmf_frame(bgrx.data(), width, height, g_wmfPts++, targetFps, frameBytes)) {
+                // Frame successfully encoded
+            } else {
+                error = "VP9 encoding failed via Windows Media Foundation";
             }
 
             if (!error.empty()) {
@@ -868,7 +849,7 @@ static void stop_capture_thread() {
 
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
-    cleanup_vpx();
+    cleanup_wmf_encoder();
 }
 
 static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps, int format) {
@@ -886,10 +867,7 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
     int safeMonitorIndex = clamp_int(monitorIndex, 0, (int)monitors.size() - 1);
 
     if (format == MONITOR_FRAME_FORMAT_VP9) {
-        if (!load_vpx_dll()) {
-            send_monitor_error(sock, "VP9 codec (libvpx.dll / vpx.dll) could not be loaded. Please place libvpx.dll in the plugin or client folder.");
-            return;
-        }
+        // Native Windows Media Foundation VP9 encoder will be initialized in capture thread
     }
 
     {
