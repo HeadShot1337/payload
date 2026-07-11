@@ -233,7 +233,7 @@ type
     function  SelectedScalePercent: Integer;
     function  JSONValueText(JSONObj: TJSONObject; const AName: string): string;
     function  DecodeBase64Image(const AText: string; out ABytes: TBytes): Boolean;
-    function  DecodeFrameToBitmap(const ABytes: TBytes; out ABitmap: TBitmap): Boolean;
+
     function  DecodeFrameToRawBGR32(const ABytes: TBytes; out ARawBytes: TBytes; out AWidth, AHeight: Integer): Boolean;
     procedure QueueFrame(const AText: string);
     procedure FrameTimerTimer(Sender: TObject);
@@ -320,8 +320,8 @@ begin
     for x := 0 to AWidth - 1 do
     begin
       YVal := YPlane[y * AWidth + x];
-      UVal := UVPlane[(y div 2) * AWidth + (x and $FFFFFFFE)];
-      VVal := UVPlane[(y div 2) * AWidth + (x and $FFFFFFFE) + 1];
+      UVal := UVPlane[(y div 2) * AWidth + ((x div 2) * 2)];
+      VVal := UVPlane[(y div 2) * AWidth + ((x div 2) * 2) + 1];
 
       C := YVal - 16;
       D := UVal - 128;
@@ -369,7 +369,7 @@ begin
   if not Assigned(MFStartup) then Exit;
 
   hr := CoCreateInstance(CLSID_CMSH264DecoderMFT, nil, CLSCTX_INPROC_SERVER, IID_IMFTransform, FDecoder);
-  if FDecoder = nil then Exit;
+  if FAILED(hr) or (FDecoder = nil) then Exit;
 
   hr := MFCreateMediaType(InputType);
   if SUCCEEDED(hr) then
@@ -496,7 +496,7 @@ begin
 
   DetachCallbacks;
   FreeAndNil(FFrameTimer);
-  FreeAndNil(FDecodedBitmap);
+  SetLength(FDecodedRawBytes, 0);
   FreeAndNil(FDisplayBitmap);
   FreeAndNil(FDecodeEvent);
   FreeAndNil(FFrameLock);
@@ -733,7 +733,7 @@ begin
     try
       FPendingFrame := '';
       SetLength(FPendingFrameBytes, 0);
-      FreeAndNil(FDecodedBitmap);
+      SetLength(FDecodedRawBytes, 0);
       FDecodedFrameSize := 0;
       if Assigned(FDecodeEvent) then
         FDecodeEvent.ResetEvent;
@@ -915,58 +915,7 @@ begin
   end;
 end;
 
-function TForm6.DecodeFrameToBitmap(const ABytes: TBytes; out ABitmap: TBitmap): Boolean;
-var
-  Stream   : TMemoryStream;
-  JpegImage: TJPEGImage;
-  Picture  : TPicture;
-  Graphic  : TGraphic;
-begin
-  Result  := False;
-  ABitmap := nil;
 
-  if Length(ABytes) = 0 then
-    Exit;
-
-  Stream    := TMemoryStream.Create;
-  JpegImage := TJPEGImage.Create;
-  Picture   := nil;
-  try
-    Stream.WriteBuffer(ABytes[0], Length(ABytes));
-    Stream.Position := 0;
-
-    try
-      JpegImage.LoadFromStream(Stream);
-      Graphic := JpegImage;
-    except
-      Stream.Position := 0;
-      Picture := TPicture.Create;
-      Picture.LoadFromStream(Stream);
-      Graphic := Picture.Graphic;
-    end;
-
-    if not Assigned(Graphic) or (Graphic.Width <= 0) or (Graphic.Height <= 0) then
-      Exit;
-
-    ABitmap             := TBitmap.Create;
-    ABitmap.PixelFormat := pf24bit;
-    ABitmap.SetSize(Graphic.Width, Graphic.Height);
-    ABitmap.Canvas.Lock;
-    try
-      ABitmap.Canvas.Draw(0, 0, Graphic);
-    finally
-      ABitmap.Canvas.Unlock;
-    end;
-
-    Result := True;
-  finally
-    if not Result then
-      FreeAndNil(ABitmap);
-    Picture.Free;
-    JpegImage.Free;
-    Stream.Free;
-  end;
-end;
 
 function TForm6.DecodeFrameToRawBGR32(const ABytes: TBytes; out ARawBytes: TBytes; out AWidth, AHeight: Integer): Boolean;
 var
