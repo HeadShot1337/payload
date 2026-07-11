@@ -1,6 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mftransform.h>
+#include <mferror.h>
 #include <propidl.h>
 #include <gdiplus.h>
 #include <objidl.h>
@@ -52,6 +56,249 @@ struct MonitorFrameHeader {
 static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_MONITOR_FRAME = 0x03;
 static const uint32_t MONITOR_FRAME_FORMAT_JPEG = 1;
+static const uint32_t MONITOR_FRAME_FORMAT_VP9 = 4;
+static int g_format = MONITOR_FRAME_FORMAT_JPEG;
+
+// --- Windows Media Foundation (WMF) DLL-less VP9 Encoder ---
+static IMFTransform* g_pMftEncoder = NULL;
+static DWORD g_dwInputStreamID = 0;
+static DWORD g_dwOutputStreamID = 0;
+static bool g_wmfInitialized = false;
+static int64_t g_wmfPts = 0;
+static int g_wmfWidth = 0;
+static int g_wmfHeight = 0;
+
+static const GUID OUR_MFVideoFormat_VP9 = { 0x63647076, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID OUR_MFVideoFormat_NV12 = { 0x00000015, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID OUR_CLSID_CMSVP9EncoderMFT = { 0x0a80e60b, 0x80a5, 0x48ff, { 0x9d, 0x6a, 0x54, 0x31, 0xd1, 0xd8, 0xe1, 0x32 } };
+
+static void bgrx_to_nv12(const uint8_t* bgrx, int width, int height, uint8_t* dst_y, uint8_t* dst_uv, int stride_y, int stride_uv) {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int src_idx = (y * width + x) * 4;
+            uint8_t b = bgrx[src_idx];
+            uint8_t g = bgrx[src_idx + 1];
+            uint8_t r = bgrx[src_idx + 2];
+
+            int Y = (int)(0.299 * r + 0.587 * g + 0.114 * b);
+            dst_y[y * stride_y + x] = (uint8_t)(Y < 0 ? 0 : (Y > 255 ? 255 : Y));
+
+            if ((y % 2 == 0) && (x % 2 == 0)) {
+                int r_sum = 0, g_sum = 0, b_sum = 0, count = 0;
+                for (int dy = 0; dy < 2; ++dy) {
+                    for (int dx = 0; dx < 2; ++dx) {
+                        int ny = y + dy;
+                        int nx = x + dx;
+                        if (ny < height && nx < width) {
+                            int idx = (ny * width + nx) * 4;
+                            b_sum += bgrx[idx];
+                            g_sum += bgrx[idx + 1];
+                            r_sum += bgrx[idx + 2];
+                            count++;
+                        }
+                    }
+                }
+                int avg_b = b_sum / count;
+                int avg_g = g_sum / count;
+                int avg_r = r_sum / count;
+
+                int U = (int)(-0.169 * avg_r - 0.331 * avg_g + 0.500 * avg_b + 128);
+                int V = (int)(0.500 * avg_r - 0.419 * avg_g - 0.081 * avg_b + 128);
+
+                int uv_row = y / 2;
+                int uv_col = x / 2;
+                dst_uv[uv_row * stride_uv + uv_col * 2]     = (uint8_t)(U < 0 ? 0 : (U > 255 ? 255 : U));
+                dst_uv[uv_row * stride_uv + uv_col * 2 + 1] = (uint8_t)(V < 0 ? 0 : (V > 255 ? 255 : V));
+            }
+        }
+    }
+}
+
+static bool init_wmf_encoder(int width, int height, int fps) {
+    if (g_wmfInitialized) return true;
+
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    hr = MFStartup(MF_VERSION);
+    if (FAILED(hr)) return false;
+
+    hr = CoCreateInstance(OUR_CLSID_CMSVP9EncoderMFT, NULL, CLSCTX_INPROC_SERVER, IID_IMFTransform, (void**)&g_pMftEncoder);
+    if (FAILED(hr) || !g_pMftEncoder) {
+        MFT_REGISTER_TYPE_INFO outputInfo = { MFMediaType_Video, OUR_MFVideoFormat_VP9 };
+        IMFActivate** ppActivates = NULL;
+        UINT32 count = 0;
+        hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ALL, NULL, &outputInfo, &ppActivates, &count);
+        if (SUCCEEDED(hr) && count > 0) {
+            hr = ppActivates[0]->ActivateObject(IID_IMFTransform, (void**)&g_pMftEncoder);
+            for (UINT32 i = 0; i < count; i++) ppActivates[i]->Release();
+            CoTaskMemFree(ppActivates);
+        }
+    }
+
+    if (!g_pMftEncoder) {
+        MFShutdown();
+        CoUninitialize();
+        return false;
+    }
+
+    g_dwInputStreamID = 0;
+    g_dwOutputStreamID = 0;
+
+    IMFMediaType* pOutputType = NULL;
+    hr = MFCreateMediaType(&pOutputType);
+    if (SUCCEEDED(hr)) {
+        pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        pOutputType->SetGUID(MF_MT_SUBTYPE, OUR_MFVideoFormat_VP9);
+        pOutputType->SetUINT32(MF_MT_AVG_BITRATE, 1000000);
+        MFSetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, width, height);
+        MFSetAttributeRatio(pOutputType, MF_MT_FRAME_RATE, fps, 1);
+        MFSetAttributeRatio(pOutputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+        pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
+        hr = g_pMftEncoder->SetOutputType(g_dwOutputStreamID, pOutputType, 0);
+        pOutputType->Release();
+    }
+
+    if (FAILED(hr)) {
+        g_pMftEncoder->Release();
+        g_pMftEncoder = NULL;
+        MFShutdown();
+        CoUninitialize();
+        return false;
+    }
+
+    IMFMediaType* pInputType = NULL;
+    hr = MFCreateMediaType(&pInputType);
+    if (SUCCEEDED(hr)) {
+        pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        pInputType->SetGUID(MF_MT_SUBTYPE, OUR_MFVideoFormat_NV12);
+        MFSetAttributeSize(pInputType, MF_MT_FRAME_SIZE, width, height);
+        MFSetAttributeRatio(pInputType, MF_MT_FRAME_RATE, fps, 1);
+        MFSetAttributeRatio(pInputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+        pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
+        hr = g_pMftEncoder->SetInputType(g_dwInputStreamID, pInputType, 0);
+        pInputType->Release();
+    }
+
+    if (FAILED(hr)) {
+        g_pMftEncoder->Release();
+        g_pMftEncoder = NULL;
+        MFShutdown();
+        CoUninitialize();
+        return false;
+    }
+
+    hr = g_pMftEncoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+    hr = g_pMftEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+    hr = g_pMftEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+    g_wmfWidth = width;
+    g_wmfHeight = height;
+    g_wmfInitialized = true;
+    return true;
+}
+
+static void cleanup_wmf_encoder() {
+    if (g_wmfInitialized) {
+        if (g_pMftEncoder) {
+            g_pMftEncoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            g_pMftEncoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+            g_pMftEncoder->Release();
+            g_pMftEncoder = NULL;
+        }
+        MFShutdown();
+        CoUninitialize();
+        g_wmfInitialized = false;
+    }
+    g_wmfPts = 0;
+    g_wmfWidth = 0;
+    g_wmfHeight = 0;
+}
+
+static bool encode_wmf_frame(const uint8_t* bgrx, int width, int height, int64_t pts, int fps, vector<uint8_t>& out_bytes) {
+    if (!init_wmf_encoder(width, height, fps)) return false;
+
+    IMFMediaBuffer* pBuffer = NULL;
+    HRESULT hr = MFCreateMemoryBuffer(width * height * 3 / 2, &pBuffer);
+    if (FAILED(hr)) return false;
+
+    BYTE* pData = NULL;
+    DWORD dwMaxLen = 0, dwCurrentLen = 0;
+    hr = pBuffer->Lock(&pData, &dwMaxLen, &dwCurrentLen);
+    if (SUCCEEDED(hr)) {
+        bgrx_to_nv12(bgrx, width, height, pData, pData + (width * height), width, width);
+        pBuffer->Unlock();
+        pBuffer->SetCurrentLength(width * height * 3 / 2);
+    }
+
+    if (FAILED(hr)) {
+        pBuffer->Release();
+        return false;
+    }
+
+    IMFSample* pSample = NULL;
+    hr = MFCreateSample(&pSample);
+    if (SUCCEEDED(hr)) {
+        pSample->AddBuffer(pBuffer);
+        pSample->SetSampleTime(pts * 10000000 / fps);
+        pSample->SetSampleDuration(10000000 / fps);
+    }
+    pBuffer->Release();
+
+    if (FAILED(hr)) {
+        if (pSample) pSample->Release();
+        return false;
+    }
+
+    hr = g_pMftEncoder->ProcessInput(g_dwInputStreamID, pSample, 0);
+    pSample->Release();
+    if (FAILED(hr)) return false;
+
+    MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
+    outputDataBuffer.dwStreamID = g_dwOutputStreamID;
+
+    IMFSample* pOutputSample = NULL;
+    hr = MFCreateSample(&pOutputSample);
+    if (FAILED(hr)) return false;
+
+    IMFMediaBuffer* pOutputBuffer = NULL;
+    hr = MFCreateMemoryBuffer(width * height * 3 / 2, &pOutputBuffer);
+    if (SUCCEEDED(hr)) {
+        pOutputSample->AddBuffer(pOutputBuffer);
+        pOutputBuffer->Release();
+    } else {
+        pOutputSample->Release();
+        return false;
+    }
+
+    outputDataBuffer.pSample = pOutputSample;
+
+    DWORD dwStatus = 0;
+    hr = g_pMftEncoder->ProcessOutput(0, 1, &outputDataBuffer, &dwStatus);
+    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        pOutputSample->Release();
+        return true;
+    }
+
+    if (SUCCEEDED(hr)) {
+        IMFMediaBuffer* pMediaBuf = NULL;
+        hr = outputDataBuffer.pSample->GetBufferByIndex(0, &pMediaBuf);
+        if (SUCCEEDED(hr)) {
+            BYTE* pOutData = NULL;
+            DWORD dwLen = 0;
+            hr = pMediaBuf->Lock(&pOutData, NULL, &dwLen);
+            if (SUCCEEDED(hr)) {
+                out_bytes.assign(pOutData, pOutData + dwLen);
+                pMediaBuf->Unlock();
+            }
+            pMediaBuf->Release();
+        }
+        if (outputDataBuffer.pEvents) outputDataBuffer.pEvents->Release();
+    }
+
+    pOutputSample->Release();
+    return SUCCEEDED(hr);
+}
 
 static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
@@ -94,7 +341,8 @@ static bool safe_send_monitor_frame(SOCKET sock,
                                     int fps,
                                     int width,
                                     int height,
-                                    const vector<unsigned char>& jpegBytes) {
+                                    const vector<unsigned char>& jpegBytes,
+                                    int format) {
     if (jpegBytes.empty())
         return false;
 
@@ -104,7 +352,7 @@ static bool safe_send_monitor_frame(SOCKET sock,
     frameHeader.fps = (uint32_t)max(0, fps);
     frameHeader.width = (uint32_t)max(0, width);
     frameHeader.height = (uint32_t)max(0, height);
-    frameHeader.format = MONITOR_FRAME_FORMAT_JPEG;
+    frameHeader.format = format;
     frameHeader.dataSize = (uint32_t)jpegBytes.size();
 
     PacketHeader packetHeader{};
@@ -440,6 +688,7 @@ static void capture_loop() {
         int targetFps = 20;
         RECT captureRect{};
         bool hasCaptureRect = false;
+        int currentFormat = MONITOR_FRAME_FORMAT_JPEG;
 
         {
             lock_guard<mutex> lock(g_captureMutex);
@@ -449,6 +698,7 @@ static void capture_loop() {
             targetFps = g_targetFps;
             captureRect = g_captureRect;
             hasCaptureRect = g_hasCaptureRect;
+            currentFormat = g_format;
         }
 
         if (!hasCaptureRect) {
@@ -457,20 +707,122 @@ static void capture_loop() {
             break;
         }
 
-        vector<unsigned char> jpegBytes;
+        vector<unsigned char> frameBytes;
         int width = 0;
         int height = 0;
         string error;
 
-        if (capture_monitor_frame(captureRect, scale, jpegBytes, width, height, error)) {
-            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, jpegBytes)) {
+        if (currentFormat == MONITOR_FRAME_FORMAT_VP9) {
+            int sourceWidth = captureRect.right - captureRect.left;
+            int sourceHeight = captureRect.bottom - captureRect.top;
+            if (sourceWidth <= 0 || sourceHeight <= 0) {
+                send_monitor_error(sock, "Invalid monitor dimensions");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            width = max(1, (sourceWidth * scale) / 100);
+            height = max(1, (sourceHeight * scale) / 100);
+
+            // Keep dimensions even
+            if (width % 2 != 0) width++;
+            if (height % 2 != 0) height++;
+
+            HDC screenDC = GetDC(NULL);
+            if (!screenDC) {
+                send_monitor_error(sock, "Screen DC could not be opened");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            HDC memoryDC = CreateCompatibleDC(screenDC);
+            if (!memoryDC) {
+                ReleaseDC(NULL, screenDC);
+                send_monitor_error(sock, "Memory DC could not be created");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            HBITMAP bitmap = CreateCompatibleBitmap(screenDC, width, height);
+            if (!bitmap) {
+                DeleteDC(memoryDC);
+                ReleaseDC(NULL, screenDC);
+                send_monitor_error(sock, "Capture bitmap could not be created");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            HGDIOBJ oldObject = SelectObject(memoryDC, bitmap);
+            SetStretchBltMode(memoryDC, COLORONCOLOR);
+
+            BOOL copied = StretchBlt(
+                memoryDC,
+                0,
+                0,
+                width,
+                height,
+                screenDC,
+                captureRect.left,
+                captureRect.top,
+                sourceWidth,
+                sourceHeight,
+                SRCCOPY | CAPTUREBLT
+            );
+
+            SelectObject(memoryDC, oldObject);
+
+            if (!copied) {
+                DeleteObject(bitmap);
+                DeleteDC(memoryDC);
+                ReleaseDC(NULL, screenDC);
+                send_monitor_error(sock, "Screen capture failed");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            BITMAPINFO bmi{};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = width;
+            bmi.bmiHeader.biHeight = -height;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            vector<uint8_t> bgrx(width * height * 4);
+            GetDIBits(screenDC, bitmap, 0, height, bgrx.data(), &bmi, DIB_RGB_COLORS);
+
+            DeleteObject(bitmap);
+            DeleteDC(memoryDC);
+            ReleaseDC(NULL, screenDC);
+
+            if (!g_wmfInitialized || g_wmfWidth != width || g_wmfHeight != height) {
+                cleanup_wmf_encoder();
+            }
+
+            if (encode_wmf_frame(bgrx.data(), width, height, g_wmfPts++, targetFps, frameBytes)) {
+                // Frame successfully encoded
+            } else {
+                error = "VP9 encoding failed via Windows Media Foundation";
+            }
+
+            if (!error.empty()) {
+                send_monitor_error(sock, error);
                 g_captureRunning.store(false);
                 break;
             }
         } else {
-            send_monitor_error(sock, error.empty() ? "Capture failed" : error);
-            g_captureRunning.store(false);
-            break;
+            if (!capture_monitor_frame(captureRect, scale, frameBytes, width, height, error)) {
+                send_monitor_error(sock, error.empty() ? "Capture failed" : error);
+                g_captureRunning.store(false);
+                break;
+            }
+        }
+
+        if (!frameBytes.empty()) {
+            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, frameBytes, currentFormat)) {
+                g_captureRunning.store(false);
+                break;
+            }
         }
 
         DWORD elapsed = now_ms() - frameStart;
@@ -497,9 +849,10 @@ static void stop_capture_thread() {
 
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
+    cleanup_wmf_encoder();
 }
 
-static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
+static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps, int format) {
     scalePercent = clamp_int(scalePercent, 10, 100);
     int targetFps = requestedFps > 0
         ? clamp_int(requestedFps, 20, 30)
@@ -513,12 +866,17 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
 
     int safeMonitorIndex = clamp_int(monitorIndex, 0, (int)monitors.size() - 1);
 
+    if (format == MONITOR_FRAME_FORMAT_VP9) {
+        // Native Windows Media Foundation VP9 encoder will be initialized in capture thread
+    }
+
     {
         lock_guard<mutex> lock(g_captureMutex);
         g_captureSocket = sock;
         g_monitorIndex = safeMonitorIndex;
         g_scalePercent = scalePercent;
         g_targetFps = targetFps;
+        g_format = format;
         g_captureRect = monitors[(size_t)safeMonitorIndex].rect;
         g_hasCaptureRect = true;
     }
@@ -613,7 +971,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             int monitor = command.value("monitor", 0);
             int scale = command.value("scale", 50);
             int fps = command.value("fps", 0);
-            start_capture(sock, monitor, scale, fps);
+            string formatStr = command.value("format", "JPEG");
+            int format = MONITOR_FRAME_FORMAT_JPEG;
+            if (formatStr == "VP9") {
+                format = MONITOR_FRAME_FORMAT_VP9;
+            }
+            start_capture(sock, monitor, scale, fps, format);
             return;
         }
 
