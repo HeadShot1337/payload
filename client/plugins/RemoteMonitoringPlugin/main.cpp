@@ -1,6 +1,11 @@
-#define WIN32_LEAN_AND_MEAN
+﻿#define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
+#include <setjmp.h>
+
+extern "C" int _setjmp(void* env, void* frame) {
+    return __builtin_setjmp(env);
+}
 #include <propidl.h>
 #include <gdiplus.h>
 #include <objidl.h>
