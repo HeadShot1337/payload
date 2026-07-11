@@ -52,6 +52,219 @@ struct MonitorFrameHeader {
 static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_MONITOR_FRAME = 0x03;
 static const uint32_t MONITOR_FRAME_FORMAT_JPEG = 1;
+static const uint32_t MONITOR_FRAME_FORMAT_VP9 = 4;
+static int g_format = MONITOR_FRAME_FORMAT_JPEG;
+
+// --- Minimal libvpx Dynamic Loading Layer ---
+typedef void* vpx_codec_iface_t;
+typedef void* vpx_codec_iter_t;
+
+typedef enum vpx_img_fmt {
+    VPX_IMG_FMT_NONE,
+    VPX_IMG_FMT_YV12 = 0x301,
+    VPX_IMG_FMT_I420 = 0x102
+} vpx_img_fmt_t;
+
+typedef struct vpx_image {
+    vpx_img_fmt_t fmt;
+    int w;
+    int h;
+    int d_w;
+    int d_h;
+    int x_chroma_shift;
+    int y_chroma_shift;
+    unsigned char *planes[4];
+    int stride[4];
+    int bps;
+    int user_priv;
+    unsigned char *img_data;
+    int img_data_owner;
+    int self_allocd;
+    void *fb_priv;
+} vpx_image_t;
+
+typedef struct vpx_codec_ctx {
+    const char *name;
+    vpx_codec_iface_t *iface;
+    uint32_t err;
+    const char *err_detail;
+    uint32_t init_flags;
+    union {
+        void *priv;
+        void *priv_enc;
+        void *priv_dec;
+    } priv;
+} vpx_codec_ctx_t;
+
+typedef struct vpx_codec_enc_cfg {
+    unsigned int g_usage;
+    unsigned int g_threads;
+    unsigned int g_profile;
+    unsigned int g_w;
+    unsigned int g_h;
+    struct {
+        unsigned int num;
+        unsigned int den;
+    } g_timebase;
+    unsigned int g_error_resilient;
+    unsigned int g_pass;
+    unsigned int g_lag_in_frames;
+    unsigned int rc_dropframe_thresh;
+    unsigned int rc_resize_allowed;
+    unsigned int rc_scaled_width;
+    unsigned int rc_scaled_height;
+    unsigned int rc_resize_up_thresh;
+    unsigned int rc_resize_down_thresh;
+    unsigned int rc_end_usage;
+    unsigned int rc_target_bitrate;
+    unsigned int rc_min_quantizer;
+    unsigned int rc_max_quantizer;
+    unsigned int rc_undershoot_pct;
+    unsigned int rc_overshoot_pct;
+    unsigned int rc_buf_sz;
+    unsigned int rc_buf_initial_sz;
+    unsigned int rc_buf_optimal_sz;
+    unsigned int rc_2pass_vbr_bias_pct;
+    unsigned int rc_2pass_vbr_minsection_pct;
+    unsigned int rc_2pass_vbr_maxsection_pct;
+    unsigned int kf_mode;
+    unsigned int kf_min_dist;
+    unsigned int kf_max_dist;
+    unsigned int ss_number_layers;
+    unsigned int ss_enable_auto_alt_ref[8];
+    unsigned int ss_target_bitrate[8];
+    unsigned int ts_number_layers;
+    unsigned int ts_target_bitrate[16];
+    unsigned int ts_rate_decimator[16];
+    unsigned int ts_periodicity;
+    unsigned int ts_layer_id[16];
+    unsigned int layer_target_bitrate[12];
+    int temporal_use_sandbox;
+    unsigned char reserved[256];
+} vpx_codec_enc_cfg_t;
+
+typedef struct vpx_codec_cx_pkt {
+    int kind;
+    union {
+        struct {
+            void *buf;
+            size_t sz;
+            int64_t pts;
+            unsigned long duration;
+            int flags;
+            int partition_id;
+        } frame;
+    } data;
+} vpx_codec_cx_pkt_t;
+
+typedef vpx_codec_iface_t* (*PFN_vpx_codec_vp9_cx)();
+typedef int (*PFN_vpx_codec_enc_config_default)(vpx_codec_iface_t* iface, vpx_codec_enc_cfg_t* cfg, unsigned int usage);
+typedef int (*PFN_vpx_codec_enc_init_ver)(vpx_codec_ctx_t* ctx, vpx_codec_iface_t* iface, const vpx_codec_enc_cfg_t* cfg, long flags, int ver);
+typedef int (*PFN_vpx_codec_encode)(vpx_codec_ctx_t* ctx, const vpx_image_t* img, int64_t pts, unsigned long duration, long flags, unsigned long deadline);
+typedef const vpx_codec_cx_pkt_t* (*PFN_vpx_codec_get_cx_data)(vpx_codec_ctx_t* ctx, vpx_codec_iter_t* iter);
+typedef int (*PFN_vpx_codec_destroy)(vpx_codec_ctx_t* ctx);
+typedef vpx_image_t* (*PFN_vpx_img_alloc)(vpx_image_t* img, vpx_img_fmt_t fmt, unsigned int d_w, unsigned int d_h, unsigned int align);
+typedef void (*PFN_vpx_img_free)(vpx_image_t* img);
+
+static HMODULE g_hVpxDll = NULL;
+static PFN_vpx_codec_vp9_cx p_vpx_codec_vp9_cx = NULL;
+static PFN_vpx_codec_enc_config_default p_vpx_codec_enc_config_default = NULL;
+static PFN_vpx_codec_enc_init_ver p_vpx_codec_enc_init_ver = NULL;
+static PFN_vpx_codec_encode p_vpx_codec_encode = NULL;
+static PFN_vpx_codec_get_cx_data p_vpx_codec_get_cx_data = NULL;
+static PFN_vpx_codec_destroy p_vpx_codec_destroy = NULL;
+static PFN_vpx_img_alloc p_vpx_img_alloc = NULL;
+static PFN_vpx_img_free p_vpx_img_free = NULL;
+
+static bool load_vpx_dll() {
+    if (g_hVpxDll) return true;
+    const wchar_t* dllNames[] = { L"libvpx.dll", L"vpx.dll", L"libvpx-1.dll" };
+    for (const auto& name : dllNames) {
+        g_hVpxDll = LoadLibraryW(name);
+        if (g_hVpxDll) break;
+    }
+    if (!g_hVpxDll) return false;
+
+    p_vpx_codec_vp9_cx = (PFN_vpx_codec_vp9_cx)GetProcAddress(g_hVpxDll, "vpx_codec_vp9_cx");
+    p_vpx_codec_enc_config_default = (PFN_vpx_codec_enc_config_default)GetProcAddress(g_hVpxDll, "vpx_codec_enc_config_default");
+    p_vpx_codec_enc_init_ver = (PFN_vpx_codec_enc_init_ver)GetProcAddress(g_hVpxDll, "vpx_codec_enc_init_ver");
+    p_vpx_codec_encode = (PFN_vpx_codec_encode)GetProcAddress(g_hVpxDll, "vpx_codec_encode");
+    p_vpx_codec_get_cx_data = (PFN_vpx_codec_get_cx_data)GetProcAddress(g_hVpxDll, "vpx_codec_get_cx_data");
+    p_vpx_codec_destroy = (PFN_vpx_codec_destroy)GetProcAddress(g_hVpxDll, "vpx_codec_destroy");
+    p_vpx_img_alloc = (PFN_vpx_img_alloc)GetProcAddress(g_hVpxDll, "vpx_img_alloc");
+    p_vpx_img_free = (PFN_vpx_img_free)GetProcAddress(g_hVpxDll, "vpx_img_free");
+
+    if (!p_vpx_codec_vp9_cx || !p_vpx_codec_enc_config_default || !p_vpx_codec_enc_init_ver ||
+        !p_vpx_codec_encode || !p_vpx_codec_get_cx_data || !p_vpx_codec_destroy ||
+        !p_vpx_img_alloc || !p_vpx_img_free) {
+        FreeLibrary(g_hVpxDll);
+        g_hVpxDll = NULL;
+        return false;
+    }
+    return true;
+}
+
+static bool g_vpxInitialized = false;
+static vpx_codec_ctx_t g_vpxCtx{};
+static vpx_image_t g_vpxImg{};
+static int64_t g_vpxPts = 0;
+static int g_vpxWidth = 0;
+static int g_vpxHeight = 0;
+
+static void cleanup_vpx() {
+    if (g_vpxInitialized) {
+        if (p_vpx_codec_destroy) {
+            p_vpx_codec_destroy(&g_vpxCtx);
+        }
+        if (p_vpx_img_free) {
+            p_vpx_img_free(&g_vpxImg);
+        }
+        g_vpxInitialized = false;
+    }
+    g_vpxPts = 0;
+    g_vpxWidth = 0;
+    g_vpxHeight = 0;
+}
+
+static void bgrx_to_i420(const uint8_t* bgrx, int width, int height, uint8_t* dst_y, uint8_t* dst_u, uint8_t* dst_v, int stride_y, int stride_u, int stride_v) {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int src_idx = (y * width + x) * 4;
+            uint8_t b = bgrx[src_idx];
+            uint8_t g = bgrx[src_idx + 1];
+            uint8_t r = bgrx[src_idx + 2];
+
+            int Y = (int)(0.299 * r + 0.587 * g + 0.114 * b);
+            dst_y[y * stride_y + x] = (uint8_t)(Y < 0 ? 0 : (Y > 255 ? 255 : Y));
+
+            if ((y % 2 == 0) && (x % 2 == 0)) {
+                int r_sum = 0, g_sum = 0, b_sum = 0, count = 0;
+                for (int dy = 0; dy < 2; ++dy) {
+                    for (int dx = 0; dx < 2; ++dx) {
+                        int ny = y + dy;
+                        int nx = x + dx;
+                        if (ny < height && nx < width) {
+                            int idx = (ny * width + nx) * 4;
+                            b_sum += bgrx[idx];
+                            g_sum += bgrx[idx + 1];
+                            r_sum += bgrx[idx + 2];
+                            count++;
+                        }
+                    }
+                }
+                int avg_b = b_sum / count;
+                int avg_g = g_sum / count;
+                int avg_r = r_sum / count;
+
+                int U = (int)(-0.169 * avg_r - 0.331 * avg_g + 0.500 * avg_b + 128);
+                int V = (int)(0.500 * avg_r - 0.419 * avg_g - 0.081 * avg_b + 128);
+
+                dst_u[(y / 2) * stride_u + (x / 2)] = (uint8_t)(U < 0 ? 0 : (U > 255 ? 255 : U));
+                dst_v[(y / 2) * stride_v + (x / 2)] = (uint8_t)(V < 0 ? 0 : (V > 255 ? 255 : V));
+            }
+        }
+    }
+}
 
 static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
@@ -94,7 +307,8 @@ static bool safe_send_monitor_frame(SOCKET sock,
                                     int fps,
                                     int width,
                                     int height,
-                                    const vector<unsigned char>& jpegBytes) {
+                                    const vector<unsigned char>& jpegBytes,
+                                    int format) {
     if (jpegBytes.empty())
         return false;
 
@@ -104,7 +318,7 @@ static bool safe_send_monitor_frame(SOCKET sock,
     frameHeader.fps = (uint32_t)max(0, fps);
     frameHeader.width = (uint32_t)max(0, width);
     frameHeader.height = (uint32_t)max(0, height);
-    frameHeader.format = MONITOR_FRAME_FORMAT_JPEG;
+    frameHeader.format = format;
     frameHeader.dataSize = (uint32_t)jpegBytes.size();
 
     PacketHeader packetHeader{};
@@ -440,6 +654,7 @@ static void capture_loop() {
         int targetFps = 20;
         RECT captureRect{};
         bool hasCaptureRect = false;
+        int currentFormat = MONITOR_FRAME_FORMAT_JPEG;
 
         {
             lock_guard<mutex> lock(g_captureMutex);
@@ -449,6 +664,7 @@ static void capture_loop() {
             targetFps = g_targetFps;
             captureRect = g_captureRect;
             hasCaptureRect = g_hasCaptureRect;
+            currentFormat = g_format;
         }
 
         if (!hasCaptureRect) {
@@ -457,20 +673,173 @@ static void capture_loop() {
             break;
         }
 
-        vector<unsigned char> jpegBytes;
+        vector<unsigned char> frameBytes;
         int width = 0;
         int height = 0;
         string error;
 
-        if (capture_monitor_frame(captureRect, scale, jpegBytes, width, height, error)) {
-            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, jpegBytes)) {
+        if (currentFormat == MONITOR_FRAME_FORMAT_VP9) {
+            int sourceWidth = captureRect.right - captureRect.left;
+            int sourceHeight = captureRect.bottom - captureRect.top;
+            if (sourceWidth <= 0 || sourceHeight <= 0) {
+                send_monitor_error(sock, "Invalid monitor dimensions");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            width = max(1, (sourceWidth * scale) / 100);
+            height = max(1, (sourceHeight * scale) / 100);
+
+            // Keep dimensions even
+            if (width % 2 != 0) width++;
+            if (height % 2 != 0) height++;
+
+            HDC screenDC = GetDC(NULL);
+            if (!screenDC) {
+                send_monitor_error(sock, "Screen DC could not be opened");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            HDC memoryDC = CreateCompatibleDC(screenDC);
+            if (!memoryDC) {
+                ReleaseDC(NULL, screenDC);
+                send_monitor_error(sock, "Memory DC could not be created");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            HBITMAP bitmap = CreateCompatibleBitmap(screenDC, width, height);
+            if (!bitmap) {
+                DeleteDC(memoryDC);
+                ReleaseDC(NULL, screenDC);
+                send_monitor_error(sock, "Capture bitmap could not be created");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            HGDIOBJ oldObject = SelectObject(memoryDC, bitmap);
+            SetStretchBltMode(memoryDC, COLORONCOLOR);
+
+            BOOL copied = StretchBlt(
+                memoryDC,
+                0,
+                0,
+                width,
+                height,
+                screenDC,
+                captureRect.left,
+                captureRect.top,
+                sourceWidth,
+                sourceHeight,
+                SRCOPY | CAPTUREBLT
+            );
+
+            SelectObject(memoryDC, oldObject);
+
+            if (!copied) {
+                DeleteObject(bitmap);
+                DeleteDC(memoryDC);
+                ReleaseDC(NULL, screenDC);
+                send_monitor_error(sock, "Screen capture failed");
+                g_captureRunning.store(false);
+                break;
+            }
+
+            BITMAPINFO bmi{};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = width;
+            bmi.bmiHeader.biHeight = -height;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            vector<uint8_t> bgrx(width * height * 4);
+            GetDIBits(screenDC, bitmap, 0, height, bgrx.data(), &bmi, DIB_RGB_COLORS);
+
+            DeleteObject(bitmap);
+            DeleteDC(memoryDC);
+            ReleaseDC(NULL, screenDC);
+
+            if (!g_vpxInitialized || g_vpxWidth != width || g_vpxHeight != height) {
+                cleanup_vpx();
+
+                vpx_codec_enc_cfg_t cfg{};
+                int config_res = p_vpx_codec_enc_config_default(p_vpx_codec_vp9_cx(), &cfg, 0);
+                if (config_res == 0) {
+                    cfg.g_w = width;
+                    cfg.g_h = height;
+                    cfg.g_timebase.num = 1;
+                    cfg.g_timebase.den = clamp_int(targetFps, 1, 100);
+                    cfg.g_threads = 4;
+                    cfg.rc_end_usage = 0;
+                    cfg.g_lag_in_frames = 0;
+                    cfg.rc_target_bitrate = 1000;
+
+                    int init_res = -1;
+                    for (int ver = 1; ver <= 20; ++ver) {
+                        init_res = p_vpx_codec_enc_init_ver(&g_vpxCtx, p_vpx_codec_vp9_cx(), &cfg, 0, ver);
+                        if (init_res == 0) {
+                            break;
+                        }
+                    }
+
+                    if (init_res == 0) {
+                        p_vpx_img_alloc(&g_vpxImg, VPX_IMG_FMT_I420, width, height, 1);
+                        g_vpxWidth = width;
+                        g_vpxHeight = height;
+                        g_vpxInitialized = true;
+                    } else {
+                        error = "VP9 encoder initialization failed (code: " + to_string(init_res) + ")";
+                    }
+                } else {
+                    error = "VP9 encoder config default failed (code: " + to_string(config_res) + ")";
+                }
+            }
+
+            if (g_vpxInitialized) {
+                bgrx_to_i420(bgrx.data(), width, height,
+                             g_vpxImg.planes[0], g_vpxImg.planes[1], g_vpxImg.planes[2],
+                             g_vpxImg.stride[0], g_vpxImg.stride[1], g_vpxImg.stride[2]);
+
+                int flags = 0;
+                if (g_vpxPts % 60 == 0) {
+                    flags |= 1;
+                }
+
+                int encode_res = p_vpx_codec_encode(&g_vpxCtx, &g_vpxImg, g_vpxPts++, 1, flags, 1);
+                if (encode_res == 0) {
+                    vpx_codec_iter_t iter = NULL;
+                    const vpx_codec_cx_pkt_t* pkt;
+                    while ((pkt = p_vpx_codec_get_cx_data(&g_vpxCtx, &iter)) != NULL) {
+                        if (pkt->kind == 0) {
+                            const unsigned char* pkt_buf = (const unsigned char*)pkt->data.frame.buf;
+                            frameBytes.insert(frameBytes.end(), pkt_buf, pkt_buf + pkt->data.frame.sz);
+                        }
+                    }
+                } else {
+                    error = "VP9 encoding failed (code: " + to_string(encode_res) + ")";
+                }
+            }
+
+            if (!error.empty()) {
+                send_monitor_error(sock, error);
                 g_captureRunning.store(false);
                 break;
             }
         } else {
-            send_monitor_error(sock, error.empty() ? "Capture failed" : error);
-            g_captureRunning.store(false);
-            break;
+            if (!capture_monitor_frame(captureRect, scale, frameBytes, width, height, error)) {
+                send_monitor_error(sock, error.empty() ? "Capture failed" : error);
+                g_captureRunning.store(false);
+                break;
+            }
+        }
+
+        if (!frameBytes.empty()) {
+            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, frameBytes, currentFormat)) {
+                g_captureRunning.store(false);
+                break;
+            }
         }
 
         DWORD elapsed = now_ms() - frameStart;
@@ -497,9 +866,10 @@ static void stop_capture_thread() {
 
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
+    cleanup_vpx();
 }
 
-static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
+static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps, int format) {
     scalePercent = clamp_int(scalePercent, 10, 100);
     int targetFps = requestedFps > 0
         ? clamp_int(requestedFps, 20, 30)
@@ -513,12 +883,20 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
 
     int safeMonitorIndex = clamp_int(monitorIndex, 0, (int)monitors.size() - 1);
 
+    if (format == MONITOR_FRAME_FORMAT_VP9) {
+        if (!load_vpx_dll()) {
+            send_monitor_error(sock, "VP9 codec (libvpx.dll / vpx.dll) could not be loaded. Please place libvpx.dll in the plugin or client folder.");
+            return;
+        }
+    }
+
     {
         lock_guard<mutex> lock(g_captureMutex);
         g_captureSocket = sock;
         g_monitorIndex = safeMonitorIndex;
         g_scalePercent = scalePercent;
         g_targetFps = targetFps;
+        g_format = format;
         g_captureRect = monitors[(size_t)safeMonitorIndex].rect;
         g_hasCaptureRect = true;
     }
@@ -613,7 +991,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             int monitor = command.value("monitor", 0);
             int scale = command.value("scale", 50);
             int fps = command.value("fps", 0);
-            start_capture(sock, monitor, scale, fps);
+            string formatStr = command.value("format", "JPEG");
+            int format = MONITOR_FRAME_FORMAT_JPEG;
+            if (formatStr == "VP9") {
+                format = MONITOR_FRAME_FORMAT_VP9;
+            }
+            start_capture(sock, monitor, scale, fps, format);
             return;
         }
 

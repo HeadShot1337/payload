@@ -21,6 +21,44 @@ type
   end;
 
 type
+  vpx_codec_iface_t = Pointer;
+  vpx_codec_iter_t = Pointer;
+
+  vpx_codec_ctx_t = record
+    name: PAnsiChar;
+    iface: Pointer;
+    err: Cardinal;
+    err_detail: PAnsiChar;
+    init_flags: Cardinal;
+    priv_dec: Pointer;
+  end;
+
+  pvpx_image_t = ^vpx_image_t;
+  vpx_image_t = record
+    fmt: Integer;
+    w: Integer;
+    h: Integer;
+    d_w: Integer;
+    d_h: Integer;
+    x_chroma_shift: Integer;
+    y_chroma_shift: Integer;
+    planes: array[0..3] of PByte;
+    stride: array[0..3] of Integer;
+    bps: Integer;
+    user_priv: Integer;
+    img_data: PByte;
+    img_data_owner: Integer;
+    self_allocd: Integer;
+    fb_priv: Pointer;
+  end;
+
+  TFn_vpx_codec_vp9_dx = function: vpx_codec_iface_t; cdecl;
+  TFn_vpx_codec_dec_init_ver = function(ctx: Pointer; iface: vpx_codec_iface_t; cfg: Pointer; flags: LongInt; ver: Integer): Integer; cdecl;
+  TFn_vpx_codec_decode = function(ctx: Pointer; const data: PByte; data_sz: Cardinal; user_priv: Pointer; deadline: LongInt): Integer; cdecl;
+  TFn_vpx_codec_get_frame = function(ctx: Pointer; iter: Pointer): pvpx_image_t; cdecl;
+  TFn_vpx_codec_destroy = function(ctx: Pointer): Integer; cdecl;
+
+type
   TForm6 = class(TForm)
     StatusBar1: TStatusBar;
     Panel1: TPanel;
@@ -30,9 +68,11 @@ type
     CheckBox2: TCheckBox;
     ComboBox2: TComboBox;
     PaintBox1: TPaintBox;          // DFM'de kalır ama gizlenecek
+    ComboBox3: TComboBox;
     procedure Button1Click(Sender: TObject);
     procedure ComboBox1Change(Sender: TObject);
     procedure ComboBox2Change(Sender: TObject);
+    procedure ComboBox3Change(Sender: TObject);
   private
     FLine             : TncLine;
     FClientID         : string;
@@ -44,6 +84,7 @@ type
     FFrameTimer       : TTimer;
     FPendingFrame     : string;
     FPendingFrameBytes: TBytes;
+    FPendingFrameFormat: Integer;
     FFrameLock        : TCriticalSection;
     FDecodeEvent      : TEvent;
     FDecodeThread     : TThread;
@@ -54,6 +95,10 @@ type
     FPaintBox         : TNoFlickerPaintBox; // Gerçek görüntü alanı
     FLastMouseMoveTick: UInt64;
 
+    FVpxDecInitialized: Boolean;
+    FVpxDecCtx         : vpx_codec_ctx_t;
+
+    function  SelectedFormat: string;
     procedure FillDefaultOptions;
     procedure SendMonitoringCommand(const AAction: string);
     function  SelectedMonitorIndex: Integer;
@@ -68,7 +113,7 @@ type
     procedure StartFrameWorker;
     procedure StopFrameWorker;
     procedure DecodeFrameWorker;
-    function  TakePendingFrame(out AText: string; out ABytes: TBytes): Boolean;
+    function  TakePendingFrame(out AText: string; out ABytes: TBytes; out AFormat: Integer): Boolean;
     function  TakeDecodedFrame(out ABitmap: TBitmap; out AFrameSize: Integer): Boolean;
     procedure UpdateStatusBar;
     procedure UpdateButtonCaption;
@@ -90,7 +135,7 @@ type
     procedure RequestMonitorList;
     procedure RequestCaptureStart;
     procedure RequestCaptureStop;
-    procedure QueueFrameBytes(const ABytes: TBytes);
+    procedure QueueFrameBytes(const ABytes: TBytes; AFormat: Integer = 1);
     procedure HandleMonitoringJSON(JSONObj: TJSONObject);
   end;
 
@@ -100,6 +145,46 @@ var
 implementation
 
 {$R *.dfm}
+
+var
+  hVpxDll: HMODULE = 0;
+  vpx_codec_vp9_dx: TFn_vpx_codec_vp9_dx = nil;
+  vpx_codec_dec_init_ver: TFn_vpx_codec_dec_init_ver = nil;
+  vpx_codec_decode: TFn_vpx_codec_decode = nil;
+  vpx_codec_get_frame: TFn_vpx_codec_get_frame = nil;
+  vpx_codec_destroy: TFn_vpx_codec_destroy = nil;
+
+function LoadVpxDecoder: Boolean;
+begin
+  if hVpxDll <> 0 then
+    Exit(True);
+
+  hVpxDll := LoadLibrary('libvpx.dll');
+  if hVpxDll = 0 then
+    hVpxDll := LoadLibrary('vpx.dll');
+  if hVpxDll = 0 then
+    hVpxDll := LoadLibrary('libvpx-1.dll');
+
+  if hVpxDll <> 0 then
+  begin
+    vpx_codec_vp9_dx       := GetProcAddress(hVpxDll, 'vpx_codec_vp9_dx');
+    vpx_codec_dec_init_ver := GetProcAddress(hVpxDll, 'vpx_codec_dec_init_ver');
+    vpx_codec_decode       := GetProcAddress(hVpxDll, 'vpx_codec_decode');
+    vpx_codec_get_frame    := GetProcAddress(hVpxDll, 'vpx_codec_get_frame');
+    vpx_codec_destroy      := GetProcAddress(hVpxDll, 'vpx_codec_destroy');
+
+    if Assigned(vpx_codec_vp9_dx) and Assigned(vpx_codec_dec_init_ver) and
+       Assigned(vpx_codec_decode) and Assigned(vpx_codec_get_frame) and
+       Assigned(vpx_codec_destroy) then
+    begin
+      Exit(True);
+    end;
+
+    FreeLibrary(hVpxDll);
+    hVpxDll := 0;
+  end;
+  Result := False;
+end;
 
 { TNoFlickerPaintBox }
 
@@ -231,6 +316,8 @@ begin
   Button1.OnClick    := Button1Click;
   ComboBox1.OnChange := ComboBox1Change;
   ComboBox2.OnChange := ComboBox2Change;
+  if Assigned(ComboBox3) then
+    ComboBox3.OnChange := ComboBox3Change;
 
   FillDefaultOptions;
   UpdateButtonCaption;
@@ -258,6 +345,17 @@ begin
   end
   else if ComboBox2.ItemIndex < 0 then
     ComboBox2.ItemIndex := 0;
+
+  if Assigned(ComboBox3) then
+  begin
+    if ComboBox3.Items.Count = 0 then
+    begin
+      ComboBox3.Items.Add('JPEG');
+      ComboBox3.Items.Add('VP9');
+    end;
+    if ComboBox3.ItemIndex < 0 then
+      ComboBox3.ItemIndex := 0;
+  end;
 end;
 
 function TForm6.SelectedScalePercent: Integer;
@@ -292,6 +390,7 @@ begin
     JSONObj.AddPair('action',  AAction);
     JSONObj.AddPair('monitor', TJSONNumber.Create(SelectedMonitorIndex));
     JSONObj.AddPair('scale',   TJSONNumber.Create(SelectedScalePercent));
+    JSONObj.AddPair('format',  SelectedFormat);
     FOnSendJSON(FLine, JSONObj);
   finally
     JSONObj.Free;
@@ -357,6 +456,20 @@ begin
     SendMonitoringCommand('monitorstart');
 end;
 
+procedure TForm6.ComboBox3Change(Sender: TObject);
+begin
+  if FCapturing then
+    SendMonitoringCommand('monitorstart');
+end;
+
+function TForm6.SelectedFormat: string;
+begin
+  if Assigned(ComboBox3) and (ComboBox3.ItemIndex >= 0) then
+    Result := ComboBox3.Items[ComboBox3.ItemIndex]
+  else
+    Result := 'JPEG';
+end;
+
 function TForm6.JSONValueText(JSONObj: TJSONObject; const AName: string): string;
 var
   Val: TJSONValue;
@@ -388,7 +501,7 @@ begin
   end;
 end;
 
-procedure TForm6.QueueFrameBytes(const ABytes: TBytes);
+procedure TForm6.QueueFrameBytes(const ABytes: TBytes; AFormat: Integer);
 begin
   if Length(ABytes) = 0 then
     Exit;
@@ -397,8 +510,9 @@ begin
 
   FFrameLock.Enter;
   try
-    FPendingFrame      := '';
-    FPendingFrameBytes := Copy(ABytes, 0, Length(ABytes));
+    FPendingFrame       := '';
+    FPendingFrameBytes  := Copy(ABytes, 0, Length(ABytes));
+    FPendingFrameFormat := AFormat;
     if Assigned(FDecodeEvent) then
       FDecodeEvent.SetEvent;
   finally
@@ -567,13 +681,21 @@ begin
     FDecodeThread.WaitFor;
     FreeAndNil(FDecodeThread);
   end;
+
+  if FVpxDecInitialized then
+  begin
+    if Assigned(vpx_codec_destroy) then
+      vpx_codec_destroy(@FVpxDecCtx);
+    FVpxDecInitialized := False;
+  end;
 end;
 
-function TForm6.TakePendingFrame(out AText: string; out ABytes: TBytes): Boolean;
+function TForm6.TakePendingFrame(out AText: string; out ABytes: TBytes; out AFormat: Integer): Boolean;
 begin
   Result := False;
   AText  := '';
   SetLength(ABytes, 0);
+  AFormat := 1;
 
   if not Assigned(FFrameLock) then
     Exit;
@@ -582,15 +704,17 @@ begin
   try
     if Length(FPendingFrameBytes) > 0 then
     begin
-      ABytes := FPendingFrameBytes;
+      ABytes  := FPendingFrameBytes;
       SetLength(FPendingFrameBytes, 0);
       FPendingFrame := '';
-      Result := True;
+      AFormat := FPendingFrameFormat;
+      Result  := True;
     end
     else if FPendingFrame <> '' then
     begin
       AText         := FPendingFrame;
       FPendingFrame := '';
+      AFormat       := 1;
       Result        := True;
     end;
 
@@ -628,25 +752,106 @@ end;
 
 procedure TForm6.DecodeFrameWorker;
 var
-  Text     : string;
-  Bytes    : TBytes;
-  Decoded  : TBitmap;
-  FrameSize: Integer;
+  Text       : string;
+  Bytes      : TBytes;
+  Decoded    : TBitmap;
+  FrameSize  : Integer;
+  FrameFormat: Integer;
+  Res, Ver   : Integer;
+  iter       : Pointer;
+  img        : pvpx_image_t;
+  y, x       : Integer;
+  rowPtr     : PByte;
+  YVal, UVal, VVal : Byte;
+  CVal, DVal, EVal : Integer;
+  RVal, GVal, BVal : Integer;
 begin
   while not FDecodeStopping do
   begin
     if Assigned(FDecodeEvent) then
       FDecodeEvent.WaitFor(100);
 
-    while (not FDecodeStopping) and TakePendingFrame(Text, Bytes) do
+    while (not FDecodeStopping) and TakePendingFrame(Text, Bytes, FrameFormat) do
     begin
       if (Length(Bytes) = 0) and (Text <> '') then
+      begin
         DecodeBase64Image(Text, Bytes);
+        FrameFormat := 1;
+      end;
 
       FrameSize := Length(Bytes);
-      Decoded   := nil;
+      if FrameSize = 0 then
+        Continue;
+
+      Decoded := nil;
       try
-        if DecodeFrameToBitmap(Bytes, Decoded) then
+        if FrameFormat = 4 then
+        begin
+          if not FVpxDecInitialized then
+          begin
+            if LoadVpxDecoder then
+            begin
+              Res := -1;
+              for Ver := 1 to 20 do
+              begin
+                Res := vpx_codec_dec_init_ver(@FVpxDecCtx, vpx_codec_vp9_dx(), nil, 0, Ver);
+                if Res = 0 then
+                  Break;
+              end;
+              if Res = 0 then
+                FVpxDecInitialized := True;
+            end;
+          end;
+
+          if FVpxDecInitialized then
+          begin
+            Res := vpx_codec_decode(@FVpxDecCtx, @Bytes[0], FrameSize, nil, 0);
+            if Res = 0 then
+            begin
+              iter := nil;
+              img := vpx_codec_get_frame(@FVpxDecCtx, @iter);
+              if img <> nil then
+              begin
+                Decoded := TBitmap.Create;
+                Decoded.PixelFormat := pf24bit;
+                Decoded.SetSize(img.w, img.h);
+
+                for y := 0 to img.h - 1 do
+                begin
+                  rowPtr := Decoded.ScanLine[y];
+                  for x := 0 to img.w - 1 do
+                  begin
+                    YVal := img.planes[0][y * img.stride[0] + x];
+                    UVal := img.planes[1][(y div 2) * img.stride[1] + (x div 2)];
+                    VVal := img.planes[2][(y div 2) * img.stride[2] + (x div 2)];
+
+                    CVal := YVal - 16;
+                    DVal := UVal - 128;
+                    EVal := VVal - 128;
+
+                    RVal := (298 * CVal             + 409 * EVal + 128) shr 8;
+                    GVal := (298 * CVal - 100 * DVal - 208 * EVal + 128) shr 8;
+                    BVal := (298 * CVal + 516 * DVal             + 128) shr 8;
+
+                    if RVal < 0 then RVal := 0 else if RVal > 255 then RVal := 255;
+                    if GVal < 0 then GVal := 0 else if GVal > 255 then GVal := 255;
+                    if BVal < 0 then BVal := 0 else if BVal > 255 then BVal := 255;
+
+                    rowPtr[x * 3]     := BVal;
+                    rowPtr[x * 3 + 1] := GVal;
+                    rowPtr[x * 3 + 2] := RVal;
+                  end;
+                end;
+              end;
+            end;
+          end;
+        end
+        else
+        begin
+          DecodeFrameToBitmap(Bytes, Decoded);
+        end;
+
+        if Assigned(Decoded) then
         begin
           FFrameLock.Enter;
           try
