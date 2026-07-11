@@ -276,6 +276,16 @@ implementation
 
 {$R *.dfm}
 
+function FAILED(hr: HResult): Boolean; inline;
+begin
+  Result := hr < 0;
+end;
+
+function SUCCEEDED(hr: HResult): Boolean; inline;
+begin
+  Result := hr >= 0;
+end;
+
 var
   MFStartup: function(Version: Cardinal; dwFlags: Cardinal = 0): HResult; stdcall = nil;
   MFShutdown: function: HResult; stdcall = nil;
