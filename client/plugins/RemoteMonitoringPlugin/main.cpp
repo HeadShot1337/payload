@@ -1,4 +1,4 @@
-﻿#define WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
 #include <propidl.h>
@@ -175,111 +175,16 @@ typedef struct vpx_codec_ctx {
 
 typedef const void *vpx_codec_iter_t;
 
-typedef vpx_codec_iface_t* (*pfn_vpx_codec_vp9_cx_t)(void);
-typedef vpx_codec_err_t (*pfn_vpx_codec_enc_config_default_t)(vpx_codec_iface_t *iface, vpx_codec_enc_cfg_t *cfg, unsigned int usage);
-typedef vpx_codec_err_t (*pfn_vpx_codec_enc_init_ver_t)(vpx_codec_ctx_t *ctx, vpx_codec_iface_t *iface, const vpx_codec_enc_cfg_t *cfg, vpx_codec_flags_t flags, int ver);
-typedef vpx_codec_err_t (*pfn_vpx_codec_encode_t)(vpx_codec_ctx_t *ctx, const vpx_image_t *img, vpx_codec_pts_t pts, unsigned long duration, vpx_codec_frame_flags_t flags, unsigned long deadline);
-typedef const vpx_codec_cx_pkt_t* (*pfn_vpx_codec_get_cx_data_t)(vpx_codec_ctx_t *ctx, vpx_codec_iter_t *iter);
-typedef vpx_codec_err_t (*pfn_vpx_codec_destroy_t)(vpx_codec_ctx_t *ctx);
-typedef vpx_image_t* (*pfn_vpx_img_alloc_t)(vpx_image_t *img, vpx_img_fmt_t fmt, unsigned int d_w, unsigned int d_h, unsigned int align);
-typedef void (*pfn_vpx_img_free_t)(vpx_image_t *img);
-
-#include "libvpx_payload.h"
-
-static vector<uint8_t> base64_decode(const string& in) {
-    vector<uint8_t> out;
-    vector<int> T(256, -1);
-    for (int i = 0; i < 64; i++) T["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i]] = i;
-
-    int val = 0, valb = -8;
-    for (char c : in) {
-        if (T[c] == -1) continue;
-        val = (val << 6) + T[c];
-        valb += 6;
-        if (valb >= 0) {
-            out.push_back((val >> valb) & 0xFF);
-            valb -= 8;
-        }
-    }
-    return out;
+extern "C" {
+    vpx_codec_iface_t* vpx_codec_vp9_cx(void);
+    vpx_codec_err_t vpx_codec_enc_config_default(vpx_codec_iface_t *iface, vpx_codec_enc_cfg_t *cfg, unsigned int usage);
+    vpx_codec_err_t vpx_codec_enc_init_ver(vpx_codec_ctx_t *ctx, vpx_codec_iface_t *iface, const vpx_codec_enc_cfg_t *cfg, vpx_codec_flags_t flags, int ver);
+    vpx_codec_err_t vpx_codec_encode(vpx_codec_ctx_t *ctx, const vpx_image_t *img, vpx_codec_pts_t pts, unsigned long duration, vpx_codec_frame_flags_t flags, unsigned long deadline);
+    const vpx_codec_cx_pkt_t* vpx_codec_get_cx_data(vpx_codec_ctx_t *ctx, vpx_codec_iter_t *iter);
+    vpx_codec_err_t vpx_codec_destroy(vpx_codec_ctx_t *ctx);
+    vpx_image_t* vpx_img_alloc(vpx_image_t *img, vpx_img_fmt_t fmt, unsigned int d_w, unsigned int d_h, unsigned int align);
+    void vpx_img_free(vpx_image_t *img);
 }
-
-struct LibVpxFunctions {
-    HMODULE hModule = nullptr;
-    pfn_vpx_codec_vp9_cx_t vp9_cx = nullptr;
-    pfn_vpx_codec_enc_config_default_t enc_config_default = nullptr;
-    pfn_vpx_codec_enc_init_ver_t enc_init_ver = nullptr;
-    pfn_vpx_codec_encode_t encode = nullptr;
-    pfn_vpx_codec_get_cx_data_t get_cx_data = nullptr;
-    pfn_vpx_codec_destroy_t destroy = nullptr;
-    pfn_vpx_img_alloc_t img_alloc = nullptr;
-    pfn_vpx_img_free_t img_free = nullptr;
-
-    bool Load() {
-        if (hModule) return true;
-        const wchar_t* dlls[] = { L"libvpx.dll", L"vpx.dll", L"libvpx-1.dll" };
-        for (const auto* dll : dlls) {
-            hModule = LoadLibraryW(dll);
-            if (hModule) break;
-        }
-
-        if (!hModule) {
-            wchar_t temp_path[MAX_PATH];
-            if (GetTempPathW(MAX_PATH, temp_path) > 0) {
-                wstring target_dll = wstring(temp_path) + L"libvpx-1.dll";
-
-                bool exist_and_correct = false;
-                HANDLE hFile = CreateFileW(target_dll.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-                if (hFile != INVALID_HANDLE_VALUE) {
-                    LARGE_INTEGER sz{};
-                    if (GetFileSizeEx(hFile, &sz) && sz.QuadPart == 1574930LL) {
-                        exist_and_correct = true;
-                    }
-                    CloseHandle(hFile);
-                }
-
-                if (!exist_and_correct) {
-                    vector<uint8_t> decoded = base64_decode(LIBVPX_DLL_BASE64);
-                    if (!decoded.empty()) {
-                        HANDLE hFileWrite = CreateFileW(target_dll.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-                        if (hFileWrite != INVALID_HANDLE_VALUE) {
-                            DWORD written = 0;
-                            WriteFile(hFileWrite, decoded.data(), (DWORD)decoded.size(), &written, NULL);
-                            CloseHandle(hFileWrite);
-                        }
-                    }
-                }
-
-                hModule = LoadLibraryW(target_dll.c_str());
-            }
-        }
-
-        if (!hModule) return false;
-
-        vp9_cx = (pfn_vpx_codec_vp9_cx_t)GetProcAddress(hModule, "vpx_codec_vp9_cx");
-        enc_config_default = (pfn_vpx_codec_enc_config_default_t)GetProcAddress(hModule, "vpx_codec_enc_config_default");
-        enc_init_ver = (pfn_vpx_codec_enc_init_ver_t)GetProcAddress(hModule, "vpx_codec_enc_init_ver");
-        encode = (pfn_vpx_codec_encode_t)GetProcAddress(hModule, "vpx_codec_encode");
-        get_cx_data = (pfn_vpx_codec_get_cx_data_t)GetProcAddress(hModule, "vpx_codec_get_cx_data");
-        destroy = (pfn_vpx_codec_destroy_t)GetProcAddress(hModule, "vpx_codec_destroy");
-        img_alloc = (pfn_vpx_img_alloc_t)GetProcAddress(hModule, "vpx_img_alloc");
-        img_free = (pfn_vpx_img_free_t)GetProcAddress(hModule, "vpx_img_free");
-
-        if (!vp9_cx || !enc_config_default || !enc_init_ver || !encode || !get_cx_data || !destroy || !img_alloc || !img_free) {
-            FreeLibrary(hModule);
-            hModule = nullptr;
-            return false;
-        }
-        return true;
-    }
-
-    void Unload() {
-        if (hModule) {
-            FreeLibrary(hModule);
-            hModule = nullptr;
-        }
-    }
-};
 
 struct MonitorData {
     RECT rect{};
@@ -322,7 +227,6 @@ static RECT g_captureRect{};
 static bool g_hasCaptureRect = false;
 
 static mutex g_encoderMutex;
-static LibVpxFunctions g_vpx;
 static vpx_codec_ctx_t g_vpxEncoder{};
 static bool g_vpxEncoderInitialized = false;
 static int g_lastWidth = 0;
@@ -666,7 +570,6 @@ static bool capture_monitor_frame(const RECT& rect,
     outputWidth = max(1, (sourceWidth * scalePercent) / 100);
     outputHeight = max(1, (sourceHeight * scalePercent) / 100);
 
-    // Make dimensions even for YUV420 and video encoders
     if (outputWidth % 2 != 0) outputWidth++;
     if (outputHeight % 2 != 0) outputHeight++;
 
@@ -675,17 +578,12 @@ static bool capture_monitor_frame(const RECT& rect,
 
         if (!g_vpxEncoderInitialized || g_lastWidth != outputWidth || g_lastHeight != outputHeight || g_lastFormat != 4) {
             if (g_vpxEncoderInitialized) {
-                g_vpx.destroy(&g_vpxEncoder);
+                vpx_codec_destroy(&g_vpxEncoder);
                 g_vpxEncoderInitialized = false;
             }
 
-            if (!g_vpx.Load()) {
-                error = "vpx DLL could not be loaded";
-                return false;
-            }
-
             vpx_codec_enc_cfg_t cfg{};
-            if (g_vpx.enc_config_default(g_vpx.vp9_cx(), &cfg, 0) != VPX_CODEC_OK) {
+            if (vpx_codec_enc_config_default(vpx_codec_vp9_cx(), &cfg, 0) != VPX_CODEC_OK) {
                 error = "Failed to get default vpx config";
                 return false;
             }
@@ -703,7 +601,7 @@ static bool capture_monitor_frame(const RECT& rect,
 
             bool init_ok = false;
             for (int abi = 1; abi <= 20; ++abi) {
-                if (g_vpx.enc_init_ver(&g_vpxEncoder, g_vpx.vp9_cx(), &cfg, 0, abi) == VPX_CODEC_OK) {
+                if (vpx_codec_enc_init_ver(&g_vpxEncoder, vpx_codec_vp9_cx(), &cfg, 0, abi) == VPX_CODEC_OK) {
                     init_ok = true;
                     break;
                 }
@@ -777,7 +675,7 @@ static bool capture_monitor_frame(const RECT& rect,
         ReleaseDC(NULL, screenDC);
 
         vpx_image_t img{};
-        if (!g_vpx.img_alloc(&img, VPX_IMG_FMT_I420, outputWidth, outputHeight, 32)) {
+        if (!vpx_img_alloc(&img, VPX_IMG_FMT_I420, outputWidth, outputHeight, 32)) {
             error = "vpx image allocation failed";
             return false;
         }
@@ -786,8 +684,8 @@ static bool capture_monitor_frame(const RECT& rect,
                      img.planes[0], img.planes[1], img.planes[2],
                      img.stride[0], img.stride[1], img.stride[2]);
 
-        vpx_codec_err_t enc_res = g_vpx.encode(&g_vpxEncoder, &img, g_vpxPts++, 33, 0, 1); // VPX_DL_REALTIME = 1
-        g_vpx.img_free(&img);
+        vpx_codec_err_t enc_res = vpx_codec_encode(&g_vpxEncoder, &img, g_vpxPts++, 33, 0, 1); // VPX_DL_REALTIME = 1
+        vpx_img_free(&img);
 
         if (enc_res != VPX_CODEC_OK) {
             error = "vpx encode failed";
@@ -796,7 +694,7 @@ static bool capture_monitor_frame(const RECT& rect,
 
         vpx_codec_iter_t iter = nullptr;
         const vpx_codec_cx_pkt_t* pkt = nullptr;
-        while ((pkt = g_vpx.get_cx_data(&g_vpxEncoder, &iter)) != nullptr) {
+        while ((pkt = vpx_codec_get_cx_data(&g_vpxEncoder, &iter)) != nullptr) {
             if (pkt->kind == VPX_CODEC_CX_FRAME_PKT) {
                 size_t old_size = frameBytes.size();
                 frameBytes.resize(old_size + pkt->data.frame.sz);
@@ -806,7 +704,6 @@ static bool capture_monitor_frame(const RECT& rect,
 
         return !frameBytes.empty();
     } else {
-        // JPEG mode
         ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
 
         HDC screenDC = GetDC(NULL);
@@ -937,10 +834,9 @@ static void stop_capture_thread() {
     {
         lock_guard<mutex> enc_lock(g_encoderMutex);
         if (g_vpxEncoderInitialized) {
-            g_vpx.destroy(&g_vpxEncoder);
+            vpx_codec_destroy(&g_vpxEncoder);
             g_vpxEncoderInitialized = false;
         }
-        g_vpx.Unload();
     }
 }
 
@@ -1100,7 +996,7 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
         {
             lock_guard<mutex> enc_lock(g_encoderMutex);
             if (g_vpxEncoderInitialized) {
-                g_vpx.destroy(&g_vpxEncoder);
+                vpx_codec_destroy(&g_vpxEncoder);
                 g_vpxEncoderInitialized = false;
             }
         }
