@@ -14,6 +14,46 @@ type
   TMonitoringSendJSONEvent   = procedure(aLine: TncLine; JSONObj: TJSONObject) of object;
   TMonitoringFormClosedEvent = procedure(aLine: TncLine) of object;
 
+type
+  Pvpx_codec_iface = Pointer;
+  Pvpx_codec_priv = Pointer;
+  Tvpx_codec_ctx = record
+    name: PAnsiChar;
+    iface: Pvpx_codec_iface;
+    err: Integer;
+    err_detail: PAnsiChar;
+    init_flags: Cardinal;
+    config: Pointer;
+    priv: Pvpx_codec_priv;
+    reserved: array[0..15] of Pointer;
+  end;
+  Pvpx_codec_ctx = ^Tvpx_codec_ctx;
+
+  Tvpx_image = record
+    fmt: Integer;
+    cs: Integer;
+    range: Integer;
+    w: Cardinal;
+    h: Cardinal;
+    bit_depth: Cardinal;
+    d_w: Cardinal;
+    d_h: Cardinal;
+    r_w: Cardinal;
+    r_h: Cardinal;
+    x_chroma_shift: Cardinal;
+    y_chroma_shift: Cardinal;
+    planes: array[0..3] of PByte;
+    stride: array[0..3] of Integer;
+    bps: Integer;
+    user_priv: Pointer;
+    img_data: PByte;
+    img_data_owner: Integer;
+    self_allocd: Integer;
+    fb_priv: Pointer;
+  end;
+  Pvpx_image = ^Tvpx_image;
+
+type
   // Flicker'siz PaintBox: WM_ERASEBKGND'yi engeller
   TNoFlickerPaintBox = class(TPaintBox)
   protected
@@ -37,6 +77,8 @@ type
     procedure ComboBox3Change(Sender: TObject);
   private
     FLine             : TncLine;
+    FVPXDecoder       : Tvpx_codec_ctx;
+    FVPXDecInitialized: Boolean;
     FClientID         : string;
     FOnSendJSON       : TMonitoringSendJSONEvent;
     FOnFormClosed     : TMonitoringFormClosedEvent;
@@ -105,50 +147,11 @@ implementation
 {$R *.dfm}
 
 type
-  Pvpx_codec_iface = Pointer;
-  Pvpx_codec_priv = Pointer;
-  Tvpx_codec_ctx = record
-    name: PAnsiChar;
-    iface: Pvpx_codec_iface;
-    err: Integer;
-    err_detail: PAnsiChar;
-    init_flags: Cardinal;
-    config: Pointer;
-    priv: Pvpx_codec_priv;
-    reserved: array[0..15] of Pointer;
-  end;
-  Pvpx_codec_ctx = ^Tvpx_codec_ctx;
-
-  Tvpx_image = record
-    fmt: Integer;
-    cs: Integer;
-    range: Integer;
-    w: Cardinal;
-    h: Cardinal;
-    bit_depth: Cardinal;
-    d_w: Cardinal;
-    d_h: Cardinal;
-    r_w: Cardinal;
-    r_h: Cardinal;
-    x_chroma_shift: Cardinal;
-    y_chroma_shift: Cardinal;
-    planes: array[0..3] of PByte;
-    stride: array[0..3] of Integer;
-    bps: Integer;
-    user_priv: Pointer;
-    img_data: PByte;
-    img_data_owner: Integer;
-    self_allocd: Integer;
-    fb_priv: Pointer;
-  end;
-  Pvpx_image = ^Tvpx_image;
-
-type
   Tvpx_codec_vp9_dx = function: Pvpx_codec_iface; cdecl;
-  Tvpx_codec_dec_init_ver = function(ctx: Pvpx_codec_ctx; iface: Pvpx_codec_iface; cfg: Pointer; flags: Cardinal; ver: Integer): Integer; cdecl;
-  Tvpx_codec_decode = function(ctx: Pvpx_codec_ctx; const data: PByte; data_sz: Cardinal; user_priv: Pointer; deadline: Int64): Integer; cdecl;
-  Tvpx_codec_get_frame = function(ctx: Pvpx_codec_ctx; var iter: Pointer): Pvpx_image; cdecl;
-  Tvpx_codec_destroy = function(ctx: Pvpx_codec_ctx): Integer; cdecl;
+  Tvpx_codec_dec_init_ver = function(ctx: Pointer; iface: Pvpx_codec_iface; cfg: Pointer; flags: Cardinal; ver: Integer): Integer; cdecl;
+  Tvpx_codec_decode = function(ctx: Pointer; const data: PByte; data_sz: Cardinal; user_priv: Pointer; deadline: Int64): Integer; cdecl;
+  Tvpx_codec_get_frame = function(ctx: Pointer; var iter: Pointer): Pvpx_image; cdecl;
+  Tvpx_codec_destroy = function(ctx: Pointer): Integer; cdecl;
 
 var
   HVPX: THandle = 0;
@@ -158,41 +161,45 @@ var
   vpx_codec_get_frame: Tvpx_codec_get_frame = nil;
   vpx_codec_destroy: Tvpx_codec_destroy = nil;
   FVPXInitialized: Boolean = False;
-  FVPXDecoder       : Tvpx_codec_ctx;
-  FVPXDecInitialized: Boolean = False;
+  GLibLoadLock: TCriticalSection;
 
 function LoadLibVpx: Boolean;
 begin
-  if FVPXInitialized then
-    Exit(True);
+  GLibLoadLock.Enter;
+  try
+    if FVPXInitialized then
+      Exit(True);
 
-  HVPX := SafeLoadLibrary('libvpx.dll');
-  if HVPX = 0 then
-    HVPX := SafeLoadLibrary('vpx.dll');
-  if HVPX = 0 then
-    HVPX := SafeLoadLibrary('libvpx-1.dll');
+    HVPX := SafeLoadLibrary('libvpx.dll');
+    if HVPX = 0 then
+      HVPX := SafeLoadLibrary('vpx.dll');
+    if HVPX = 0 then
+      HVPX := SafeLoadLibrary('libvpx-1.dll');
 
-  if HVPX = 0 then
-    Exit(False);
+    if HVPX = 0 then
+      Exit(False);
 
-  vpx_codec_vp9_dx := GetProcAddress(HVPX, 'vpx_codec_vp9_dx');
-  vpx_codec_dec_init_ver := GetProcAddress(HVPX, 'vpx_codec_dec_init_ver');
-  vpx_codec_decode := GetProcAddress(HVPX, 'vpx_codec_decode');
-  vpx_codec_get_frame := GetProcAddress(HVPX, 'vpx_codec_get_frame');
-  vpx_codec_destroy := GetProcAddress(HVPX, 'vpx_codec_destroy');
+    vpx_codec_vp9_dx := GetProcAddress(HVPX, 'vpx_codec_vp9_dx');
+    vpx_codec_dec_init_ver := GetProcAddress(HVPX, 'vpx_codec_dec_init_ver');
+    vpx_codec_decode := GetProcAddress(HVPX, 'vpx_codec_decode');
+    vpx_codec_get_frame := GetProcAddress(HVPX, 'vpx_codec_get_frame');
+    vpx_codec_destroy := GetProcAddress(HVPX, 'vpx_codec_destroy');
 
-  if Assigned(vpx_codec_vp9_dx) and Assigned(vpx_codec_dec_init_ver) and
-     Assigned(vpx_codec_decode) and Assigned(vpx_codec_get_frame) and
-     Assigned(vpx_codec_destroy) then
-  begin
-    FVPXInitialized := True;
-    Result := True;
-  end
-  else
-  begin
-    FreeLibrary(HVPX);
-    HVPX := 0;
-    Result := False;
+    if Assigned(vpx_codec_vp9_dx) and Assigned(vpx_codec_dec_init_ver) and
+       Assigned(vpx_codec_decode) and Assigned(vpx_codec_get_frame) and
+       Assigned(vpx_codec_destroy) then
+    begin
+      FVPXInitialized := True;
+      Result := True;
+    end
+    else
+    begin
+      FreeLibrary(HVPX);
+      HVPX := 0;
+      Result := False;
+    end;
+  finally
+    GLibLoadLock.Leave;
   end;
 end;
 
@@ -212,6 +219,12 @@ begin
     RequestCaptureStop;
 
   StopFrameWorker;
+
+  if FVPXDecInitialized then
+  begin
+    vpx_codec_destroy(@FVPXDecoder);
+    FVPXDecInitialized := False;
+  end;
 
   if Assigned(FFrameTimer) then
     FFrameTimer.Enabled := False;
@@ -241,6 +254,12 @@ begin
     RequestCaptureStop;
 
   StopFrameWorker;
+
+  if FVPXDecInitialized then
+  begin
+    vpx_codec_destroy(@FVPXDecoder);
+    FVPXDecInitialized := False;
+  end;
 
   if Assigned(FFrameTimer) then
     FFrameTimer.Enabled := False;
@@ -432,6 +451,13 @@ procedure TForm6.RequestCaptureStop;
 begin
   SendMonitoringCommand('monitorstop');
   FCapturing := False;
+
+  if FVPXDecInitialized then
+  begin
+    vpx_codec_destroy(@FVPXDecoder);
+    FVPXDecInitialized := False;
+  end;
+
   if Assigned(FFrameLock) then
   begin
     FFrameLock.Enter;
@@ -509,7 +535,7 @@ begin
   end;
 end;
 
-procedure TForm6.QueueFrameBytes(const ABytes: TBytes);
+procedure TForm6.QueueFrameBytes(const ABytes: TBytes; AFormat: Integer);
 begin
   if Length(ABytes) = 0 then
     Exit;
@@ -520,6 +546,7 @@ begin
   try
     FPendingFrame      := '';
     FPendingFrameBytes := Copy(ABytes, 0, Length(ABytes));
+    FPendingFormat     := AFormat;
     if Assigned(FDecodeEvent) then
       FDecodeEvent.SetEvent;
   finally
@@ -803,13 +830,13 @@ begin
                 Decoded := TBitmap.Create;
                 Decoded.PixelFormat := pf24bit;
                 Decoded.SetSize(LImage.d_w, LImage.d_h);
-                for var LY := 0 to LImage.d_h - 1 do
+                for var LY := 0 to Integer(LImage.d_h) - 1 do
                 begin
                   var LScanLine: PByte := Decoded.ScanLine[LY];
                   var LYRow: PByte := LImage.planes[0] + LY * LImage.stride[0];
                   var LURow: PByte := LImage.planes[1] + (LY div 2) * LImage.stride[1];
                   var LVRow: PByte := LImage.planes[2] + (LY div 2) * LImage.stride[2];
-                  for var LX := 0 to LImage.d_w - 1 do
+                  for var LX := 0 to Integer(LImage.d_w) - 1 do
                   begin
                     var LValY: Integer := LYRow[LX];
                     var LValU: Integer := LURow[LX div 2];
@@ -1112,5 +1139,10 @@ begin
     JSONObj.Free;
   end;
 end;
+
+initialization
+  GLibLoadLock := TCriticalSection.Create;
+finalization
+  GLibLoadLock.Free;
 
 end.
