@@ -678,18 +678,59 @@ begin
   if AFormat = 4 then
   begin
     if not LoadVPXLib then
+    begin
+      TThread.Queue(nil, procedure
+      begin
+        if Self.StatusBar1.Panels.Count >= 2 then
+          Self.StatusBar1.Panels[1].Text := 'VP9 Lib not loaded'
+        else
+          Self.StatusBar1.SimpleText := 'VP9 Lib not loaded';
+      end);
       Exit;
+    end;
 
     if not FVP9Initialized then
     begin
       FillChar(FVP9Ctx, SizeOf(FVP9Ctx), 0);
-      if vpx_codec_dec_init_ver(@FVP9Ctx, vpx_codec_vp9_dx(), nil, 0, 12) <> 0 then
+      var Ver: Integer;
+      var InitOk: Boolean := False;
+      var LastErr: vpx_codec_err_t := 0;
+      for Ver := 12 downto 1 do
+      begin
+        LastErr := vpx_codec_dec_init_ver(@FVP9Ctx, vpx_codec_vp9_dx(), nil, 0, Ver);
+        if LastErr = 0 then
+        begin
+          InitOk := True;
+          Break;
+        end;
+      end;
+
+      if not InitOk then
+      begin
+        TThread.Queue(nil, procedure
+        begin
+          if Self.StatusBar1.Panels.Count >= 2 then
+            Self.StatusBar1.Panels[1].Text := 'VP9 Init failed: ' + IntToStr(LastErr)
+          else
+            Self.StatusBar1.SimpleText := 'VP9 Init failed: ' + IntToStr(LastErr);
+        end);
         Exit;
+      end;
       FVP9Initialized := True;
     end;
 
-    if vpx_codec_decode(@FVP9Ctx, @ABytes[0], Length(ABytes), nil, 0) <> 0 then
+    var DecErr := vpx_codec_decode(@FVP9Ctx, @ABytes[0], Length(ABytes), nil, 0);
+    if DecErr <> 0 then
+    begin
+      TThread.Queue(nil, procedure
+      begin
+        if Self.StatusBar1.Panels.Count >= 2 then
+          Self.StatusBar1.Panels[1].Text := 'VP9 Decode failed: ' + IntToStr(DecErr)
+        else
+          Self.StatusBar1.SimpleText := 'VP9 Decode failed: ' + IntToStr(DecErr);
+      end);
       Exit;
+    end;
 
     Iter := nil;
     Img := vpx_codec_get_frame(@FVP9Ctx, @Iter);
