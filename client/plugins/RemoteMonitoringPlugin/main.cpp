@@ -15,7 +15,14 @@
 #include "../../include/json.hpp"
 #include <setjmp.h>
 
+#undef _setjmp
+#undef _setjmpex
+
 extern "C" int _setjmp(jmp_buf env, void* frame) {
+    return __builtin_setjmp(env);
+}
+
+extern "C" int _setjmpex(jmp_buf env, void* frame) {
     return __builtin_setjmp(env);
 }
 
