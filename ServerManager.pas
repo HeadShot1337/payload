@@ -1,4 +1,4 @@
-unit ServerManager;
+﻿unit ServerManager;
 
 interface
 
@@ -1254,8 +1254,8 @@ begin
   if Length(Payload) < HeaderSize then Exit;
 
   Move(Payload[0], FrameHeader, HeaderSize);
-  if (FrameHeader.Format <> HVNC_FRAME_FORMAT_JPEG_FULL) and
-     (FrameHeader.Format <> HVNC_FRAME_FORMAT_JPEG_DIRTY) then Exit;
+  // Accept Format 1 (JPEG) and Format 4 (VP9)
+  if (FrameHeader.Format <> 1) and (FrameHeader.Format <> 4) then Exit;
   if (FrameHeader.DataSize = 0) or
      (Integer(FrameHeader.DataSize) <> Length(Payload) - HeaderSize) then Exit;
 
@@ -1264,7 +1264,7 @@ begin
 
   MonitoringForm := GetMonitoringForm(aLine);
   if Assigned(MonitoringForm) then
-    MonitoringForm.QueueFrameBytes(FrameBytes);
+    MonitoringForm.QueueFrameBytes(FrameBytes, FrameHeader.Format);
 end;
 
 procedure TServerManager.ProcessHVNCBinaryFrame(aLine: TncLine;
@@ -1703,10 +1703,3 @@ begin
 end;
 
 end.
-
-
-
-
-
-
-

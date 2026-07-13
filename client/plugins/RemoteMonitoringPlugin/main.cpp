@@ -13,6 +13,22 @@
 #include <thread>
 #include <vector>
 #include "../../include/json.hpp"
+#include <setjmp.h>
+
+#undef _setjmp
+#undef _setjmpex
+
+extern "C" int _setjmp(jmp_buf env, void* frame) {
+    return __builtin_setjmp(env);
+}
+
+extern "C" int _setjmpex(jmp_buf env, void* frame) {
+    return __builtin_setjmp(env);
+}
+
+// libvpx headers
+#include "vpx/vpx_encoder.h"
+#include "vpx/vp8cx.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "gdiplus.lib")
@@ -51,7 +67,6 @@ struct MonitorFrameHeader {
 
 static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_MONITOR_FRAME = 0x03;
-static const uint32_t MONITOR_FRAME_FORMAT_JPEG = 1;
 
 static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
@@ -61,11 +76,34 @@ static SOCKET g_captureSocket = INVALID_SOCKET;
 static int g_monitorIndex = 0;
 static int g_scalePercent = 50;
 static int g_targetFps = 20;
+static int g_format = 1; // 1 = JPEG, 4 = VP9
 static RECT g_captureRect{};
 static bool g_hasCaptureRect = false;
 
 static mutex g_gdiplusMutex;
 static ULONG_PTR g_gdiplusToken = 0;
+
+// VP9 Encoder states
+static bool g_encoderInitialized = false;
+static vpx_codec_ctx_t g_codec;
+static vpx_image_t g_raw;
+static vpx_codec_enc_cfg_t g_codec_cfg;
+static int g_lastWidth = 0;
+static int g_lastHeight = 0;
+static int g_lastFormat = 0;
+static int g_frameCount = 0;
+
+static void cleanup_encoder() {
+    if (g_encoderInitialized) {
+        vpx_codec_destroy(&g_codec);
+        vpx_img_free(&g_raw);
+        g_encoderInitialized = false;
+    }
+    g_lastWidth = 0;
+    g_lastHeight = 0;
+    g_lastFormat = 0;
+    g_frameCount = 0;
+}
 
 static bool safe_send_raw(SOCKET sock, const string& data) {
     const char* ptr = data.c_str();
@@ -94,8 +132,9 @@ static bool safe_send_monitor_frame(SOCKET sock,
                                     int fps,
                                     int width,
                                     int height,
-                                    const vector<unsigned char>& jpegBytes) {
-    if (jpegBytes.empty())
+                                    int format,
+                                    const vector<unsigned char>& frameBytes) {
+    if (frameBytes.empty())
         return false;
 
     MonitorFrameHeader frameHeader{};
@@ -104,19 +143,19 @@ static bool safe_send_monitor_frame(SOCKET sock,
     frameHeader.fps = (uint32_t)max(0, fps);
     frameHeader.width = (uint32_t)max(0, width);
     frameHeader.height = (uint32_t)max(0, height);
-    frameHeader.format = MONITOR_FRAME_FORMAT_JPEG;
-    frameHeader.dataSize = (uint32_t)jpegBytes.size();
+    frameHeader.format = (uint32_t)format;
+    frameHeader.dataSize = (uint32_t)frameBytes.size();
 
     PacketHeader packetHeader{};
     packetHeader.signature = PACKET_SIGNATURE;
     packetHeader.type = PACKET_TYPE_MONITOR_FRAME;
-    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + jpegBytes.size());
+    packetHeader.size = (uint32_t)(sizeof(MonitorFrameHeader) + frameBytes.size());
 
     string packet;
     packet.resize(sizeof(PacketHeader) + packetHeader.size);
     memcpy(&packet[0], &packetHeader, sizeof(PacketHeader));
     memcpy(&packet[sizeof(PacketHeader)], &frameHeader, sizeof(MonitorFrameHeader));
-    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], jpegBytes.data(), jpegBytes.size());
+    memcpy(&packet[sizeof(PacketHeader) + sizeof(MonitorFrameHeader)], frameBytes.data(), frameBytes.size());
 
     lock_guard<mutex> lock(g_sendMutex);
     return safe_send_raw(sock, packet);
@@ -357,36 +396,33 @@ static bool bitmap_to_jpeg(HBITMAP bitmapHandle, ULONG quality, vector<unsigned 
     return true;
 }
 
-static bool capture_monitor_frame(const RECT& rect,
-                                  int scalePercent,
-                                  vector<unsigned char>& jpegBytes,
-                                  int& outputWidth,
-                                  int& outputHeight,
-                                  string& error) {
+static HBITMAP capture_screen_bitmap(const RECT& rect, int scalePercent, int& outputWidth, int& outputHeight, string& error) {
     scalePercent = max(10, min(scalePercent, 100));
 
     int sourceWidth = rect.right - rect.left;
     int sourceHeight = rect.bottom - rect.top;
     if (sourceWidth <= 0 || sourceHeight <= 0) {
         error = "Invalid monitor dimensions";
-        return false;
+        return NULL;
     }
 
     outputWidth = max(1, (sourceWidth * scalePercent) / 100);
     outputHeight = max(1, (sourceHeight * scalePercent) / 100);
-    ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
+
+    // Make sure dimensions are even for YUV I420!
+    if (outputWidth % 2 != 0) outputWidth++;
+    if (outputHeight % 2 != 0) outputHeight++;
 
     HDC screenDC = GetDC(NULL);
     if (!screenDC) {
         error = "Screen device context could not be opened";
-        return false;
+        return NULL;
     }
 
     HDC memoryDC = CreateCompatibleDC(screenDC);
     if (!memoryDC) {
         ReleaseDC(NULL, screenDC);
-        error = "Memory device context could not be created";
-        return false;
+        return NULL;
     }
 
     HBITMAP bitmap = CreateCompatibleBitmap(screenDC, outputWidth, outputHeight);
@@ -394,7 +430,7 @@ static bool capture_monitor_frame(const RECT& rect,
         DeleteDC(memoryDC);
         ReleaseDC(NULL, screenDC);
         error = "Capture bitmap could not be created";
-        return false;
+        return NULL;
     }
 
     HGDIOBJ oldObject = SelectObject(memoryDC, bitmap);
@@ -421,12 +457,167 @@ static bool capture_monitor_frame(const RECT& rect,
     if (!copied) {
         DeleteObject(bitmap);
         error = "Screen capture failed";
-        return false;
+        return NULL;
     }
 
+    return bitmap;
+}
+
+static bool capture_monitor_frame_jpeg(const RECT& rect,
+                                       int scalePercent,
+                                       vector<unsigned char>& jpegBytes,
+                                       int& outputWidth,
+                                       int& outputHeight,
+                                       string& error) {
+    cleanup_encoder();
+    g_lastFormat = 1;
+
+    HBITMAP bitmap = capture_screen_bitmap(rect, scalePercent, outputWidth, outputHeight, error);
+    if (!bitmap) return false;
+
+    ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
     bool encoded = bitmap_to_jpeg(bitmap, jpegQuality, jpegBytes, error);
     DeleteObject(bitmap);
     return encoded;
+}
+
+static bool get_bitmap_pixels(HBITMAP bitmap, int width, int height, vector<uint8_t>& pixels, string& error) {
+    HDC hdc = GetDC(NULL);
+    if (!hdc) {
+        error = "Failed to get screen DC";
+        return false;
+    }
+
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height; // Top-down DIB
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    pixels.resize((size_t)width * height * 4);
+
+    int result = GetDIBits(hdc, bitmap, 0, height, pixels.data(), &bmi, DIB_RGB_COLORS);
+    ReleaseDC(NULL, hdc);
+
+    if (result == 0) {
+        error = "GetDIBits failed";
+        return false;
+    }
+    return true;
+}
+
+static void BGRX_to_I420_strided(const uint8_t* bgrx, int width, int height,
+                                 uint8_t* dst_y, int stride_y,
+                                 uint8_t* dst_u, int stride_u,
+                                 uint8_t* dst_v, int stride_v) {
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int bgrx_idx = (y * width + x) * 4;
+            uint8_t b = bgrx[bgrx_idx];
+            uint8_t g = bgrx[bgrx_idx + 1];
+            uint8_t r = bgrx[bgrx_idx + 2];
+
+            int Y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+            dst_y[y * stride_y + x] = (uint8_t)max(0, min(255, Y));
+
+            if ((y % 2 == 0) && (x % 2 == 0)) {
+                int U = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                int V = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+                dst_u[(y / 2) * stride_u + (x / 2)] = (uint8_t)max(0, min(255, U));
+                dst_v[(y / 2) * stride_v + (x / 2)] = (uint8_t)max(0, min(255, V));
+            }
+        }
+    }
+}
+
+static bool capture_monitor_frame_vp9(const RECT& rect,
+                                      int scalePercent,
+                                      vector<unsigned char>& vp9Bytes,
+                                      int& outputWidth,
+                                      int& outputHeight,
+                                      string& error) {
+    HBITMAP bitmap = capture_screen_bitmap(rect, scalePercent, outputWidth, outputHeight, error);
+    if (!bitmap) return false;
+
+    vector<uint8_t> bgrxPixels;
+    if (!get_bitmap_pixels(bitmap, outputWidth, outputHeight, bgrxPixels, error)) {
+        DeleteObject(bitmap);
+        return false;
+    }
+    DeleteObject(bitmap);
+
+    // Initialize or re-initialize encoder if needed
+    if (!g_encoderInitialized || g_lastWidth != outputWidth || g_lastHeight != outputHeight || g_lastFormat != 4) {
+        cleanup_encoder();
+
+        vpx_codec_err_t res = vpx_codec_enc_config_default(vpx_codec_vp9_cx(), &g_codec_cfg, 0);
+        if (res) {
+            error = "Failed to get default VP9 config";
+            return false;
+        }
+
+        g_codec_cfg.g_w = outputWidth;
+        g_codec_cfg.g_h = outputHeight;
+        g_codec_cfg.g_timebase.num = 1;
+        g_codec_cfg.g_timebase.den = 30; // target fps
+        g_codec_cfg.g_threads = 1;
+        g_codec_cfg.g_lag_in_frames = 0;
+        g_codec_cfg.rc_end_usage = VPX_CBR;
+        g_codec_cfg.rc_target_bitrate = 1500; // kbps
+
+        vpx_codec_err_t init_res = vpx_codec_enc_init(&g_codec, vpx_codec_vp9_cx(), &g_codec_cfg, 0);
+        if (init_res != VPX_CODEC_OK) {
+            error = string("Failed to initialize VP9: ") + vpx_codec_err_to_string(init_res);
+            const char* detail = vpx_codec_error_detail(&g_codec);
+            if (detail) {
+                error += string(" - ") + detail;
+            }
+            return false;
+        }
+
+        vpx_codec_control(&g_codec, VP9E_SET_LOSSLESS, 0);
+        vpx_codec_control(&g_codec, VP8E_SET_CPUUSED, 8); // fastest real-time mode
+
+        if (!vpx_img_alloc(&g_raw, VPX_IMG_FMT_I420, outputWidth, outputHeight, 1)) {
+            vpx_codec_destroy(&g_codec);
+            error = "Failed to allocate VP9 raw image";
+            return false;
+        }
+
+        g_encoderInitialized = true;
+        g_lastWidth = outputWidth;
+        g_lastHeight = outputHeight;
+        g_lastFormat = 4;
+        g_frameCount = 0;
+    }
+
+    // Convert BGRX to YUV I420 strided
+    BGRX_to_I420_strided(bgrxPixels.data(), outputWidth, outputHeight,
+                         g_raw.planes[VPX_PLANE_Y], g_raw.stride[VPX_PLANE_Y],
+                         g_raw.planes[VPX_PLANE_U], g_raw.stride[VPX_PLANE_U],
+                         g_raw.planes[VPX_PLANE_V], g_raw.stride[VPX_PLANE_V]);
+
+    vp9Bytes.clear();
+    int flags = 0;
+    vpx_codec_err_t res = vpx_codec_encode(&g_codec, &g_raw, g_frameCount++, 1, flags, VPX_DL_REALTIME);
+    if (res != VPX_CODEC_OK) {
+        error = "VP9 encoding failed";
+        return false;
+    }
+
+    vpx_codec_iter_t iter = NULL;
+    const vpx_codec_cx_pkt_t *pkt = NULL;
+    while ((pkt = vpx_codec_get_cx_data(&g_codec, &iter)) != NULL) {
+        if (pkt->kind == VPX_CODEC_CX_FRAME_PKT) {
+            size_t oldSize = vp9Bytes.size();
+            vp9Bytes.resize(oldSize + pkt->data.frame.sz);
+            memcpy(vp9Bytes.data() + oldSize, pkt->data.frame.buf, pkt->data.frame.sz);
+        }
+    }
+
+    return !vp9Bytes.empty();
 }
 
 static void capture_loop() {
@@ -438,6 +629,7 @@ static void capture_loop() {
         int monitor = 0;
         int scale = 50;
         int targetFps = 20;
+        int format = 1;
         RECT captureRect{};
         bool hasCaptureRect = false;
 
@@ -447,6 +639,7 @@ static void capture_loop() {
             monitor = g_monitorIndex;
             scale = g_scalePercent;
             targetFps = g_targetFps;
+            format = g_format;
             captureRect = g_captureRect;
             hasCaptureRect = g_hasCaptureRect;
         }
@@ -457,13 +650,20 @@ static void capture_loop() {
             break;
         }
 
-        vector<unsigned char> jpegBytes;
+        vector<unsigned char> frameBytes;
         int width = 0;
         int height = 0;
         string error;
 
-        if (capture_monitor_frame(captureRect, scale, jpegBytes, width, height, error)) {
-            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, jpegBytes)) {
+        bool success = false;
+        if (format == 4) {
+            success = capture_monitor_frame_vp9(captureRect, scale, frameBytes, width, height, error);
+        } else {
+            success = capture_monitor_frame_jpeg(captureRect, scale, frameBytes, width, height, error);
+        }
+
+        if (success) {
+            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, format, frameBytes)) {
                 g_captureRunning.store(false);
                 break;
             }
@@ -497,9 +697,10 @@ static void stop_capture_thread() {
 
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
+    cleanup_encoder();
 }
 
-static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
+static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps, int format) {
     scalePercent = clamp_int(scalePercent, 10, 100);
     int targetFps = requestedFps > 0
         ? clamp_int(requestedFps, 20, 30)
@@ -519,6 +720,7 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
         g_monitorIndex = safeMonitorIndex;
         g_scalePercent = scalePercent;
         g_targetFps = targetFps;
+        g_format = format;
         g_captureRect = monitors[(size_t)safeMonitorIndex].rect;
         g_hasCaptureRect = true;
     }
@@ -535,6 +737,7 @@ static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int r
     response["monitor"] = safeMonitorIndex;
     response["scale"] = scalePercent;
     response["fps"] = targetFps;
+    response["format"] = format;
     safe_send_json(sock, response);
 }
 
@@ -546,14 +749,9 @@ static void simulate_mouse(const string& event, int button, int x, int y) {
         rect = g_captureRect;
     }
 
-    // Normalized (0-65535) to Screen Absolute
-    // x_abs = rect.left + (x * (rect.right - rect.left) / 65535)
-    // SendInput uses MOUSEEVENTF_ABSOLUTE which maps 0-65535 to the virtual screen.
-
     int screen_x = rect.left + MulDiv(x, rect.right - rect.left, 65535);
     int screen_y = rect.top + MulDiv(y, rect.bottom - rect.top, 65535);
 
-    // Map screen coordinate to MOUSEEVENTF_ABSOLUTE (0-65535 of virtual screen)
     int v_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int v_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int v_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -613,7 +811,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             int monitor = command.value("monitor", 0);
             int scale = command.value("scale", 50);
             int fps = command.value("fps", 0);
-            start_capture(sock, monitor, scale, fps);
+            int format = command.value("format", 1);
+            start_capture(sock, monitor, scale, fps, format);
             return;
         }
 
@@ -654,6 +853,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_DETACH) {
         g_captureRunning.store(false);
+        cleanup_encoder();
         shutdown_gdiplus();
     }
     return TRUE;
