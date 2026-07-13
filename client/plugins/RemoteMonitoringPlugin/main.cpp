@@ -15,8 +15,8 @@
 #include "../../include/json.hpp"
 
 // libvpx headers
-#include <vpx/vpx_encoder.h>
-#include <vpx/vp8cx.h>
+#include "vpx/vpx_encoder.h"
+#include "vpx/vp8cx.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "gdiplus.lib")

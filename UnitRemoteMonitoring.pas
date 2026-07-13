@@ -124,6 +124,7 @@ type
     range: Integer;
     w: Cardinal;
     h: Cardinal;
+    bit_depth: Cardinal;
     d_w: Cardinal;
     d_h: Cardinal;
     r_w: Cardinal;
