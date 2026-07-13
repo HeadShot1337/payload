@@ -13,6 +13,11 @@
 #include <thread>
 #include <vector>
 #include "../../include/json.hpp"
+#include <setjmp.h>
+
+extern "C" int _setjmp(jmp_buf env, void* frame) {
+    return __builtin_setjmp(env);
+}
 
 // libvpx headers
 #include "vpx/vpx_encoder.h"
