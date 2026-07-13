@@ -158,6 +158,8 @@ var
   vpx_codec_destroy: Tvpx_codec_destroy = nil;
 
 function LoadVPXLib: Boolean;
+var
+  ErrStr: string;
 begin
   if HVPXLib <> 0 then
     Exit(True);
@@ -167,29 +169,62 @@ begin
     HVPXLib := SafeLoadLibrary('libvpx.dll');
   if HVPXLib = 0 then
     HVPXLib := SafeLoadLibrary('vpx.dll');
+  if HVPXLib = 0 then
+    HVPXLib := SafeLoadLibrary('libvpx-2.dll');
+  if HVPXLib = 0 then
+    HVPXLib := SafeLoadLibrary('libvpx-3.dll');
 
-  if HVPXLib <> 0 then
+  if HVPXLib = 0 then
   begin
-    @vpx_codec_vp9_dx := GetProcAddress(HVPXLib, 'vpx_codec_vp9_dx');
-    @vpx_codec_dec_init_ver := GetProcAddress(HVPXLib, 'vpx_codec_dec_init_ver');
-    @vpx_codec_decode := GetProcAddress(HVPXLib, 'vpx_codec_decode');
-    @vpx_codec_get_frame := GetProcAddress(HVPXLib, 'vpx_codec_get_frame');
-    @vpx_codec_destroy := GetProcAddress(HVPXLib, 'vpx_codec_destroy');
-
-    if Assigned(vpx_codec_vp9_dx) and
-       Assigned(vpx_codec_dec_init_ver) and
-       Assigned(vpx_codec_decode) and
-       Assigned(vpx_codec_get_frame) and
-       Assigned(vpx_codec_destroy) then
+    ErrStr := 'libvpx DLL not found (put libvpx.dll in Server folder)';
+    TThread.Queue(nil, procedure
     begin
-      Exit(True);
-    end;
-
-    FreeLibrary(HVPXLib);
-    HVPXLib := 0;
+      if Form6 <> nil then
+      begin
+        if Form6.StatusBar1.Panels.Count >= 2 then
+          Form6.StatusBar1.Panels[1].Text := ErrStr
+        else
+          Form6.StatusBar1.SimpleText := ErrStr;
+      end;
+    end);
+    Exit(False);
   end;
 
-  Result := False;
+  ErrStr := '';
+  @vpx_codec_vp9_dx := GetProcAddress(HVPXLib, 'vpx_codec_vp9_dx');
+  if @vpx_codec_vp9_dx = nil then ErrStr := 'vpx_codec_vp9_dx';
+
+  @vpx_codec_dec_init_ver := GetProcAddress(HVPXLib, 'vpx_codec_dec_init_ver');
+  if (@vpx_codec_dec_init_ver = nil) and (ErrStr = '') then ErrStr := 'vpx_codec_dec_init_ver';
+
+  @vpx_codec_decode := GetProcAddress(HVPXLib, 'vpx_codec_decode');
+  if (@vpx_codec_decode = nil) and (ErrStr = '') then ErrStr := 'vpx_codec_decode';
+
+  @vpx_codec_get_frame := GetProcAddress(HVPXLib, 'vpx_codec_get_frame');
+  if (@vpx_codec_get_frame = nil) and (ErrStr = '') then ErrStr := 'vpx_codec_get_frame';
+
+  @vpx_codec_destroy := GetProcAddress(HVPXLib, 'vpx_codec_destroy');
+  if (@vpx_codec_destroy = nil) and (ErrStr = '') then ErrStr := 'vpx_codec_destroy';
+
+  if ErrStr <> '' then
+  begin
+    FreeLibrary(HVPXLib);
+    HVPXLib := 0;
+    ErrStr := 'GetProcAddress failed for: ' + ErrStr;
+    TThread.Queue(nil, procedure
+    begin
+      if Form6 <> nil then
+      begin
+        if Form6.StatusBar1.Panels.Count >= 2 then
+          Form6.StatusBar1.Panels[1].Text := ErrStr
+        else
+          Form6.StatusBar1.SimpleText := ErrStr;
+      end;
+    end);
+    Exit(False);
+  end;
+
+  Result := True;
 end;
 
 procedure ConvertYUV420ToBGR24(PlaneY: PByte; StrideY: Integer;
