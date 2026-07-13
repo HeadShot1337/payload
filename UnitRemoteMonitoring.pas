@@ -245,7 +245,6 @@ type
     procedure DecodeFrameWorker;
     function  TakePendingFrame(out AText: string; out ABytes: TBytes; out AFormat, AWidth, AHeight: Integer): Boolean;
     function  TakeDecodedFrame(out ARawBytes: TBytes; out AWidth, AHeight, AFrameSize: Integer): Boolean;
-    procedure ComboBox3Change(Sender: TObject);
     procedure UpdateStatusBar;
     procedure UpdateButtonCaption;
     procedure UpdateMonitorList(JSONObj: TJSONObject);
