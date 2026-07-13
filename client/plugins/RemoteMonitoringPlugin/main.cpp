@@ -562,13 +562,18 @@ static bool capture_monitor_frame_vp9(const RECT& rect,
         g_codec_cfg.g_h = outputHeight;
         g_codec_cfg.g_timebase.num = 1;
         g_codec_cfg.g_timebase.den = 30; // target fps
-        g_codec_cfg.g_threads = 4;
+        g_codec_cfg.g_threads = 1;
         g_codec_cfg.g_lag_in_frames = 0;
         g_codec_cfg.rc_end_usage = VPX_CBR;
         g_codec_cfg.rc_target_bitrate = 1500; // kbps
 
-        if (vpx_codec_enc_init(&g_codec, vpx_codec_vp9_cx(), &g_codec_cfg, 0)) {
-            error = "Failed to initialize VP9 encoder";
+        vpx_codec_err_t init_res = vpx_codec_enc_init(&g_codec, vpx_codec_vp9_cx(), &g_codec_cfg, 0);
+        if (init_res != VPX_CODEC_OK) {
+            error = string("Failed to initialize VP9: ") + vpx_codec_err_to_string(init_res);
+            const char* detail = vpx_codec_error_detail(&g_codec);
+            if (detail) {
+                error += string(" - ") + detail;
+            }
             return false;
         }
 
