@@ -432,7 +432,7 @@ end;
 
 function TForm6.SelectedFormat: Integer;
 begin
-  if ComboBox3.ItemIndex = 1 then
+  if SameText(ComboBox3.Text, 'VP9') then
     Result := 4
   else
     Result := 1;

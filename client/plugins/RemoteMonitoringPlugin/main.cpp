@@ -469,6 +469,9 @@ static bool capture_monitor_frame_jpeg(const RECT& rect,
                                        int& outputWidth,
                                        int& outputHeight,
                                        string& error) {
+    cleanup_encoder();
+    g_lastFormat = 1;
+
     HBITMAP bitmap = capture_screen_bitmap(rect, scalePercent, outputWidth, outputHeight, error);
     if (!bitmap) return false;
 
