@@ -240,6 +240,31 @@ implementation
 type
   TncLineAccess = class(TncLine);
 
+type
+  TRtlDecompressBuffer = function(
+    CompressionFormat: Word;
+    UncompressedBuffer: PByte;
+    UncompressedBufferLength: Cardinal;
+    CompressedBuffer: PByte;
+    CompressedBufferLength: Cardinal;
+    var FinalUncompressedSize: Cardinal
+  ): Integer; stdcall;
+
+var
+  RtlDecompressBuffer: TRtlDecompressBuffer = nil;
+  NtdllLoaded: Boolean = False;
+
+procedure LoadNtdll;
+var
+  H: THandle;
+begin
+  if NtdllLoaded then Exit;
+  H := GetModuleHandle('ntdll.dll');
+  if H <> 0 then
+    RtlDecompressBuffer := TRtlDecompressBuffer(GetProcAddress(H, 'RtlDecompressBuffer'));
+  NtdllLoaded := True;
+end;
+
 { ---------------------------------------------------------------------- }
 {  Helpers                                                                 }
 { ---------------------------------------------------------------------- }
@@ -1274,18 +1299,58 @@ var
   FrameBytes : TBytes;
   HeaderSize : Integer;
   HVNCForm   : TForm10;
+  UncompressedSize: Cardinal;
+  DecompressedBytes: TBytes;
+  FinalSize: Cardinal;
+  Status: Integer;
 begin
   HeaderSize := SizeOf(THVNCFramePayloadHeader);
   if Length(Payload) < HeaderSize then Exit;
 
   Move(Payload[0], FrameHeader, HeaderSize);
   if (FrameHeader.Format <> HVNC_FRAME_FORMAT_JPEG_FULL) and
-     (FrameHeader.Format <> HVNC_FRAME_FORMAT_JPEG_DIRTY) then Exit;
+     (FrameHeader.Format <> HVNC_FRAME_FORMAT_JPEG_DIRTY) and
+     (FrameHeader.Format <> 3) and
+     (FrameHeader.Format <> 4) then Exit;
+
   if (FrameHeader.DataSize = 0) or
      (Integer(FrameHeader.DataSize) <> Length(Payload) - HeaderSize) then Exit;
 
   SetLength(FrameBytes, FrameHeader.DataSize);
   Move(Payload[HeaderSize], FrameBytes[0], FrameHeader.DataSize);
+
+  if (FrameHeader.Format = 3) or (FrameHeader.Format = 4) then
+  begin
+    if Length(FrameBytes) < 4 then Exit;
+    Move(FrameBytes[0], UncompressedSize, 4);
+
+    SetLength(DecompressedBytes, UncompressedSize);
+    LoadNtdll;
+    if Assigned(RtlDecompressBuffer) then
+    begin
+      FinalSize := 0;
+      Status := RtlDecompressBuffer(
+        2, // COMPRESSION_FORMAT_LZNT1
+        @DecompressedBytes[0],
+        UncompressedSize,
+        @FrameBytes[4],
+        Length(FrameBytes) - 4,
+        FinalSize
+      );
+      if (Status = 0) and (FinalSize = UncompressedSize) then
+      begin
+        FrameBytes := DecompressedBytes;
+        if FrameHeader.Format = 3 then
+          FrameHeader.Format := HVNC_FRAME_FORMAT_JPEG_FULL
+        else
+          FrameHeader.Format := HVNC_FRAME_FORMAT_JPEG_DIRTY;
+      end
+      else
+        Exit; // Decompression failed
+    end
+    else
+      Exit; // ntdll decompress function not available
+  end;
 
   HVNCForm := GetHiddenVNCForm(aLine);
   if Assigned(HVNCForm) then
