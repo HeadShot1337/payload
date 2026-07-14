@@ -30,9 +30,11 @@ type
     CheckBox2: TCheckBox;
     ComboBox2: TComboBox;
     PaintBox1: TPaintBox;          // DFM'de kalır ama gizlenecek
+    ComboBox3: TComboBox;
     procedure Button1Click(Sender: TObject);
     procedure ComboBox1Change(Sender: TObject);
     procedure ComboBox2Change(Sender: TObject);
+    procedure ComboBox3Change(Sender: TObject);
   private
     FLine             : TncLine;
     FClientID         : string;
@@ -58,6 +60,7 @@ type
     procedure SendMonitoringCommand(const AAction: string);
     function  SelectedMonitorIndex: Integer;
     function  SelectedScalePercent: Integer;
+    function  SelectedFPS: Integer;
     function  JSONValueText(JSONObj: TJSONObject; const AName: string): string;
     function  DecodeBase64Image(const AText: string; out ABytes: TBytes): Boolean;
     function  DecodeFrameToBitmap(const ABytes: TBytes; out ABitmap: TBitmap): Boolean;
@@ -231,6 +234,8 @@ begin
   Button1.OnClick    := Button1Click;
   ComboBox1.OnChange := ComboBox1Change;
   ComboBox2.OnChange := ComboBox2Change;
+  if Assigned(ComboBox3) then
+    ComboBox3.OnChange := ComboBox3Change;
 
   FillDefaultOptions;
   UpdateButtonCaption;
@@ -258,6 +263,24 @@ begin
   end
   else if ComboBox2.ItemIndex < 0 then
     ComboBox2.ItemIndex := 0;
+
+  if Assigned(ComboBox3) then
+  begin
+    if ComboBox3.Items.Count = 0 then
+    begin
+      ComboBox3.Items.Add('10 FPS');
+      ComboBox3.Items.Add('15 FPS');
+      ComboBox3.Items.Add('30 FPS');
+      ComboBox3.Items.Add('45 FPS');
+      ComboBox3.Items.Add('60 FPS');
+    end;
+    if ComboBox3.ItemIndex < 0 then
+    begin
+      ComboBox3.ItemIndex := ComboBox3.Items.IndexOf('30 FPS');
+      if ComboBox3.ItemIndex < 0 then
+        ComboBox3.ItemIndex := 2; // Default to 30 FPS
+    end;
+  end;
 end;
 
 function TForm6.SelectedScalePercent: Integer;
@@ -280,6 +303,22 @@ begin
     Result := 0;
 end;
 
+function TForm6.SelectedFPS: Integer;
+var
+  Text: string;
+begin
+  Result := 30; // Default fallback
+  if Assigned(ComboBox3) then
+  begin
+    Text := Trim(StringReplace(ComboBox3.Text, ' FPS', '', [rfIgnoreCase, rfReplaceAll]));
+    if Text <> '' then
+      Result := StrToIntDef(Text, Result);
+  end;
+
+  if Result < 10 then Result := 10;
+  if Result > 60 then Result := 60;
+end;
+
 procedure TForm6.SendMonitoringCommand(const AAction: string);
 var
   JSONObj: TJSONObject;
@@ -292,6 +331,7 @@ begin
     JSONObj.AddPair('action',  AAction);
     JSONObj.AddPair('monitor', TJSONNumber.Create(SelectedMonitorIndex));
     JSONObj.AddPair('scale',   TJSONNumber.Create(SelectedScalePercent));
+    JSONObj.AddPair('fps',     TJSONNumber.Create(SelectedFPS));
     FOnSendJSON(FLine, JSONObj);
   finally
     JSONObj.Free;
@@ -346,6 +386,12 @@ begin
 end;
 
 procedure TForm6.ComboBox1Change(Sender: TObject);
+begin
+  if FCapturing then
+    SendMonitoringCommand('monitorstart');
+end;
+
+procedure TForm6.ComboBox3Change(Sender: TObject);
 begin
   if FCapturing then
     SendMonitoringCommand('monitorstart');
