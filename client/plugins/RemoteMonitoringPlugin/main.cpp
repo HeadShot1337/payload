@@ -67,6 +67,17 @@ static bool g_hasCaptureRect = false;
 static mutex g_gdiplusMutex;
 static ULONG_PTR g_gdiplusToken = 0;
 
+static HDC g_hScreenDC = NULL;
+static HDC g_hMemoryDC = NULL;
+static HBITMAP g_hBitmap = NULL;
+static int g_cachedWidth = 0;
+static int g_cachedHeight = 0;
+
+static vector<unsigned char> g_prevBits;
+static int g_prevWidth = 0;
+static int g_prevHeight = 0;
+static DWORD g_lastSentTime = 0;
+
 static bool safe_send_raw(SOCKET sock, const string& data) {
     const char* ptr = data.c_str();
     int remaining = (int)data.size();
@@ -376,37 +387,45 @@ static bool capture_monitor_frame(const RECT& rect,
     outputHeight = max(1, (sourceHeight * scalePercent) / 100);
     ULONG jpegQuality = automatic_jpeg_quality(outputWidth, outputHeight, scalePercent);
 
-    HDC screenDC = GetDC(NULL);
-    if (!screenDC) {
-        error = "Screen device context could not be opened";
-        return false;
+    if (!g_hScreenDC) {
+        g_hScreenDC = GetDC(NULL);
+        if (!g_hScreenDC) {
+            error = "Screen device context could not be opened";
+            return false;
+        }
     }
 
-    HDC memoryDC = CreateCompatibleDC(screenDC);
-    if (!memoryDC) {
-        ReleaseDC(NULL, screenDC);
-        error = "Memory device context could not be created";
-        return false;
+    if (!g_hMemoryDC) {
+        g_hMemoryDC = CreateCompatibleDC(g_hScreenDC);
+        if (!g_hMemoryDC) {
+            error = "Memory device context could not be created";
+            return false;
+        }
     }
 
-    HBITMAP bitmap = CreateCompatibleBitmap(screenDC, outputWidth, outputHeight);
-    if (!bitmap) {
-        DeleteDC(memoryDC);
-        ReleaseDC(NULL, screenDC);
-        error = "Capture bitmap could not be created";
-        return false;
+    if (!g_hBitmap || outputWidth != g_cachedWidth || outputHeight != g_cachedHeight) {
+        if (g_hBitmap) {
+            DeleteObject(g_hBitmap);
+        }
+        g_hBitmap = CreateCompatibleBitmap(g_hScreenDC, outputWidth, outputHeight);
+        if (!g_hBitmap) {
+            error = "Capture bitmap could not be created";
+            return false;
+        }
+        g_cachedWidth = outputWidth;
+        g_cachedHeight = outputHeight;
     }
 
-    HGDIOBJ oldObject = SelectObject(memoryDC, bitmap);
-    SetStretchBltMode(memoryDC, COLORONCOLOR);
+    HGDIOBJ oldObject = SelectObject(g_hMemoryDC, g_hBitmap);
+    SetStretchBltMode(g_hMemoryDC, COLORONCOLOR);
 
     BOOL copied = StretchBlt(
-        memoryDC,
+        g_hMemoryDC,
         0,
         0,
         outputWidth,
         outputHeight,
-        screenDC,
+        g_hScreenDC,
         rect.left,
         rect.top,
         sourceWidth,
@@ -414,18 +433,45 @@ static bool capture_monitor_frame(const RECT& rect,
         SRCCOPY | CAPTUREBLT
     );
 
-    SelectObject(memoryDC, oldObject);
-    DeleteDC(memoryDC);
-    ReleaseDC(NULL, screenDC);
+    SelectObject(g_hMemoryDC, oldObject);
 
     if (!copied) {
-        DeleteObject(bitmap);
         error = "Screen capture failed";
         return false;
     }
 
-    bool encoded = bitmap_to_jpeg(bitmap, jpegQuality, jpegBytes, error);
-    DeleteObject(bitmap);
+    // Frame Difference Change Detection
+    bool isDifferent = true;
+    BITMAP bmp;
+    if (GetObject(g_hBitmap, sizeof(BITMAP), &bmp)) {
+        LONG size = bmp.bmWidthBytes * bmp.bmHeight;
+        vector<unsigned char> currentBits(size);
+        GetBitmapBits(g_hBitmap, size, currentBits.data());
+
+        DWORD now = now_ms();
+        if (outputWidth == g_prevWidth && outputHeight == g_prevHeight && !g_prevBits.empty()) {
+            if (currentBits == g_prevBits) {
+                // Check if 3 seconds have passed for a force refresh
+                if (now - g_lastSentTime < 3000) {
+                    isDifferent = false;
+                }
+            }
+        }
+
+        if (isDifferent) {
+            g_prevBits = move(currentBits);
+            g_prevWidth = outputWidth;
+            g_prevHeight = outputHeight;
+            g_lastSentTime = now;
+        }
+    }
+
+    if (!isDifferent) {
+        jpegBytes.clear(); // Indicates no change, caller should skip sending
+        return true;
+    }
+
+    bool encoded = bitmap_to_jpeg(g_hBitmap, jpegQuality, jpegBytes, error);
     return encoded;
 }
 
@@ -463,9 +509,13 @@ static void capture_loop() {
         string error;
 
         if (capture_monitor_frame(captureRect, scale, jpegBytes, width, height, error)) {
-            if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, jpegBytes)) {
-                g_captureRunning.store(false);
-                break;
+            if (jpegBytes.empty()) {
+                // No change, skip sending
+            } else {
+                if (!safe_send_monitor_frame(sock, monitor, scale, targetFps, width, height, jpegBytes)) {
+                    g_captureRunning.store(false);
+                    break;
+                }
             }
         } else {
             send_monitor_error(sock, error.empty() ? "Capture failed" : error);
@@ -474,7 +524,7 @@ static void capture_loop() {
         }
 
         DWORD elapsed = now_ms() - frameStart;
-        DWORD interval = (DWORD)max(1, 1000 / clamp_int(targetFps, 20, 30));
+        DWORD interval = (DWORD)max(1, 1000 / clamp_int(targetFps, 10, 60));
         DWORD waitMs = (elapsed >= interval) ? 1 : (interval - elapsed);
 
         while (waitMs > 0 && g_captureRunning.load()) {
@@ -483,6 +533,27 @@ static void capture_loop() {
             waitMs -= chunk;
         }
     }
+}
+
+static void cleanup_capture_resources() {
+    if (g_hBitmap) {
+        DeleteObject(g_hBitmap);
+        g_hBitmap = NULL;
+    }
+    if (g_hMemoryDC) {
+        DeleteDC(g_hMemoryDC);
+        g_hMemoryDC = NULL;
+    }
+    if (g_hScreenDC) {
+        ReleaseDC(NULL, g_hScreenDC);
+        g_hScreenDC = NULL;
+    }
+    g_cachedWidth = 0;
+    g_cachedHeight = 0;
+    g_prevBits.clear();
+    g_prevWidth = 0;
+    g_prevHeight = 0;
+    g_lastSentTime = 0;
 }
 
 static void stop_capture_thread() {
@@ -497,12 +568,13 @@ static void stop_capture_thread() {
 
     lock_guard<mutex> lock(g_captureMutex);
     g_hasCaptureRect = false;
+    cleanup_capture_resources();
 }
 
 static void start_capture(SOCKET sock, int monitorIndex, int scalePercent, int requestedFps) {
     scalePercent = clamp_int(scalePercent, 10, 100);
     int targetFps = requestedFps > 0
-        ? clamp_int(requestedFps, 20, 30)
+        ? clamp_int(requestedFps, 10, 60)
         : automatic_fps_for_scale(scalePercent);
 
     vector<MonitorData> monitors = enumerate_monitors();
@@ -654,6 +726,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_DETACH) {
         g_captureRunning.store(false);
+        cleanup_capture_resources();
         shutdown_gdiplus();
     }
     return TRUE;
