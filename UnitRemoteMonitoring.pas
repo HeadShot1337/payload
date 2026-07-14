@@ -525,7 +525,7 @@ begin
       hr := FDecoder.ProcessOutput(0, 1, @OutDataBuffer, @dwStatus);
 
       // Handle dynamic stream change on the same decoder instance
-      if hr = HRESULT($C00D6D61) then
+      if hr = HRESULT($C00D6D73) then
       begin
         hr := FDecoder.GetOutputAvailableType(0, 0, AvailableTypePtr);
         if hr >= 0 then
