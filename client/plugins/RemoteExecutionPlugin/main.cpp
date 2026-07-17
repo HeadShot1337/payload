@@ -17,7 +17,7 @@
 using json = nlohmann::json;
 using namespace std;
 
-// Base64 Decoder
+// Base64 Decoder with Overflow Protection
 vector<uint8_t> base64_decode(const string& in) {
     vector<uint8_t> out;
     vector<int> T(256, -1);
@@ -33,6 +33,7 @@ vector<uint8_t> base64_decode(const string& in) {
             out.push_back((uint8_t)((val >> valb) & 0xFF));
             valb -= 8;
         }
+        val &= 0xFFFFFF; // prevent left-shift overflow!
     }
     return out;
 }

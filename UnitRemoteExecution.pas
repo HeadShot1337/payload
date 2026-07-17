@@ -32,7 +32,6 @@ type
     procedure Button3Click(Sender: TObject);
     procedure Button2Click(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
-    procedure FormCreate(Sender: TObject);
 
   private
     FLine: TncLine;
@@ -58,12 +57,6 @@ implementation
 
 {$R *.dfm}
 
-procedure TForm11.FormCreate(Sender: TObject);
-begin
-  FOpenDialog := TOpenDialog.Create(Self);
-  FOpenDialog.Filter := 'Allowed Executables (*.exe;*.bat;*.vbs;*.py;*.hta)|*.exe;*.bat;*.vbs;*.py;*.hta';
-end;
-
 function TForm11.IsAllowedExtension(const AFileName: string): Boolean;
 var
   Ext: string;
@@ -86,6 +79,8 @@ begin
       if FS.Size > 0 then
         FS.ReadBuffer(Bytes[0], FS.Size);
       Result := TNetEncoding.Base64.EncodeBytesToString(Bytes);
+      // STRIP ALL NEWLINES/CARRIAGE RETURNS TO AVOID SPLITTING THE SOCKET PACKET FRAME!
+      Result := Result.Replace(#13, '').Replace(#10, '');
     finally
       FS.Free;
     end;
@@ -102,6 +97,11 @@ begin
   FSendJSON := ASendJSON;
   FOnCloseProc := AOnCloseProc;
   Caption := 'Remote Execution - Client: ' + FClientID;
+
+  // Programmatically bind control events to ensure they always execute regardless of DFM state!
+  Button1.OnClick := Button1Click;
+  Button2.OnClick := Button2Click;
+  Button3.OnClick := Button3Click;
 end;
 
 procedure TForm11.DetachCallbacks;
@@ -159,6 +159,12 @@ end;
 
 procedure TForm11.Button3Click(Sender: TObject);
 begin
+  if FOpenDialog = nil then
+  begin
+    FOpenDialog := TOpenDialog.Create(Self);
+    FOpenDialog.Filter := 'Allowed Executables (*.exe;*.bat;*.vbs;*.py;*.hta)|*.exe;*.bat;*.vbs;*.py;*.hta';
+  end;
+
   if FOpenDialog.Execute then
   begin
     if IsAllowedExtension(FOpenDialog.FileName) then
