@@ -4,7 +4,7 @@ interface
 
 uses
   Winapi.Windows, Winapi.Winsock2,
-  System.SysUtils, System.Classes, System.JSON,
+  System.SysUtils, System.Classes, System.JSON, System.Diagnostics,
   System.Generics.Collections, System.SyncObjs,
   Vcl.ExtCtrls, Vcl.Forms,
   ncSockets, ncLines,
@@ -1755,13 +1755,13 @@ begin
       else
         DoLog(lcError,   '"remote_execute" failed on ' + IP + MsgSuffix);
 
-      var F11 := GetRemoteExecutionForm(aLine);
-      if Assigned(F11) then
+      var LF11 := GetRemoteExecutionForm(aLine);
+      if Assigned(LF11) then
       begin
-        var JSONClone := TJSONObject(JSONObj.Clone);
+        JSONClone := TJSONObject(JSONObj.Clone);
         QueueToUI(procedure
         begin
-          try F11.HandleResponse(JSONClone); finally JSONClone.Free; end;
+          try LF11.HandleResponse(JSONClone); finally JSONClone.Free; end;
         end);
       end;
       Exit;
