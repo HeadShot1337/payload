@@ -1181,6 +1181,10 @@ static void input_loop() {
                     send_keyboard_message(hTarget, WM_CHAR, (WPARAM)13,
                                           key_lparam((WORD)vk, false),
                                           ctrlDown, altDown, shiftDown);
+                } else if (vk == VK_BACK) {
+                    send_keyboard_message(hTarget, WM_CHAR, (WPARAM)8,
+                                          key_lparam((WORD)vk, false),
+                                          ctrlDown, altDown, shiftDown);
                 }
             } else if (action == "hvnc_keyup") {
                 if (is_ctrl_key(vk)) ctrlDown = false;
