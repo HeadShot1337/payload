@@ -50,7 +50,6 @@ type
     FileManager1     : TMenuItem;
     HiddenVNC1       : TMenuItem;
     Recovery1: TMenuItem;
-    RemoteExecution1: TMenuItem;
     GroupBox3: TGroupBox;
     Button2: TButton;
     ComboBox1: TComboBox;
@@ -100,6 +99,7 @@ type
 
   private
     FServerManager: TServerManager;
+    FRemoteExecution1: TMenuItem;
     FCurrentPort  : Integer;
     FStartTime    : TDateTime;
     FTimerUI      : TTimer;
@@ -323,13 +323,13 @@ end;
 procedure TForm1.EnsureRemoteExecutionMenuItem;
 begin
   if not Assigned(PopupMenu1) then Exit;
-  if not Assigned(RemoteExecution1) then
+  if not Assigned(FRemoteExecution1) then
   begin
-    RemoteExecution1         := TMenuItem.Create(PopupMenu1);
-    RemoteExecution1.Caption := 'Remote Execution';
-    PopupMenu1.Items.Add(RemoteExecution1);
+    FRemoteExecution1         := TMenuItem.Create(PopupMenu1);
+    FRemoteExecution1.Caption := 'Remote Execution';
+    PopupMenu1.Items.Add(FRemoteExecution1);
   end;
-  RemoteExecution1.OnClick := RemoteExecution1Click;
+  FRemoteExecution1.OnClick := RemoteExecution1Click;
 end;
 
 procedure TForm1.RemoteExecution1Click(Sender: TObject);
