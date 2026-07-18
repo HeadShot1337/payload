@@ -100,7 +100,6 @@ type
   private
     FServerManager: TServerManager;
     FCurrentPort  : Integer;
-    procedure EnsureRemoteExecutionMenuItem;
     FStartTime    : TDateTime;
     FTimerUI      : TTimer;
     FLastIdleTime : Int64;
@@ -123,6 +122,7 @@ type
     procedure EnsureRemoteMonitoringMenuItem;
     procedure EnsureKeyloggerMenuItem;
     procedure EnsureOpenURLMenuItem;
+    procedure EnsureRemoteExecutionMenuItem;
     procedure RemoteExecution1Click(Sender: TObject);
 
     function  IsRealClientValue(const Value: string): Boolean;
