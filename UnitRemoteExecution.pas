@@ -1,4 +1,4 @@
-unit UnitRemoteExecution;
+﻿unit UnitRemoteExecution;
 
 interface
 
@@ -150,7 +150,6 @@ begin
       JSONObj.AddPair('action', 'remote_execute_url');
       JSONObj.AddPair('url', URL);
       FSendJSON(FLine, JSONObj);
-      MessageBox(Handle, 'Uzak dosya çalıştırma komutu gönderildi.', 'Bilgi', MB_OK or MB_ICONINFORMATION);
     finally
       JSONObj.Free;
     end;
@@ -216,7 +215,6 @@ begin
       JSONObj.AddPair('filename', FileName);
       JSONObj.AddPair('content', Content64);
       FSendJSON(FLine, JSONObj);
-      MessageBox(Handle, 'Yerel dosya yükleme ve çalıştırma komutu gönderildi.', 'Bilgi', MB_OK or MB_ICONINFORMATION);
     finally
       JSONObj.Free;
     end;
