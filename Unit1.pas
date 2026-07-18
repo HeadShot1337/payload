@@ -50,7 +50,6 @@ type
     FileManager1     : TMenuItem;
     HiddenVNC1       : TMenuItem;
     Recovery1: TMenuItem;
-    RemoteExecution1: TMenuItem;
     GroupBox3: TGroupBox;
     Button2: TButton;
     ComboBox1: TComboBox;
@@ -101,6 +100,7 @@ type
   private
     FServerManager: TServerManager;
     FCurrentPort  : Integer;
+    procedure EnsureRemoteExecutionMenuItem;
     FStartTime    : TDateTime;
     FTimerUI      : TTimer;
     FLastIdleTime : Int64;
@@ -180,7 +180,7 @@ begin
   EnsureRemoteMonitoringMenuItem;
   EnsureKeyloggerMenuItem;
   EnsureOpenURLMenuItem;
-  if Assigned(RemoteExecution1) then RemoteExecution1.OnClick := RemoteExecution1Click;
+  EnsureRemoteExecutionMenuItem;
 
   ListView1.OnMouseDown := ListView1MouseDown;
 
@@ -320,6 +320,34 @@ begin
 end;
 
 
+
+procedure TForm1.EnsureRemoteExecutionMenuItem;
+var
+  i: Integer;
+  MenuItem: TMenuItem;
+begin
+  if not Assigned(PopupMenu1) then Exit;
+
+  MenuItem := nil;
+  for i := 0 to PopupMenu1.Items.Count - 1 do
+  begin
+    if (Pos('Remote Execution', PopupMenu1.Items[i].Caption) > 0) or
+       SameText(PopupMenu1.Items[i].Name, 'RemoteExecution1') then
+    begin
+      MenuItem := PopupMenu1.Items[i];
+      Break;
+    end;
+  end;
+
+  if MenuItem = nil then
+  begin
+    MenuItem := TMenuItem.Create(PopupMenu1);
+    MenuItem.Caption := 'Remote Execution';
+    PopupMenu1.Items.Add(MenuItem);
+  end;
+
+  MenuItem.OnClick := RemoteExecution1Click;
+end;
 
 procedure TForm1.RemoteExecution1Click(Sender: TObject);
 var
