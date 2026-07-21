@@ -2133,6 +2133,9 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
         else if (wRequestedPath == L"Firefox") exeName = L"firefox.exe";
         else if (wRequestedPath == L"Waterfox") exeName = L"waterfox.exe";
         else if (wRequestedPath == L"LibreWolf") exeName = L"librewolf.exe";
+        else if (wRequestedPath == L"Opera") exeName = L"opera.exe";
+        else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
+        else if (wRequestedPath == L"Discord") exeName = L"Discord.exe";
 
         if (!exeName.empty()) {
             wstring exePath = get_app_path(exeName);
@@ -2150,6 +2153,23 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
                 } else if (wRequestedPath == L"Microsoft Edge") {
                     exePath = L"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
                     if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe";
+                } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
+                    wchar_t local[MAX_PATH];
+                    SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, local);
+                    exePath = wstring(local) + L"\\Programs\\Opera\\opera.exe";
+                    if (!fs::exists(exePath)) {
+                        exePath = wstring(local) + L"\\Programs\\Opera GX\\opera.exe";
+                    }
+                    if (!fs::exists(exePath)) {
+                        exePath = L"C:\\Program Files\\Opera\\opera.exe";
+                    }
+                    if (!fs::exists(exePath)) {
+                        exePath = L"C:\\Program Files\\Opera GX\\opera.exe";
+                    }
+                } else if (wRequestedPath == L"Discord") {
+                    wchar_t local[MAX_PATH];
+                    SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, local);
+                    exePath = wstring(local) + L"\\Discord\\app-*\\Discord.exe";
                 }
             }
             if (!exePath.empty()) {
@@ -2204,6 +2224,7 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
             std::vector<wstring> tryGlobs = {
                 wstring(userProfile) + L"\\Downloads\\" + wstring(exeStem.begin(), exeStem.end()) + L"*\\" + wstring(exeFile.begin(), exeFile.end()),
                 wstring(userProfile) + L"\\Desktop\\" + wstring(exeStem.begin(), exeStem.end()) + L"*\\" + wstring(exeFile.begin(), exeFile.end()),
+                wstring(localApp) + L"\\" + wstring(exeStem.begin(), exeStem.end()) + L"\\app-*\\" + wstring(exeFile.begin(), exeFile.end()),
                 wstring(localApp) + L"\\" + wstring(exeStem.begin(), exeStem.end()) + L"*\\" + wstring(exeFile.begin(), exeFile.end())
             };
             for (const auto& g : tryGlobs) {
