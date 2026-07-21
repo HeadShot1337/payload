@@ -857,18 +857,29 @@ static void capture_loop() {
         DWORD fullFrameInterval = staticFrames > 30 ? 7000 : 3000;
         bool forceFullFrame = g_forceFullFrame.exchange(false) || (lastFullFrame == 0) || (now - lastFullFrame >= fullFrameInterval);
 
-        // Blit and scale walking the Z-order from bottom to top
-        HWND top = GetTopWindow(NULL);
-        HWND walk = top ? GetWindow(top, GW_HWNDLAST) : NULL;
+        // Blit and scale walking the Z-order from bottom to top using EnumDesktopWindows
+        std::vector<HWND> windows;
+        struct EnumParam {
+            std::vector<HWND>* list;
+        } param = { &windows };
+
+        EnumDesktopWindows(g_hHiddenDesktop, [](HWND hwnd, LPARAM lParam) -> BOOL {
+            auto p = reinterpret_cast<EnumParam*>(lParam);
+            p->list->push_back(hwnd);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&param));
+
+        // EnumDesktopWindows enumerates top to bottom. Reverse to draw bottom to top.
+        std::reverse(windows.begin(), windows.end());
 
         std::vector<std::pair<HWND, RECT>> toProcess;
         std::set<HWND> alive;
 
-        for (HWND cur = walk; cur != NULL; cur = GetWindow(cur, GW_HWNDPREV)) {
+        for (HWND cur : windows) {
             alive.insert(cur);
             if (!IsWindowVisible(cur) || IsIconic(cur)) continue;
             RECT r;
-            GetWindowRect(cur, &r);
+            if (!GetWindowRect(cur, &r)) continue;
             if (r.right <= r.left || r.bottom <= r.top) continue;
             if (r.right <= 0 || r.bottom <= 0 || r.left >= sw || r.top >= sh) continue;
             toProcess.push_back({cur, r});
@@ -890,9 +901,7 @@ static void capture_loop() {
             }
         }
 
-        HDC hdcFinal = CreateCompatibleDC(g_compHdcRef);
-        HGDIOBJ hOldFinal = SelectObject(hdcFinal, g_compHbm);
-        SetStretchBltMode(hdcFinal, COLORONCOLOR);
+        SetStretchBltMode(g_compHdc, COLORONCOLOR);
 
         for (auto& item : toProcess) {
             HWND hwnd = item.first;
@@ -923,7 +932,7 @@ static void capture_loop() {
             int dstW = (ww * scale) / 100;
             int dstH = (wh * scale) / 100;
 
-            StretchBlt(hdcFinal, dstX, dstY, dstW, dstH, entry->hdc, 0, 0, ww, wh, SRCCOPY);
+            StretchBlt(g_compHdc, dstX, dstY, dstW, dstH, entry->hdc, 0, 0, ww, wh, SRCCOPY);
         }
 
         // Draw cursor
@@ -931,11 +940,8 @@ static void capture_loop() {
         if (hArrow && g_curX >= 0 && g_curY >= 0 && g_curX < sw && g_curY < sh) {
             int cx = (g_curX * scale) / 100;
             int cy = (g_curY * scale) / 100;
-            DrawIconEx(hdcFinal, cx, cy, hArrow, 0, 0, 0, NULL, DI_NORMAL);
+            DrawIconEx(g_compHdc, cx, cy, hArrow, 0, 0, 0, NULL, DI_NORMAL);
         }
-
-        SelectObject(hdcFinal, hOldFinal);
-        DeleteDC(hdcFinal);
 
         {
             lock_guard<mutex> lock(g_frameMutex);
