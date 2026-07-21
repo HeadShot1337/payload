@@ -1743,6 +1743,8 @@ static void KillProcessByName(const string& exeName) {
     CloseHandle(snap);
 }
 
+typedef BOOL(WINAPI* pfnWTSQueryUserToken)(ULONG SessionId, PHANDLE phToken);
+
 static HANDLE GetLaunchToken() {
     const DWORD PROCESS_QUERY_LIMITED = 0x1000;
 
