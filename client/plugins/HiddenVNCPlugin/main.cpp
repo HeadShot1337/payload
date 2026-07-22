@@ -1847,24 +1847,53 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                     wstring exePath;
                     if (wRequestedPath == L"Discord") {
-                        wchar_t localApp[MAX_PATH];
+                        wchar_t localApp[MAX_PATH] = {0};
                         SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
-                        wstring updatePath = wstring(localApp) + L"\\Discord\\Update.exe";
-                        if (fs::exists(updatePath)) {
-                            exePath = updatePath;
-                        } else {
-                            fs::path discDir(wstring(localApp) + L"\\Discord");
-                            if (fs::exists(discDir)) {
-                                for (const auto& entry : fs::directory_iterator(discDir)) {
-                                    if (entry.is_directory() && entry.path().filename().wstring().rfind(L"app-", 0) == 0) {
-                                        wstring candidate = entry.path().wstring() + L"\\Discord.exe";
-                                        if (fs::exists(candidate)) {
-                                            exePath = candidate;
-                                            break;
+                        fs::path discDir(wstring(localApp) + L"\\Discord");
+                        if (fs::exists(discDir)) {
+                            wstring bestAppDir;
+                            for (const auto& entry : fs::directory_iterator(discDir)) {
+                                if (entry.is_directory()) {
+                                    wstring name = entry.path().filename().wstring();
+                                    if (name.rfind(L"app-", 0) == 0) {
+                                        if (bestAppDir.empty() || name > bestAppDir) {
+                                            bestAppDir = name;
                                         }
                                     }
                                 }
                             }
+                            if (!bestAppDir.empty()) {
+                                exePath = discDir.wstring() + L"\\" + bestAppDir + L"\\Discord.exe";
+                            }
+                        }
+                        if (exePath.empty() || !fs::exists(exePath)) {
+                            exePath = wstring(localApp) + L"\\Discord\\Update.exe";
+                        }
+                    } else if (wRequestedPath == L"Opera") {
+                        wchar_t localApp[MAX_PATH] = {0};
+                        SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                        exePath = wstring(localApp) + L"\\Programs\\Opera\\launcher.exe";
+                        if (!fs::exists(exePath)) exePath = wstring(localApp) + L"\\Programs\\Opera\\opera.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\Opera\\launcher.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\Opera\\opera.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Opera\\launcher.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Opera\\opera.exe";
+                    } else if (wRequestedPath == L"Opera GX") {
+                        wchar_t localApp[MAX_PATH] = {0};
+                        SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                        exePath = wstring(localApp) + L"\\Programs\\Opera GX\\launcher.exe";
+                        if (!fs::exists(exePath)) exePath = wstring(localApp) + L"\\Programs\\Opera GX\\opera.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\Opera GX\\launcher.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\Opera GX\\opera.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Opera GX\\launcher.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Opera GX\\opera.exe";
+                    } else if (wRequestedPath == L"Brave") {
+                        exePath = L"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
+                        if (!fs::exists(exePath)) {
+                            wchar_t localApp[MAX_PATH] = {0};
+                            SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                            exePath = wstring(localApp) + L"\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
                         }
                     } else {
                         exePath = get_app_path(exeName);
@@ -1876,21 +1905,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 exePath = L"C:\\Program Files\\Waterfox\\waterfox.exe";
                             } else if (wRequestedPath == L"LibreWolf") {
                                 exePath = L"C:\\Program Files\\LibreWolf\\librewolf.exe";
-                            } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
-                                wchar_t localApp[MAX_PATH];
-                                SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
-                                exePath = wstring(localApp) + L"\\Programs\\Opera\\launcher.exe";
-                                if (!fs::exists(exePath)) {
-                                    exePath = wstring(localApp) + L"\\Programs\\Opera GX\\launcher.exe";
-                                }
-                                if (!fs::exists(exePath)) {
-                                    exePath = L"C:\\Program Files\\Opera\\launcher.exe";
-                                }
-                                if (!fs::exists(exePath)) {
-                                    exePath = L"C:\\Program Files\\Opera GX\\launcher.exe";
-                                }
-                            } else if (wRequestedPath == L"Brave") {
-                                exePath = L"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
                             }
                         }
                     }
