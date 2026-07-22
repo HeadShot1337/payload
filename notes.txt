@@ -4,7 +4,17 @@ Bu belgede, VNCFeature.cs ve C++ istemci eklentisinde yaptığımız köklü iyi
 
 ---
 
-### 1. Önerilen Yeni Arayüz Bileşenleri (Delphi Designer)
+### 1. Eklenen CheckBox2 (Mevcut Tarayıcıyı Kapat seçeneği)
+* Sunucu tarafına eklenen **CheckBox2** bileşeni sayesinde, istemci gizli masaüstünde bir tarayıcı (veya Discord) başlatmadan önce normal masaüstündeki açık olan örnekleri kapatabilir.
+* **Tasarımcı Adımları (Delphi Form Designer):**
+  1. `UnitHiddenVNC` formunu Delphi Designer ile açın.
+  2. Form üzerine yeni bir `TCheckBox` ekleyin ve ismini **`CheckBox2`** yapın (Name: `CheckBox2`).
+  3. **Caption** özelliğini `"Mevcut Tarayıcıyı/Uygulamayı Kapat"` veya `"Önce Gerçek Tarayıcıyı Kapat"` olarak ayarlayın.
+  4. Bu seçeneğin aktif edilmesiyle, tarayıcı gizli masaüstünde çalıştırılmadan önce normal masaüstündeki örnekler sonlandırılır ve profil kilitleme/dosya erişim kilitlenmeleri tamamen önlenmiş olur.
+
+---
+
+### 2. Önerilen Diğer Yeni Arayüz Bileşenleri (Delphi Designer)
 
 #### A. Tam Ekran Yenileme Butonu (Refresh / Force Full Frame)
 * **Açıklama:** İstemcinin sıkışan pencereleri veya çizim hatalarını aşması için manuel olarak tam kare tetikleyen bir "Yenile" butonu eklenebilir.
@@ -37,7 +47,7 @@ Bu belgede, VNCFeature.cs ve C++ istemci eklentisinde yaptığımız köklü iyi
 
 ---
 
-### 2. Yapılan İyileştirmeler ve Çalışma Mantığı
+### 3. Yapılan İyileştirmeler ve Çalışma Mantığı
 
 1. **Akıllı Pencere Algılama (SmartWindowFromPoint):**
    - İstemci tarafında artık `WorkerW`, `Progman` ve `UserOOBEWindowClass` gibi masaüstü arka plan katmanları tıklama esnasında otomatik olarak es geçilir (`WS_EX_TRANSPARENT` stili dinamik olarak uygulanır). Böylece arka plana tıklansa dahi altındaki gerçek pencereler doğruca algılanır.
@@ -49,7 +59,10 @@ Bu belgede, VNCFeature.cs ve C++ istemci eklentisinde yaptığımız köklü iyi
    - Eski yavaş ve senkron kopyalama yerine, gereksiz ve kilitli klasörleri (Cache, GPUCache, vb.) ayıklayan **paralel 4-kanallı** bir kopyalama mimarisi kuruldu.
    - Kopyalama esnasında Delphi formunuzdaki durum çubuğunda (`StatusBar1`) ilerleme durumu yüzde olarak anlık güncellenir (Örn: `Profiller kopyalanıyor (%45)...`).
 
-4. **Kusursuz Klavye ve Kısayol Desteği:**
+4. **Discord, Opera, Opera GX, Brave Desteği:**
+   - Sero VNC'de olduğu gibi popüler tüm platformlar ve tarayıcılar (Google Chrome, Microsoft Edge, Firefox, Waterfox, LibreWolf, Opera, Opera GX, Brave ve Discord) için tam profil kopyalama ve çalıştırma desteği eklendi.
+
+5. **Kusursuz Klavye ve Kısayol Desteği:**
    - CapsLock, Shift, Ctrl ve Alt tuş durumları istemci tarafında hassasiyetle korunur.
    - `Ctrl+A`, `Ctrl+C`, `Ctrl+V`, `Ctrl+X` ve `Ctrl+Z` gibi kritik metin kısayolları için hem `WM_KEYDOWN` hem de ilgili kontrol karakterleri (`WM_CHAR` 0x01, 0x03, 0x16 vb.) birlikte gönderilerek tarayıcı ve editörlerde tam uyumluluk sağlanmıştır.
    - UIA pencereleri (`UIItemsView`) ve Qt tabanlı uygulamalar (Telegram, AyuGram) için senkronize mesaj iletimi entegre edilmiştir.

