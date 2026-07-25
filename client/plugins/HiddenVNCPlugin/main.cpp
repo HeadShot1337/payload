@@ -1823,8 +1823,8 @@ static const vector<wstring> SKIPPED_PROFILE_DIRS = {
     L"BrowserMetrics", L"BrowserMetrics-spare", L"component_crx_cache",
     L"optimization_guide_model_downloads", L"Safe Browsing", L"FileTypePolicies",
     L"PepperFlash", L"WidevineCdm", L"MEIPreload", L"OriginTrials",
-    L"cache2", L"startupCache", L"shader-cache", L"thumbnails", L"storage",
-    L"Service Worker", L"Media Cache", L"WebStorage", L"crash_reporter"
+    L"cache2", L"startupCache", L"shader-cache", L"thumbnails",
+    L"Media Cache", L"crash_reporter"
 };
 
 static bool should_skip_dir(const wstring& name) {
