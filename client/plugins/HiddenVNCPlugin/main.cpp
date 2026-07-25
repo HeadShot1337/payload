@@ -1736,7 +1736,7 @@ static wstring get_firefox_real_profile_path(const wstring& sourceUserData) {
         }
     };
 
-    FILE* f = _wfopen(iniPath.c_str(), L"r");
+    FILE* f = _wfopen(iniPath.c_str(), L"r, ccs=UTF-8");
     if (f) {
         wchar_t line[512];
         while (fgetws(line, 512, f)) {
