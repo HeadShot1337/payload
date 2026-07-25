@@ -2228,7 +2228,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                     wstring args;
                     if (isGecko) {
-                        args = L" -no-remote";
+                        args = L" -no-remote -allow-downgrade";
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
