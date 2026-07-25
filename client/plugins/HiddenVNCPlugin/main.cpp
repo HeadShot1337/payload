@@ -1854,6 +1854,35 @@ static void collect_file_pairs(const fs::path& src, const fs::path& dst, vector<
     } catch (...) {}
 }
 
+static bool CopyFileWithSharing(const wchar_t* src, const wchar_t* dst) {
+    HANDLE hSrc = CreateFileW(src, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hSrc == INVALID_HANDLE_VALUE) {
+        return CopyFileW(src, dst, FALSE) != FALSE;
+    }
+
+    HANDLE hDst = CreateFileW(dst, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hDst == INVALID_HANDLE_VALUE) {
+        CloseHandle(hSrc);
+        return false;
+    }
+
+    char buffer[16384];
+    DWORD bytesRead = 0;
+    DWORD bytesWritten = 0;
+    bool success = true;
+
+    while (ReadFile(hSrc, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        if (!WriteFile(hDst, buffer, bytesRead, &bytesWritten, NULL) || bytesWritten != bytesRead) {
+            success = false;
+            break;
+        }
+    }
+
+    CloseHandle(hSrc);
+    CloseHandle(hDst);
+    return success;
+}
+
 static bool copy_profile_parallel(const wstring& src_dir, const wstring& dst_dir, const string& label) {
     vector<pair<wstring, wstring>> tasks;
     collect_file_pairs(fs::path(src_dir), fs::path(dst_dir), tasks);
@@ -1890,7 +1919,7 @@ static bool copy_profile_parallel(const wstring& src_dir, const wstring& dst_dir
                     fs::create_directories(dst_path.parent_path());
                 } catch (...) {}
 
-                if (!CopyFileW(task.first.c_str(), task.second.c_str(), FALSE)) {
+                if (!CopyFileWithSharing(task.first.c_str(), task.second.c_str())) {
                     // Ignore errors for robustness
                 }
                 progress_count.fetch_add(1);
