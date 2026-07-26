@@ -2348,7 +2348,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::path userJsPath = fs::path(profilePath) / L"user.js";
                                 FILE* f = _wfopen(userJsPath.wstring().c_str(), L"a");
                                 if (f) {
-                                    fputs("user_pref(\"gfx.webrender.force-disabled\", true);\n", f);
                                     fputs("user_pref(\"gfx.webrender.all\", false);\n", f);
                                     fputs("user_pref(\"gfx.webrender.software\", true);\n", f);
                                     fputs("user_pref(\"layers.acceleration.disabled\", true);\n", f);
