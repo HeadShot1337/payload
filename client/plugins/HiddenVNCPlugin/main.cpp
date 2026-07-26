@@ -2385,6 +2385,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
+                        SetEnvironmentVariableW(L"MOZ_LEGACY_PROFILES", L"1");
+                        SetEnvironmentVariableW(L"MOZ_ALLOW_DOWNGRADE", L"1");
                     }
 
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
@@ -2400,6 +2402,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
+                        SetEnvironmentVariableW(L"MOZ_LEGACY_PROFILES", NULL);
+                        SetEnvironmentVariableW(L"MOZ_ALLOW_DOWNGRADE", NULL);
                     }
 
                     if (hCurrentDesktop) {
