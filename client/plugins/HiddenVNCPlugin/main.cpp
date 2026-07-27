@@ -1711,24 +1711,23 @@ static wstring find_gecko_profile_fallback(const wstring& geckoUserDataDir) {
     return fallbackDir;
 }
 
+struct IniSection {
+    wstring name;
+    vector<pair<wstring, wstring>> kvs;
+};
+
 static wstring resolve_gecko_profile_from_ini(const wstring& geckoUserDataDir) {
     wstring iniPath = geckoUserDataDir + L"\\profiles.ini";
     FILE* f = _wfopen(iniPath.c_str(), L"r, ccs=UTF-8");
     if (!f) return L"";
 
-    wstring defaultPath = L"";
-    bool defaultIsRelative = true;
+    vector<IniSection> sections;
+    wchar_t line[1024];
+    IniSection currentSection;
+    currentSection.name = L"";
 
-    // We will parse the ini blocks
-    wchar_t line[512];
-    wstring currentSection = L"";
-    wstring sectionPath = L"";
-    bool sectionIsRelative = true;
-    bool sectionIsDefault = false;
-
-    while (fgetws(line, 512, f)) {
+    while (fgetws(line, 1024, f)) {
         wstring strLine = line;
-        // Trim whitespaces/newlines
         while (!strLine.empty() && (strLine.back() == L'\r' || strLine.back() == L'\n' || strLine.back() == L' ' || strLine.back() == L'\t')) {
             strLine.pop_back();
         }
@@ -1739,50 +1738,128 @@ static wstring resolve_gecko_profile_from_ini(const wstring& geckoUserDataDir) {
         if (startIdx > 0) {
             strLine = strLine.substr(startIdx);
         }
-
-        if (strLine.empty() || strLine[0] == L';') continue;
+        if (strLine.empty() || strLine[0] == L';' || strLine[0] == L'#') continue;
 
         if (strLine[0] == L'[' && strLine.back() == L']') {
-            // Process previous section if it was Default
-            if (sectionIsDefault && !sectionPath.empty()) {
-                defaultPath = sectionPath;
-                defaultIsRelative = sectionIsRelative;
+            if (!currentSection.name.empty() || !currentSection.kvs.empty()) {
+                sections.push_back(currentSection);
             }
-            currentSection = strLine.substr(1, strLine.size() - 2);
-            sectionPath = L"";
-            sectionIsRelative = true;
-            sectionIsDefault = false;
+            currentSection.name = strLine.substr(1, strLine.size() - 2);
+            currentSection.kvs.clear();
         } else {
             size_t eq = strLine.find(L'=');
             if (eq != wstring::npos) {
                 wstring key = strLine.substr(0, eq);
                 wstring val = strLine.substr(eq + 1);
-                if (key == L"Path") {
-                    sectionPath = val;
-                endIdx:;
-                } else if (key == L"IsRelative") {
-                    sectionIsRelative = (val == L"1");
-                } else if (key == L"Default" && val == L"1") {
-                    sectionIsDefault = true;
+                while (!key.empty() && (key.back() == L' ' || key.back() == L'\t')) key.pop_back();
+                while (!val.empty() && (val.back() == L' ' || val.back() == L'\t')) val.pop_back();
+                currentSection.kvs.push_back({key, val});
+            }
+        }
+    }
+    if (!currentSection.name.empty() || !currentSection.kvs.empty()) {
+        sections.push_back(currentSection);
+    }
+    fclose(f);
+
+    wstring resolvedPath = L"";
+    bool isRelative = true;
+
+    // 1. Look for [Install...] default path
+    for (const auto& sec : sections) {
+        if (sec.name.rfind(L"Install", 0) == 0) {
+            for (const auto& kv : sec.kvs) {
+                if (kv.first == L"Default") {
+                    resolvedPath = kv.second;
+                    isRelative = true;
+                    break;
+                }
+            }
+        }
+        if (!resolvedPath.empty()) break;
+    }
+
+    // 2. If not found in [Install...], look for [Profile...] where Default=1
+    if (resolvedPath.empty()) {
+        for (const auto& sec : sections) {
+            if (sec.name.rfind(L"Profile", 0) == 0) {
+                bool isDef = false;
+                wstring pathVal = L"";
+                bool relVal = true;
+                for (const auto& kv : sec.kvs) {
+                    if (kv.first == L"Default" && kv.second == L"1") {
+                        isDef = true;
+                    } else if (kv.first == L"Path") {
+                        pathVal = kv.second;
+                    } else if (kv.first == L"IsRelative") {
+                        relVal = (kv.second == L"1");
+                    }
+                }
+                if (isDef && !pathVal.empty()) {
+                    resolvedPath = pathVal;
+                    isRelative = relVal;
+                    break;
                 }
             }
         }
     }
-    if (sectionIsDefault && !sectionPath.empty()) {
-        defaultPath = sectionPath;
-        defaultIsRelative = sectionIsRelative;
-    }
-    fclose(f);
 
-    if (!defaultPath.empty()) {
-        // Replace slashes with backslashes
-        for (size_t i = 0; i < defaultPath.size(); i++) {
-            if (defaultPath[i] == L'/') defaultPath[i] = L'\\';
+    // 3. Fallback to any [Profile...] containing "default-release" or "default"
+    if (resolvedPath.empty()) {
+        for (const auto& sec : sections) {
+            if (sec.name.rfind(L"Profile", 0) == 0) {
+                wstring pathVal = L"";
+                bool relVal = true;
+                bool isDefaultRelease = false;
+                for (const auto& kv : sec.kvs) {
+                    if (kv.first == L"Path") {
+                        pathVal = kv.second;
+                        if (pathVal.find(L"default-release") != wstring::npos) {
+                            isDefaultRelease = true;
+                        }
+                    } else if (kv.first == L"IsRelative") {
+                        relVal = (kv.second == L"1");
+                    }
+                }
+                if (isDefaultRelease && !pathVal.empty()) {
+                    resolvedPath = pathVal;
+                    isRelative = relVal;
+                    break;
+                }
+            }
         }
-        if (defaultIsRelative) {
-            return geckoUserDataDir + L"\\" + defaultPath;
+    }
+
+    // 4. Fallback to first [Profile...] if we still haven't resolved anything
+    if (resolvedPath.empty()) {
+        for (const auto& sec : sections) {
+            if (sec.name.rfind(L"Profile", 0) == 0) {
+                wstring pathVal = L"";
+                bool relVal = true;
+                for (const auto& kv : sec.kvs) {
+                    if (kv.first == L"Path") {
+                        pathVal = kv.second;
+                    } else if (kv.first == L"IsRelative") {
+                        relVal = (kv.second == L"1");
+                    }
+                }
+                if (!pathVal.empty()) {
+                    resolvedPath = pathVal;
+                    isRelative = relVal;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!resolvedPath.empty()) {
+        for (size_t i = 0; i < resolvedPath.size(); i++) {
+            if (resolvedPath[i] == L'/') resolvedPath[i] = L'\\';
+        }
+        if (isRelative) {
+            return geckoUserDataDir + L"\\" + resolvedPath;
         } else {
-            return defaultPath;
+            return resolvedPath;
         }
     }
     return L"";
@@ -1860,8 +1937,8 @@ static const vector<wstring> SKIPPED_PROFILE_DIRS = {
     L"BrowserMetrics", L"BrowserMetrics-spare", L"component_crx_cache",
     L"optimization_guide_model_downloads", L"Safe Browsing", L"FileTypePolicies",
     L"PepperFlash", L"WidevineCdm", L"MEIPreload", L"OriginTrials",
-    L"cache2", L"startupCache", L"shader-cache", L"thumbnails", L"storage",
-    L"Service Worker", L"Media Cache", L"WebStorage", L"crash_reporter"
+    L"cache2", L"startupCache", L"shader-cache", L"thumbnails",
+    L"Media Cache", L"crash_reporter"
 };
 
 static bool should_skip_dir(const wstring& name) {
