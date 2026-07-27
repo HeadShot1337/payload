@@ -1810,6 +1810,8 @@ static wstring find_gecko_profile_fallback(const wstring& sourceUserData) {
     return L"";
 }
 
+static HANDLE GetLaunchToken();
+
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
     HANDLE hToken = GetLaunchToken();
