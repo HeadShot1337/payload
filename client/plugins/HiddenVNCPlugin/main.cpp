@@ -1195,8 +1195,18 @@ static bool is_taskbar(HWND hwnd) {
 }
 
 static void activate_window(HWND root, HWND hwnd) {
-    SetForegroundWindow(root);
-    SetActiveWindow(root);
+    HWND hFore = GetForegroundWindow();
+    DWORD forePid = 0;
+    if (hFore) {
+        GetWindowThreadProcessId(hFore, &forePid);
+    }
+    DWORD targetPid = 0;
+    GetWindowThreadProcessId(root, &targetPid);
+
+    if (forePid != targetPid) {
+        SetForegroundWindow(root);
+        SetActiveWindow(root);
+    }
     SetFocus(hwnd);
     g_hLastWindow = hwnd;
 }
