@@ -1687,6 +1687,14 @@ static string wstring_to_utf8(const wstring& wstr) {
     return res;
 }
 
+// ============================================================================
+//  GECKO (FIREFOX) PROFILE RESOLUTION HELPERS
+// ============================================================================
+
+/**
+ * Fallback scanner that searches the Gecko profile directory for any ".default-release"
+ * or ".default" directories if the profiles.ini parsing fails or is missing.
+ */
 static wstring find_gecko_profile_fallback(const wstring& geckoUserDataDir) {
     wstring profilesPath = geckoUserDataDir + L"\\Profiles";
     wstring fallbackDir;
@@ -1716,6 +1724,11 @@ struct IniSection {
     vector<pair<wstring, wstring>> kvs;
 };
 
+/**
+ * Resolves the active default Gecko (Firefox) profile directory by parsing the
+ * UTF-8 profiles.ini file. It handles modern Firefox configurations including
+ * "[Install...]" default mapping paths and fallback structures.
+ */
 static wstring resolve_gecko_profile_from_ini(const wstring& geckoUserDataDir) {
     wstring iniPath = geckoUserDataDir + L"\\profiles.ini";
     FILE* f = _wfopen(iniPath.c_str(), L"r, ccs=UTF-8");
