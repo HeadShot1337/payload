@@ -1173,11 +1173,11 @@ static bool is_context_menu_or_popup(HWND prevRoot, HWND root) {
     if (!root) return false;
     wchar_t cls[256] = {0};
     if (GetClassNameW(root, cls, 256)) {
-        if (wcscmp(cls, L"#32768") == 0) return true;
+        if (wcscmp(cls, L"#32768") == 0 || wcscmp(cls, L"MozillaDropShadowWindowClass") == 0) return true;
     }
     LONG style = GetWindowLongW(root, GWL_STYLE);
     bool isPopup = (style & WS_POPUP) != 0;
-    if (!isPopup) return false;
+    if (isPopup) return true;
     if (!prevRoot) return false;
     DWORD pidPrev = 0, pidNew = 0;
     GetWindowThreadProcessId(prevRoot, &pidPrev);
