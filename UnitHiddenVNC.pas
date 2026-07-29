@@ -161,6 +161,7 @@ begin
   ComboBox2.Items.Add('Firefox');
   ComboBox2.Items.Add('Waterfox');
   ComboBox2.Items.Add('LibreWolf');
+  ComboBox2.Items.Add('Thunderbird');
   ComboBox2.ItemIndex := 0;
 
   PaintBox1.ControlStyle := PaintBox1.ControlStyle + [csDoubleClicks, csOpaque];

