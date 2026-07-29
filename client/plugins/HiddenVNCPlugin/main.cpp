@@ -2366,6 +2366,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring args;
                     if (isGecko) {
                         args = L" -no-remote -allow-downgrade";
+                        if (wRequestedPath == L"Thunderbird") {
+                            args += L" -mail";
+                        }
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
@@ -2445,11 +2448,16 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                     fputs("user_pref(\"layers.acceleration.disabled\", true);\n", f);
                                     fputs("user_pref(\"layers.acceleration.force-enabled\", false);\n", f);
                                     fputs("user_pref(\"media.hardware-video-decoding.enabled\", false);\n", f);
+                                    if (wRequestedPath == L"Thunderbird") {
+                                        fputs("user_pref(\"mail.minimizeToTray\", false);\n", f);
+                                        fputs("user_pref(\"mail.closeToTray\", false);\n", f);
+                                    }
                                     fclose(f);
                                 }
                                 fs::remove(fs::path(profilePath) / L"parent.lock");
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
+                                fs::remove(fs::path(profilePath) / L"xulstore.json");
                             } else {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
