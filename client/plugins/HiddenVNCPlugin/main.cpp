@@ -1882,13 +1882,33 @@ static wstring get_app_path(const wstring& appName) {
     HKEY hKey;
     wstring subkey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + appName;
     wstring path;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
         wchar_t buffer[MAX_PATH];
         DWORD size = sizeof(buffer);
         if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
             path = buffer;
         }
         RegCloseKey(hKey);
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
     }
     if (path.empty()) {
         if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
@@ -1899,6 +1919,9 @@ static wstring get_app_path(const wstring& appName) {
             }
             RegCloseKey(hKey);
         }
+    }
+    if (path.size() >= 2 && path.front() == L'"' && path.back() == L'"') {
+        path = path.substr(1, path.size() - 2);
     }
     return path;
 }
@@ -2193,13 +2216,23 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (wRequestedPath == L"Outlook") {
                         exePath = get_app_path(L"outlook.exe");
                         if (exePath.empty() || !fs::exists(exePath)) {
+                            wchar_t progFiles[MAX_PATH] = {0};
+                            wchar_t progFilesX86[MAX_PATH] = {0};
+                            GetEnvironmentVariableW(L"ProgramFiles", progFiles, MAX_PATH);
+                            GetEnvironmentVariableW(L"ProgramFiles(x86)", progFilesX86, MAX_PATH);
+
+                            wstring pf = progFiles[0] ? progFiles : L"C:\\Program Files";
+                            wstring pfx86 = progFilesX86[0] ? progFilesX86 : L"C:\\Program Files (x86)";
+
                             vector<wstring> fallbacks = {
-                                L"C:\\Program Files\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE",
-                                L"C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE",
-                                L"C:\\Program Files\\Microsoft Office\\Office16\\OUTLOOK.EXE",
-                                L"C:\\Program Files (x86)\\Microsoft Office\\Office16\\OUTLOOK.EXE",
-                                L"C:\\Program Files\\Microsoft Office\\Office15\\OUTLOOK.EXE",
-                                L"C:\\Program Files (x86)\\Microsoft Office\\Office15\\OUTLOOK.EXE"
+                                pf + L"\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE",
+                                pfx86 + L"\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE",
+                                pf + L"\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+                                pfx86 + L"\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+                                pf + L"\\Microsoft Office\\Office15\\OUTLOOK.EXE",
+                                pfx86 + L"\\Microsoft Office\\Office15\\OUTLOOK.EXE",
+                                pf + L"\\Microsoft Office\\Office14\\OUTLOOK.EXE",
+                                pfx86 + L"\\Microsoft Office\\Office14\\OUTLOOK.EXE"
                             };
                             for (const auto& fb : fallbacks) {
                                 if (fs::exists(fb)) {
