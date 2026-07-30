@@ -1950,7 +1950,7 @@ static void disable_discord_hw_accel(const wstring& profilePath) {
         fs::path settingsPath = fs::path(profilePath) / L"settings.json";
         json settings;
         if (fs::exists(settingsPath)) {
-            ifstream f(settingsPath.wstring());
+            ifstream f(settingsPath.wstring().c_str());
             if (f.is_open()) {
                 f >> settings;
                 f.close();
@@ -1960,7 +1960,7 @@ static void disable_discord_hw_accel(const wstring& profilePath) {
         settings["IS_MAXIMIZED"] = false;
         settings["IS_MINIMIZED"] = false;
 
-        ofstream f(settingsPath.wstring());
+        ofstream f(settingsPath.wstring().c_str());
         if (f.is_open()) {
             f << settings.dump(4);
             f.close();
