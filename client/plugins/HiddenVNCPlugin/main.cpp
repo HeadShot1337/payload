@@ -1921,6 +1921,16 @@ static wstring get_outlook_client_path() {
         RegCloseKey(hKey);
     }
     if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH * 2];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             wchar_t buffer[MAX_PATH * 2];
             DWORD size = sizeof(buffer);
@@ -1932,6 +1942,16 @@ static wstring get_outlook_client_path() {
     }
     if (path.empty()) {
         if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH * 2];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS) {
             wchar_t buffer[MAX_PATH * 2];
             DWORD size = sizeof(buffer);
             if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
@@ -1987,6 +2007,16 @@ static wstring get_office_install_root(const wstring& version) {
         RegCloseKey(hKey);
     }
     if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             wchar_t buffer[MAX_PATH];
             DWORD size = sizeof(buffer);
@@ -1998,6 +2028,16 @@ static wstring get_office_install_root(const wstring& version) {
     }
     if (path.empty()) {
         if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS) {
             wchar_t buffer[MAX_PATH];
             DWORD size = sizeof(buffer);
             if (RegQueryValueExW(hKey, L"Path", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
@@ -2032,6 +2072,16 @@ static wstring get_app_path(const wstring& appName) {
         RegCloseKey(hKey);
     }
     if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             wchar_t buffer[MAX_PATH];
             DWORD size = sizeof(buffer);
@@ -2043,6 +2093,16 @@ static wstring get_app_path(const wstring& appName) {
     }
     if (path.empty()) {
         if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            wchar_t buffer[MAX_PATH];
+            DWORD size = sizeof(buffer);
+            if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
+                path = buffer;
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    if (path.empty()) {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS) {
             wchar_t buffer[MAX_PATH];
             DWORD size = sizeof(buffer);
             if (RegQueryValueExW(hKey, NULL, NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS) {
