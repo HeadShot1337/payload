@@ -2517,9 +2517,14 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         if (exePath.empty() || !fs::exists(exePath)) {
                             wchar_t localApp[MAX_PATH] = {0};
                             if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp) == S_OK) {
-                                wstring storeAlias = wstring(localApp) + L"\\Microsoft\\WindowsApps\\outlook.exe";
-                                if (fs::exists(storeAlias)) {
-                                    exePath = storeAlias;
+                                wstring winAppsFolder = wstring(localApp) + L"\\Microsoft\\WindowsApps\\";
+                                vector<wstring> aliases = { L"olk.exe", L"outlook.exe", L"HxOutlook.exe" };
+                                for (const auto& alias : aliases) {
+                                    wstring path = winAppsFolder + alias;
+                                    if (fs::exists(path)) {
+                                        exePath = path;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -2543,14 +2548,14 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             }
                         }
 
-                        // 6. Absolute final fallback: Use cmd.exe /c start /b "" "outlook.exe"
+                        // 6. Absolute final fallback: Use cmd.exe /c start outlook: or start outlook.exe
                         if (exePath.empty() || !fs::exists(exePath)) {
                             wchar_t sysRoot[MAX_PATH] = {0};
                             GetEnvironmentVariableW(L"SystemRoot", sysRoot, MAX_PATH);
                             wstring cmdPath = sysRoot[0] ? (wstring(sysRoot) + L"\\System32\\cmd.exe") : L"C:\\Windows\\System32\\cmd.exe";
                             if (fs::exists(cmdPath)) {
                                 exePath = cmdPath;
-                                customArgs = L" /c start /b \"\" \"outlook.exe\"";
+                                customArgs = L" /c start outlook: || start /b \"\" \"outlook.exe\" || start /b \"\" \"olk.exe\" || start /b \"\" \"HxOutlook.exe\"";
                             }
                         }
                     } else if (wRequestedPath == L"Opera") {
