@@ -2376,8 +2376,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                     wstring args;
                     if (wRequestedPath == L"eM Client") {
+                        args = L" /localmutex";
                         if (copyProfile && !profilePath.empty()) {
-                            args = L" /dblocation \"" + profilePath + L"\"";
+                            args += L" /dblocation \"" + profilePath + L"\"";
                         }
                     } else if (isGecko) {
                         args = L" -no-remote -allow-downgrade";
