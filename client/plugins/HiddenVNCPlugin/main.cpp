@@ -2520,8 +2520,27 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    // For eM Client and other complex assemblies, we should pass the executable's parent directory as the current working directory
+                    wstring workingDir;
+                    try {
+                        workingDir = fs::path(exePath).parent_path().wstring();
+                    } catch (...) {
+                        workingDir = L"";
+                    }
+                    const wchar_t* lpCurrentDirectory = workingDir.empty() ? NULL : workingDir.c_str();
+
+                    if (isEmClient) {
+                        // Force WPF hardware acceleration off on the hidden desktop by setting the registry key temporarily or environment rules
+                        HKEY hKey;
+                        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+                            DWORD val = 1;
+                            RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
+                            RegCloseKey(hKey);
+                        }
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                       0, NULL, NULL, &si, &pi)) {
+                                       0, NULL, lpCurrentDirectory, &si, &pi)) {
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
