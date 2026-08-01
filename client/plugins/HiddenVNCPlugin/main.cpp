@@ -2517,6 +2517,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         if (isEMClient) {
                             hasOldVal = read_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
                             write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", 1);
+                            SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", L"--disable-gpu --disable-gpu-compositing --force-cpu-draw --no-sandbox");
                         }
 
                         PROCESS_INFORMATION pi = { 0 };
@@ -2540,6 +2541,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             } else {
                                 delete_registry_value(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration");
                             }
+                            SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", NULL);
                         }
 
                         if (isGecko) {

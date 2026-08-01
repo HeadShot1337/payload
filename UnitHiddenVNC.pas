@@ -152,7 +152,7 @@ begin
   ComboBox1.Items.Add('100%');
   ComboBox1.ItemIndex := 4;
 
-  ComboBox2.Items.Clear;
+  ComboBox2.Items.Clear; // Discord has been completely removed
   ComboBox2.Items.Add('powershell.exe');
   ComboBox2.Items.Add('cmd.exe');
   ComboBox2.Items.Add('explorer.exe');
