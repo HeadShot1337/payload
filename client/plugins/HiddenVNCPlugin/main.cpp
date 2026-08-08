@@ -971,12 +971,23 @@ static void capture_loop() {
                 }
 
                 if (isTargetWpf) {
-                    if (IsIconic(hwnd)) {
-                        ShowWindow(hwnd, SW_RESTORE);
-                        SetForegroundWindow(hwnd);
-                    } else if (!IsWindowVisible(hwnd)) {
-                        ShowWindow(hwnd, SW_SHOW);
-                        SetForegroundWindow(hwnd);
+                    wchar_t title[512] = {0};
+                    GetWindowTextW(hwnd, title, 512);
+                    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+                    HWND owner = GetWindow(hwnd, GW_OWNER);
+
+                    bool isMainWindow = (wcslen(title) > 0) &&
+                                         ((style & WS_CAPTION) == WS_CAPTION) &&
+                                         (owner == NULL);
+
+                    if (isMainWindow) {
+                        if (IsIconic(hwnd)) {
+                            ShowWindow(hwnd, SW_RESTORE);
+                            SetForegroundWindow(hwnd);
+                        } else if (!IsWindowVisible(hwnd)) {
+                            ShowWindow(hwnd, SW_SHOW);
+                            SetForegroundWindow(hwnd);
+                        }
                     }
                 }
 
