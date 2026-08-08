@@ -989,10 +989,6 @@ static void capture_loop() {
                         if (IsIconic(hwnd)) {
                             ShowWindow(hwnd, SW_RESTORE);
                             SetForegroundWindow(hwnd);
-                        } else if (!IsWindowVisible(hwnd)) {
-                            ShowWindow(hwnd, SW_SHOW);
-                            ShowWindow(hwnd, SW_RESTORE);
-                            SetForegroundWindow(hwnd);
                         }
                     }
                 }
