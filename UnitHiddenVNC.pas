@@ -158,9 +158,14 @@ begin
   ComboBox2.Items.Add('explorer.exe');
   ComboBox2.Items.Add('Google Chrome');
   ComboBox2.Items.Add('Microsoft Edge');
+  ComboBox2.Items.Add('Brave');
+  ComboBox2.Items.Add('Opera');
+  ComboBox2.Items.Add('Opera GX');
   ComboBox2.Items.Add('Firefox');
   ComboBox2.Items.Add('Waterfox');
   ComboBox2.Items.Add('LibreWolf');
+  ComboBox2.Items.Add('Thunderbird');
+  ComboBox2.Items.Add('eM Client');
   ComboBox2.ItemIndex := 0;
 
   PaintBox1.ControlStyle := PaintBox1.ControlStyle + [csDoubleClicks, csOpaque];

