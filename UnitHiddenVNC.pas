@@ -165,7 +165,6 @@ begin
   ComboBox2.Items.Add('Opera');
   ComboBox2.Items.Add('Opera GX');
   ComboBox2.Items.Add('Brave');
-  ComboBox2.Items.Add('Outlook');
   ComboBox2.Items.Add('eM Client');
   ComboBox2.ItemIndex := 0;
 
