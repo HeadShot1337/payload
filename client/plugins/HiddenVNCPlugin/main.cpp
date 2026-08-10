@@ -251,45 +251,6 @@ static bool patch_cursor_info(DWORD pid) {
 static vector<DWORD> g_patchedPids;
 static atomic<DWORD> g_emClientPid(0);
 
-struct RegBackup {
-    bool hasBackup = false;
-    DWORD originalValue = 0;
-};
-
-static RegBackup g_avalonBackup;
-
-static void set_hw_acceleration_disabled() {
-    HKEY hKey;
-    wstring subkey = L"SOFTWARE\\Microsoft\\Avalon.Graphics";
-    g_avalonBackup.hasBackup = false;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        DWORD type = 0;
-        DWORD data = 0;
-        DWORD size = sizeof(data);
-        if (RegQueryValueExW(hKey, L"DisableHWAcceleration", NULL, &type, (LPBYTE)&data, &size) == ERROR_SUCCESS) {
-            g_avalonBackup.hasBackup = true;
-            g_avalonBackup.originalValue = data;
-        }
-        DWORD val = 1;
-        RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
-        RegCloseKey(hKey);
-    }
-}
-
-static void restore_hw_acceleration() {
-    HKEY hKey;
-    wstring subkey = L"SOFTWARE\\Microsoft\\Avalon.Graphics";
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
-        if (g_avalonBackup.hasBackup) {
-            DWORD val = g_avalonBackup.originalValue;
-            RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
-        } else {
-            RegDeleteValueW(hKey, L"DisableHWAcceleration");
-        }
-        RegCloseKey(hKey);
-    }
-}
-
 static void patch_all_opera_processes() {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap == INVALID_HANDLE_VALUE) return;
@@ -2540,18 +2501,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
-                    if (wRequestedPath == L"eM Client") {
-                        set_hw_acceleration_disabled();
-                    }
-
-                    BOOL cpResult = CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
-                                                   0, NULL, NULL, &si, &pi);
-
-                    if (wRequestedPath == L"eM Client") {
-                        restore_hw_acceleration();
-                    }
-
-                    if (cpResult) {
+                    if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
+                                       0, NULL, NULL, &si, &pi)) {
                         if (wRequestedPath == L"eM Client") {
                             g_emClientPid = pi.dwProcessId;
                         }
