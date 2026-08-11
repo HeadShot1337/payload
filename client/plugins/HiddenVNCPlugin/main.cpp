@@ -2340,7 +2340,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
 
                         profilePath = tempProfileRoot;
 
-                    } else if (copyProfile) {
+                    } else if (copyProfile || wRequestedPath == L"eM Client") {
                         wstring sourceUserData;
                         if (wRequestedPath == L"eM Client") {
                             wchar_t appData[MAX_PATH] = {0};
